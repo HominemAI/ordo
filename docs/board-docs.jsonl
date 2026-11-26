@@ -48,6 +48,7 @@
 {"file": "plan-example-tests.md", "kind": "plan", "what": "The plan for testing Ordo through its example apps, written for an implementing agent with no context: coverage of the example tests and the ratchet, system guarantees, the untested 16, click-and-expect suites per example, the CLI's whole life, proof verification in shopfront"}
 {"file": "plan-export.md", "kind": "plan", "what": "Full space export and space deletion."}
 {"file": "plan-external-entities.md", "kind": "plan", "what": "External entities: Ordo apps reading tables another system owns in the same database; ruled 2026-10-01 and 2026-11-15"}
+{"file": "plan-federation-grants.md", "kind": "plan", "what": "Federation through the door: grants between Ordo deployments, design agreed 2026-11-26, build steps G1 to G8"}
 {"file": "plan-first-program.md", "kind": "plan", "what": "The first program: a notes app signed in to with a passkey, its program, page, deployment and measurements (17ae)."}
 {"file": "plan-idempotency.md", "kind": "plan", "what": "Durable idempotency's last window (8q)."}
 {"file": "plan-identity-service.md", "kind": "plan", "what": "Ordo's own minimal identity service: a third service in the one image for deployment people, the CLI and machines"}

@@ -574,6 +574,7 @@
     "crates/ordo-host/src/versions.rs": "all",
     "crates/ordo-host/src/versions_diff.rs": "all",
     "crates/ordo-host/src/window_ops.rs": "all",
+    "crates/ordo-host/src/input_caps.rs": "all",
     "crates/ordo-host/src/windows.rs": "all",
     "crates/ordo-host/src/workers.rs": "all"
   }

@@ -16,7 +16,9 @@
 //!   registered here, never as a client origin (review of PRs 26 and 27,
 //!   2026-11-19);
 //! - its sign-up mode ([`SignUp`]): by invite only, the default, or open,
-//!   where anyone may make an account and join it (owner, 2026-11-17).
+//!   where anyone may make an account and join it (owner, 2026-11-17);
+//! - its consumer key's public half, when it calls another deployment
+//!   ([`crate::exchange`], `plan-federation-grants.md` 5).
 //!
 //! **Who may have a token for which deployment.** A person holds the
 //! home's tokens while their account has home access (`people.home`, true
@@ -43,6 +45,7 @@
 use ordo_exec::{sql_lit, Pool, TxConn};
 pub use ordo_identity::deployment_token::ROLE_ADMIN;
 use ordo_identity::origin::Origin;
+use ordo_identity::webauthn::{b64url_decode, b64url_encode};
 use serde_json::{json, Value};
 
 use crate::audit::{self, Entry};
@@ -113,6 +116,10 @@ pub struct Registered {
     pub return_urls: Vec<String>,
     /// How people join it.
     pub sign_up: SignUp,
+    /// The public half of its consumer key, which signs the client
+    /// assertions it calls another deployment with
+    /// (`plan-federation-grants.md` 5). `None`: it calls no one.
+    pub consumer_key: Option<[u8; 32]>,
     pub created_by: String,
     pub created_at: u64,
 }
@@ -126,6 +133,7 @@ impl Registered {
             "returnUrls": self.return_urls,
             "trustedAppOrigins": self.trusted_app_origins().iter().map(Origin::to_string).collect::<Vec<_>>(),
             "signUp": self.sign_up.as_str(),
+            "consumerKey": self.consumer_key.as_ref().map(|k| b64url_encode(k)),
             "createdBy": self.created_by,
             "createdAt": self.created_at,
         })
@@ -170,11 +178,14 @@ pub struct Registration {
     pub return_urls: Vec<String>,
     /// `invite` unless asked.
     pub sign_up: SignUp,
+    /// The public half of its consumer key, as [`parse_consumer_key`]
+    /// reads it, when given.
+    pub consumer_key: Option<String>,
 }
 
 impl Registration {
     /// From a JSON body: `{handle, clientOrigins: [..], returnUrls?: [..],
-    /// signUp?: "invite" | "open"}`.
+    /// signUp?: "invite" | "open", consumerKey?: "<base64url>"}`.
     pub fn from_body(b: &Value) -> Result<Registration, IdentityError> {
         let list = |name: &str| -> Result<Vec<String>, IdentityError> {
             match b.get(name) {
@@ -203,6 +214,15 @@ impl Registration {
             client_origins: list("clientOrigins")?,
             return_urls: list("returnUrls")?,
             sign_up: SignUp::from_body(b)?.unwrap_or_default(),
+            consumer_key: match b.get("consumerKey") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(k)) => Some(k.clone()),
+                Some(_) => {
+                    return Err(IdentityError::BadRequest(
+                        "`consumerKey` is the public key, base64url, as a string".into(),
+                    ))
+                }
+            },
         })
     }
 
@@ -269,15 +289,40 @@ impl Registration {
                     .into(),
             ));
         }
+        let consumer_key = self
+            .consumer_key
+            .as_deref()
+            .map(parse_consumer_key)
+            .transpose()?;
         Ok(Registered {
             handle: handle.to_string(),
             client_origins: origins,
             return_urls: returns,
             sign_up: self.sign_up,
+            consumer_key,
             created_by: String::new(),
             created_at: 0,
         })
     }
+}
+
+/// A consumer key's public half as registered: 43 base64url characters,
+/// the 32 bytes of an Ed25519 public key
+/// (`ordo_identity::peer_token::public_text`).
+pub fn parse_consumer_key(text: &str) -> Result<[u8; 32], IdentityError> {
+    let bad = || {
+        IdentityError::BadRequest(format!(
+            "consumer key `{}` is not an Ed25519 public key: give its 32 bytes as 43 base64url \
+             characters, as the deployment prints it",
+            text.chars().take(64).collect::<String>()
+        ))
+    };
+    let bytes: [u8; 32] = b64url_decode(text.trim())
+        .map_err(|_| bad())?
+        .try_into()
+        .map_err(|_| bad())?;
+    ed25519_dalek::VerifyingKey::from_bytes(&bytes).map_err(|_| bad())?;
+    Ok(bytes)
 }
 
 /// A URL as an origin and a path: `scheme://host[:port]/path`, with no
@@ -371,6 +416,7 @@ fn row(r: &ordo_exec::TextRow) -> Registered {
         handle: text(r, 0),
         client_origins: words(1).iter().filter_map(|o| Origin::parse(o)).collect(),
         return_urls: words(2),
+        consumer_key: cell(r, 6).and_then(|k| parse_consumer_key(k).ok()),
         created_by: text(r, 3),
         created_at: num(r, 4).unwrap_or(0),
         sign_up: if text(r, 5) == SignUp::Open.as_str() {
@@ -381,7 +427,8 @@ fn row(r: &ordo_exec::TextRow) -> Registered {
     }
 }
 
-const COLUMNS: &str = "handle, client_origins, return_urls, created_by, created_at, sign_up";
+const COLUMNS: &str =
+    "handle, client_origins, return_urls, created_by, created_at, sign_up, consumer_key";
 
 /// Every live deployment registered with the service, by handle.
 pub async fn list(pool: &Pool, home: &str) -> Result<Vec<Registered>, IdentityError> {
@@ -454,26 +501,28 @@ pub async fn register(
     let done = tx
         .rows(&format!(
             "INSERT INTO deployments (deployment, handle, client_origins, return_urls, \
-             created_by, created_at, sign_up) VALUES ({}, {}, {}, {}, {}, {now}, {}) \
-             ON CONFLICT (deployment, handle) DO UPDATE SET client_origins = \
+             created_by, created_at, sign_up, consumer_key) VALUES ({}, {}, {}, {}, {}, {now}, \
+             {}, {}) ON CONFLICT (deployment, handle) DO UPDATE SET client_origins = \
              EXCLUDED.client_origins, return_urls = EXCLUDED.return_urls, created_by = \
              EXCLUDED.created_by, created_at = EXCLUDED.created_at, sign_up = \
-             EXCLUDED.sign_up, ended_at = NULL, ended_by = NULL \
-             WHERE deployments.ended_at IS NOT NULL RETURNING 1",
+             EXCLUDED.sign_up, consumer_key = EXCLUDED.consumer_key, ended_at = NULL, \
+             ended_by = NULL WHERE deployments.ended_at IS NOT NULL RETURNING 1",
             sql_lit(home),
             sql_lit(&reg.handle),
             sql_lit(&origins),
             sql_lit(&returns),
             sql_lit(by.id),
             sql_lit(reg.sign_up.as_str()),
+            key_lit(reg.consumer_key.as_ref()),
         ))
         .await?;
     if done.is_empty() {
         return Err(IdentityError::DeploymentTaken(reg.handle));
     }
     let detail = format!(
-        "clients={origins} returns={returns} sign-up={}",
-        reg.sign_up.as_str()
+        "clients={origins} returns={returns} sign-up={} consumer-key={}",
+        reg.sign_up.as_str(),
+        key_id_text(reg.consumer_key.as_ref())
     );
     audit::append(
         &tx,
@@ -610,8 +659,10 @@ pub async fn set_addresses(
             .clone()
             .unwrap_or_else(|| was.return_urls.clone()),
         sign_up: was.sign_up,
+        consumer_key: None,
     };
     let mut reg = next.check(home)?;
+    reg.consumer_key = was.consumer_key;
     let origins = reg
         .client_origins
         .iter()
@@ -653,6 +704,64 @@ pub async fn set_addresses(
     reg.created_by = was.created_by;
     reg.created_at = was.created_at;
     Ok(reg)
+}
+
+fn key_lit(key: Option<&[u8; 32]>) -> String {
+    key.map_or_else(|| "NULL".to_string(), |k| sql_lit(&b64url_encode(k)))
+}
+
+/// What the audit log says of a consumer key: its RFC 7638 thumbprint, or
+/// `none`.
+fn key_id_text(key: Option<&[u8; 32]>) -> String {
+    key.and_then(|k| ed25519_dalek::VerifyingKey::from_bytes(k).ok())
+        .map_or_else(
+            || "none".to_string(),
+            |k| ordo_identity::deployment_token::key_id(&k),
+        )
+}
+
+/// Set or replace a registered deployment's consumer key, or remove it
+/// with `None`. Replacing it is how a deployment rotates its key: an
+/// assertion signed with the old key is refused from then on. Recorded.
+pub async fn set_consumer_key(
+    pool: &Pool,
+    home: &str,
+    keys: &KeyRing,
+    handle: &str,
+    key: Option<&[u8; 32]>,
+    by: Actor<'_>,
+    now: u64,
+) -> Result<(), IdentityError> {
+    let tx = pool.begin().await?;
+    let done = tx
+        .rows(&format!(
+            "UPDATE deployments SET consumer_key = {} WHERE {} AND handle = {} \
+             AND ended_at IS NULL RETURNING 1",
+            key_lit(key),
+            dep(home),
+            sql_lit(handle)
+        ))
+        .await?;
+    if done.is_empty() {
+        return Err(IdentityError::UnknownDeployment(handle.to_string()));
+    }
+    audit::append(
+        &tx,
+        home,
+        keys,
+        &Entry {
+            actor: by.id,
+            action: "deployment.consumer-key",
+            subject: handle,
+            outcome: "ok",
+            client: by.client,
+            detail: &key_id_text(key),
+        },
+        now,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// End a registration: no new token for it from now on, and every live
@@ -974,6 +1083,7 @@ mod tests {
             client_origins: origins.iter().map(|s| s.to_string()).collect(),
             return_urls: returns.iter().map(|s| s.to_string()).collect(),
             sign_up: SignUp::Invite,
+            consumer_key: None,
         }
     }
 

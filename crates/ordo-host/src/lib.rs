@@ -93,6 +93,7 @@ pub mod guess_limits;
 pub mod identity_keys;
 pub mod identity_ops;
 pub mod identity_removal;
+pub mod input_caps;
 pub mod invalidation;
 pub mod invite_ops;
 pub mod layered_limits;

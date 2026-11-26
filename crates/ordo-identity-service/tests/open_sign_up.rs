@@ -41,6 +41,7 @@ async fn three(name: &str, extra: &[(&str, &str)]) -> H {
                     client_origins: vec![origin.into()],
                     return_urls: vec![format!("{origin}/")],
                     sign_up,
+                    consumer_key: None,
                 },
             )
             .await

@@ -4435,18 +4435,29 @@ async fn versions_set(flags: Flags) -> Outcome {
         };
         return named_set(&flags, setting, value, reason).await;
     }
+    // The input caps (owner, 2026-11-25).
+    if name.trim().starts_with("limits.") {
+        let Some(setting) = ordo_host::input_caps::setting_name(&name) else {
+            return Outcome::usage(format!(
+                "`{name}` is not an input cap; there are {}\n",
+                ordo_host::input_caps::SETTINGS.map(|(n, ..)| n).join(", ")
+            ));
+        };
+        return named_set(&flags, setting, value, reason).await;
+    }
     if name.trim() == ordo_host::dual_writes::SOAK_SETTING {
         return named_set(&flags, ordo_host::dual_writes::SOAK_SETTING, value, reason).await;
     }
     let Some(setting) = ordo_host::versions::VersionSetting::parse(&name) else {
         return Outcome::usage(format!(
             "`{name}` is not a version setting; there are {}, `soak.length`, the backfill \
-             settings {} and the window settings {}\n",
+             settings {}, the window settings {} and the input caps {}\n",
             ordo_host::versions::VersionSetting::ALL
                 .map(|s| format!("`{}`", s.command().trim_start_matches("ordo versions set ")))
                 .join(", "),
             ordo_host::backfill::SETTINGS.join(", "),
-            ordo_host::windows::SETTINGS.map(|(n, ..)| n).join(", ")
+            ordo_host::windows::SETTINGS.map(|(n, ..)| n).join(", "),
+            ordo_host::input_caps::SETTINGS.map(|(n, ..)| n).join(", ")
         ));
     };
     let host = match door_only(&flags) {

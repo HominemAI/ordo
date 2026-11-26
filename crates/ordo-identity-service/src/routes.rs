@@ -29,6 +29,7 @@
 //! | `GET /deployments`, `POST /deployments`, `POST /deployments/{handle}/end` | bearer, the service's own | the deployments registered here ([`crate::deployments`]) |
 //! | `POST /deployments/{handle}/sign-up` | bearer, the service's own | `{signUp: "invite" \| "open"}`: how people join it |
 //! | `POST /deployments/{handle}/addresses` | bearer, the service's own | `{clientOrigins?, returnUrls?}`: replace either list |
+//! | `POST /deployments/{handle}/consumer-key` | bearer, the service's own or that deployment's | `{consumerKey: "<base64url>" \| null}`: set, replace or remove the public half of its consumer key ([`crate::exchange`]) |
 //! | `GET /deployments/{handle}/members`, `POST /deployments/{handle}/members`, `POST /deployments/{handle}/members/{person}/end` | bearer | a deployment's members |
 //!
 //! A bearer token for a registered deployment reaches that deployment's
@@ -219,6 +220,10 @@ pub(crate) fn routes() -> Router<Service> {
         .route(
             "/deployments/{handle}/addresses",
             post(deployment_addresses),
+        )
+        .route(
+            "/deployments/{handle}/consumer-key",
+            post(deployment_consumer_key),
         )
         .route(
             "/deployments/{handle}/members",
@@ -1109,6 +1114,43 @@ async fn deployment_addresses(
             let asked = deployments::Addresses::from_body(&b)?;
             let made = s.set_addresses(c.actor(), &handle, &asked).await?;
             Ok(Reply::json(made.json()))
+        }
+        .await,
+    )
+}
+
+/// `{consumerKey: "<base64url>" | null}`: set, replace or remove a
+/// registered deployment's consumer key. The callers that register it, or
+/// an admin of that deployment itself, so a deployment can register its
+/// own key with a token it already holds.
+async fn deployment_consumer_key(
+    State(s): State<Service>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    respond(
+        async {
+            let c = caller(&s, &headers).await?;
+            may_reach(&s, &c, &handle)?;
+            c.may_admin(s.now())?;
+            let b = parse(&body)?;
+            let key = match b.get("consumerKey") {
+                Some(Value::Null) => None,
+                Some(Value::String(k)) => Some(deployments::parse_consumer_key(k)?),
+                _ => {
+                    return Err(IdentityError::BadRequest(
+                        "`consumerKey` is required: the public key, base64url, or null to \
+                         remove it"
+                            .into(),
+                    ))
+                }
+            };
+            s.set_consumer_key(c.actor(), &handle, key.as_ref()).await?;
+            Ok(Reply::json(json!({
+                "handle": handle,
+                "consumerKey": key.as_ref().map(|k| ordo_identity::webauthn::b64url_encode(k)),
+            })))
         }
         .await,
     )

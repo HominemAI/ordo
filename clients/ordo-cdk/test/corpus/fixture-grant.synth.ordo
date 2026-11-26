@@ -1,0 +1,20 @@
+grant note_viewer {
+  std.notes.get
+  std.notes.list
+  /std\.notesAccess\..*/
+  /a\/b/
+  !std.notes.delete
+}
+
+grant billing as itself {
+  *
+  !/std\..*/
+}
+
+grant provider hominem {
+  std.notes.get
+}
+
+entity notes {
+  title: text
+}

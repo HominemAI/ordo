@@ -37,6 +37,7 @@ pub mod commands;
 pub mod config;
 pub mod deployments;
 pub mod error;
+pub mod exchange;
 pub mod flows;
 pub mod import;
 pub mod invites;

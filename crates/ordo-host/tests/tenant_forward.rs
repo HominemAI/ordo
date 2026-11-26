@@ -129,7 +129,7 @@ impl World {
         cap: Option<usize>,
     ) -> World {
         let control = empty_db(&format!("ordo_tf_{stem}_control")).await;
-        ordo_host::apply_op::run_program(
+        run_all_at_once(
             &control,
             &SinglePool::new(control.clone()),
             v1,
@@ -206,8 +206,8 @@ async fn version_of(pool: &Pool) -> String {
     }
 }
 
-/// The deployment's own database takes a change the way `ordo migrate
-/// --apply` does before an `ordo apply`.
+/// The deployment's own database takes a change the way `ordo evolve
+/// --run` does before an `ordo apply`.
 async fn migrate(control: &Pool, program: &Program) {
     let (_, applied) = ordo_host::schema_apply::apply(control, program, "test", "migrate").await;
     applied.expect("the deployment's own database takes the change");
@@ -253,7 +253,7 @@ async fn an_apply_brings_every_attached_tenant_to_the_new_version() {
     assert_eq!(w.spaces.awaiting_schema(), ["spc_a", "spc_b"]);
 
     migrate(&w.control, &v2).await;
-    let report = ordo_host::apply_op::run_program(
+    let report = run_all_at_once(
         &w.control,
         w.pools.as_ref(),
         &v2,
@@ -279,7 +279,7 @@ async fn an_apply_brings_every_attached_tenant_to_the_new_version() {
 
     // The same apply again writes nothing to a database already there.
     let before = version_of(&a).await;
-    let again = ordo_host::apply_op::run_program(
+    let again = run_all_at_once(
         &w.control,
         w.pools.as_ref(),
         &v2,
@@ -313,7 +313,7 @@ async fn a_program_applied_to_the_deployments_own_database_reaches_tenants_by_th
     w.attach("spc_b", "ordo_tf_direct_b").await;
 
     migrate(&w.control, &v2).await;
-    let report = ordo_host::apply_op::run_program(
+    let report = run_all_at_once(
         &w.control,
         &SinglePool::new(w.control.clone()),
         &v2,
@@ -357,7 +357,7 @@ async fn a_sweep_brings_a_tenant_nobody_has_asked_for() {
     let a = tenant_db_at("ordo_tf_sweep_a", &v1).await;
     w.attach("spc_a", "ordo_tf_sweep_a").await;
     migrate(&w.control, &v2).await;
-    ordo_host::apply_op::run_program(
+    run_all_at_once(
         &w.control,
         &SinglePool::new(w.control.clone()),
         &v2,
@@ -411,7 +411,7 @@ async fn a_program_with_a_function_reaches_tenants_by_the_catch_up() {
     let a = tenant_db_at("ordo_tf_withfn_a", &v1).await;
     w.attach("spc_a", "ordo_tf_withfn_a").await;
     migrate(&w.control, &v2).await;
-    ordo_host::apply_op::run_program(
+    run_all_at_once(
         &w.control,
         &SinglePool::new(w.control.clone()),
         &v2,
@@ -454,7 +454,7 @@ async fn a_sweep_moves_several_at_once_and_the_cap_holds() {
         .await
         .expect("duplicate titles");
     migrate(&w.control, &v2).await;
-    ordo_host::apply_op::run_program(
+    run_all_at_once(
         &w.control,
         &SinglePool::new(w.control.clone()),
         &v2,
@@ -490,7 +490,7 @@ async fn a_cap_of_one_moves_them_one_at_a_time() {
         w.attach(&format!("spc_cap1_{i}"), &db).await;
     }
     migrate(&w.control, &v2).await;
-    ordo_host::apply_op::run_program(
+    run_all_at_once(
         &w.control,
         &SinglePool::new(w.control.clone()),
         &v2,
@@ -523,7 +523,7 @@ async fn a_database_that_was_down_during_the_apply_is_brought_forward_when_it_re
     w.attach("spc_gone", "ordo_tf_down_gone").await;
 
     migrate(&w.control, &v2).await;
-    let report = ordo_host::apply_op::run_program(
+    let report = run_all_at_once(
         &w.control,
         w.pools.as_ref(),
         &v2,
@@ -580,7 +580,7 @@ async fn a_refused_change_keeps_that_tenant_closed_with_the_reason_and_serves_th
     w.attach("spc_fine", "ordo_tf_refused_fine").await;
 
     migrate(&w.control, &v2).await;
-    let report = ordo_host::apply_op::run_program(
+    let report = run_all_at_once(
         &w.control,
         w.pools.as_ref(),
         &v2,
@@ -666,7 +666,7 @@ async fn a_dropped_field_leaves_the_column_and_moves_the_version() {
         "behind until the apply reaches it"
     );
 
-    let report = ordo_host::apply_op::run_program(
+    let report = run_all_at_once(
         &w.control,
         w.pools.as_ref(),
         &after,
@@ -697,13 +697,71 @@ async fn a_dropped_field_leaves_the_column_and_moves_the_version() {
     assert!(w.serves("spc_t").await);
 }
 
+/// A program that reads `extra`, and the next one that drops it and adds
+/// `note`: notes v3's shape (an addition beside a drop the serving version
+/// still reads).
+const READS_EXTRA: &str = "entity task {\n  title: text\n  done:  bool\n  extra: text?\n}\n\n\
+                           op openTasks unbounded =\n  task[title, done, extra]\n";
+const ADDS_NOTE_DROPS_EXTRA: &str = "entity task {\n  title: text\n  done:  bool\n  \
+                                     note:  text?\n}\n\n\
+                                     op openTasks unbounded =\n  task[title, done]\n";
+
+/// **An addition beside a drop applies** (increment 7a, found by notes v3).
+/// Until 2026-11-23 the drop's `drop_read_by_active_op` refused the whole
+/// apply, addition included, as `not activated`. Now the addition lands on
+/// the deployment's own database and the tenant's, and the dropped column
+/// stays with its data, as a drop alone does.
+///
+/// A regression looks like the apply refused naming the new field, or the
+/// `extra` column gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_addition_beside_a_drop_the_serving_version_reads_applies() {
+    let _serial = SERIAL.lock().await;
+    let before = Program::compile(READS_EXTRA).expect("reads extra");
+    let after = Program::compile(ADDS_NOTE_DROPS_EXTRA).expect("adds note");
+    let w = World::new("adddrop", &before, &after, ADDS_NOTE_DROPS_EXTRA).await;
+    let t = tenant_db_at("ordo_tf_adddrop_t", &before).await;
+    w.attach("spc_t", "ordo_tf_adddrop_t").await;
+
+    let report = run_all_at_once(
+        &w.control,
+        w.pools.as_ref(),
+        &after,
+        vec![],
+        "test",
+        "test.apply",
+        true,
+    )
+    .await
+    .expect("the addition applies beside the drop");
+    assert!(
+        matches!(
+            report.schema,
+            ordo_host::apply_op::SchemaOutcome::Migrated { .. }
+        ),
+        "{report:?}"
+    );
+    assert_eq!(report.tenants.advanced, 1, "{report:?}");
+    for db in [&w.control, &t] {
+        assert!(
+            column_exists(db, "task", "note").await,
+            "the addition landed"
+        );
+        assert!(
+            column_exists(db, "task", "extra").await,
+            "the drop is pending"
+        );
+        assert_eq!(version_of(db).await, after.version);
+    }
+}
+
 // ── a database on its own tenant's pin ──────────────────────────────────
 
 /// `v2` applied straight to the deployment's own database, as `ordo
 /// apply` does, so the catch-up has `v2` to bring tenants to.
 async fn serving_v2(w: &World, v2: &Program) {
     migrate(&w.control, v2).await;
-    ordo_host::apply_op::run_program(
+    run_all_at_once(
         &w.control,
         &SinglePool::new(w.control.clone()),
         v2,
@@ -782,4 +840,30 @@ async fn bringing_one_space_forward_leaves_a_tenant_pinned_elsewhere() {
     let caught = w.catchup.forward_space("spc_a").await;
     assert_eq!(caught, Caught::Pinned(v1.version.clone()));
     assert_eq!(version_of(&a).await, v1.version);
+}
+
+/// `apply_op::run_program` with `rollout.strategy` set to `all` first. With
+/// it unset, a deployment that is not dev rolls an apply out a batch at a
+/// time (ruled 2026-11-25); these tests apply and expect every tenant on
+/// the new version at once.
+async fn run_all_at_once(
+    pool: &ordo_exec::Pool,
+    pools: &dyn ordo_exec::route::PoolResolver,
+    program: &ordo_host::schema_apply::Program,
+    notes: Vec<String>,
+    actor: &str,
+    op: &str,
+    activate: bool,
+) -> Result<ordo_host::apply_op::Report, ordo_host::apply_op::ApplyRefused> {
+    ordo_host::rollouts::Rollouts::on(pool)
+        .set_setting(
+            "rollout.strategy",
+            Some("all"),
+            "test",
+            "every tenant at once",
+            0,
+        )
+        .await
+        .expect("rollout.strategy all");
+    ordo_host::apply_op::run_program(pool, pools, program, notes, actor, op, activate).await
 }

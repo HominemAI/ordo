@@ -291,6 +291,7 @@ fn a_command_group_body_is_not_a_security_body() {
             at: Timestamp(1),
         }],
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: None,
     };
@@ -768,6 +769,8 @@ fn a_grant_for_another_space_is_no_relationship_with_this_one() {
         "openTasks",
         ordo_identity::OpPin {
             manifest_hash: ManifestHash([1u8; 32]),
+            version: None,
+            contract: false,
             unguarded: false,
             entities: Vec::new(),
         },
@@ -1038,6 +1041,17 @@ fn every_deny_reason_maps_to_a_distinct_recorded_decision() {
         DenyReason::DelegationBeyondDelegator,
         DenyReason::DelegationNotLive,
         DenyReason::OpNotDelegable,
+        DenyReason::VersionsDisagree {
+            pinned: "0.1.0".into(),
+            serving: "0.2.0".into(),
+            op: "noteList".into(),
+            entity: Some("notes".into()),
+            detail: "`notes`: the read guard differs".into(),
+        },
+        DenyReason::GrantKilledByMove {
+            from: "0.1.0".into(),
+            to: "0.2.0".into(),
+        },
     ];
     let mapped: BTreeSet<RecordedDecision> = reasons.iter().map(RecordedDecision::from).collect();
     assert_eq!(
@@ -1067,6 +1081,11 @@ fn every_deny_reason_maps_to_a_distinct_recorded_decision() {
         RecordedDecision::DeploymentTokenExpired,
         RecordedDecision::OutsideDeploymentRealm,
         RecordedDecision::ConsoleKeyClosed,
+        RecordedDecision::VersionsDisagree,
+        RecordedDecision::GrantKilledByMove,
+        RecordedDecision::PeerTokenRefused,
+        RecordedDecision::ConsumerNotGranted,
+        RecordedDecision::PeerLoop,
     ] {
         assert_eq!(RecordedDecision::from_tag(d.tag()), Some(d));
     }

@@ -70,6 +70,10 @@ const REPLAY_POLL_INTERVAL: Duration = Duration::from_millis(5);
 /// than guessing at its case.
 pub const SPACE_HEADER: &str = "x-ordo-space";
 
+/// The program version serving the answer's tenant (`plan-versions.md`
+/// §1.9), on every answer past the door.
+pub const TENANT_VERSION_HEADER: &str = "x-ordo-tenant-version";
+
 /// The header form of `$page`. Cursors are **data**, not addressing: a token
 /// in a query string lands in proxy logs, browser history, and `Referer`
 /// headers (SH-6), so generated SDKs prefer this. The query form stays
@@ -259,6 +263,29 @@ async fn fn_body(
     Ok(Bytes::from(out))
 }
 
+/// `op_not_in_version`, when `name` is declared by a program version this
+/// deployment serves other than `space`'s, and `token` may call it there.
+/// `None` otherwise, and the caller gets the unregistered op's answer. The
+/// refusal names no version: version detail is the deployment owner's.
+fn not_in_version(state: &ApiState, token: &str, space: &str, name: &str) -> Option<ApiError> {
+    if !state.registry.current().declared_elsewhere(space, name) {
+        return None;
+    }
+    match state.access.check(token, space, name) {
+        AccessDecision::Allow { .. } => Some(
+            ApiError::new(
+                ErrorCode::OpNotInVersion,
+                format!(
+                    "`{name}` is not in the program version this space is served now. The app \
+                     is newer or older than the space: reload it, or wait for the space to move"
+                ),
+            )
+            .with_op(name),
+        ),
+        AccessDecision::Deny => None,
+    }
+}
+
 /// The caller may read files, checked as `GET /blob/{handle}` checks it
 /// (`std.$blob.get`), before a function with a `blob` argument runs. The
 /// row guard is the second half, when the runner reads each file.
@@ -289,7 +316,7 @@ async fn fn_dispatch(
     if let Some(refusal) = token_refusal(&state, &headers, &name).await {
         return refusal.into_response();
     }
-    let Some(spec) = functions.spec(&name) else {
+    let Some(spec) = functions.spec_in(named_space(&headers), &name) else {
         let token = bearer(&headers);
         let why = match token {
             None => DoorRefusal::TokenMissing,
@@ -344,11 +371,14 @@ async fn run_function(
         (replay_key, fingerprint)
     });
     if let Some((replay_key, fingerprint)) = &slot {
+        let prior = prior_hash(state, &space, spec)
+            .map(|h| RequestFingerprint::compute(&space, &spec.name, &h, &bound, None, None));
         if let Some(outcome) = reserve_or_replay(
             state,
             spec,
             replay_key,
             fingerprint,
+            prior,
             KeyBinding::UntilExpiry,
         )
         .await?
@@ -514,11 +544,21 @@ async fn blob_gate(
 /// a tenant not ready, a store behind, a presence touch owed, or the
 /// door's one denial.
 fn access_refusal(state: &ApiState, token: &str, space: &str, op: &str) -> ApiError {
+    // Another deployment's call the holder refused by name (G3).
+    if let Some(why) = state.access.peer_refused(token, space, op) {
+        return ApiError::new(ErrorCode::AccessDenied, why).with_op(op);
+    }
     match state.access.not_ready(token, space) {
         Some(wait) => ApiError::tenant_not_ready(op, wait),
         None if state.access.behind(token, space) => ApiError::server_busy().with_op(op),
         None if state.access.presence_required(token, space, op) => ApiError::presence_required(op),
-        None => denied_after_check(op, Some(token)),
+        None => match state.access.grant_killed(token, space, op) {
+            Some(why) => ApiError::new(ErrorCode::AccessDenied, why).with_op(op),
+            None => match state.access.versions_disagree(token, space, op) {
+                Some(why) => ApiError::new(ErrorCode::VersionsDisagree, why).with_op(op),
+                None => denied_after_check(op, Some(token)),
+            },
+        },
     }
 }
 
@@ -817,6 +857,14 @@ async fn dispatch(
     else {
         // An op nobody registered answers exactly as a forbidden op does.
         let token = bearer(&headers);
+        // Except an op another served version declares, asked by a caller
+        // the door would let call it (`plan-versions.md` §1.9): the app is
+        // newer or older than the tenant, and it gets its own answer.
+        if let (Some(t), Some(space)) = (token, named_space(&headers)) {
+            if let Some(refusal) = not_in_version(&state, t, space, &name) {
+                return refusal.into_response();
+            }
+        }
         if token.is_none() {
             state.public.count("-", "door", "refused");
         }
@@ -907,7 +955,7 @@ async fn dispatch(
         // so any page may read it (`design-public-path.md` §8).
         let mut response = response;
         response.extensions_mut().insert(crate::cors::PublicAnswer);
-        return with_version_headers(response, &op, &headers);
+        return with_version_headers(&state, response, &op, &headers);
     }
     let response = if method == Method::GET && wants_live(&query) {
         let resume = headers
@@ -938,7 +986,7 @@ async fn dispatch(
             Err(err) => err.into_response(),
         }
     };
-    with_version_headers(kept_off_disk(response), &op, &headers)
+    with_version_headers(&state, kept_off_disk(response), &op, &headers)
 }
 
 /// A member's answer is never stored by the browser's HTTP cache.
@@ -1011,7 +1059,17 @@ pub(crate) async fn token_refusal(
 pub(crate) struct Door {
     state: ApiState,
     headers: HeaderMap,
+    /// The program version each space the feed reads was served when the
+    /// feed first read it (`OpRegistry::version_in`). A pass that finds
+    /// another ends the feed with `version_changed` (`plan-versions.md`
+    /// §1.4).
+    versions: Admitted,
 }
+
+/// Space to the version a feed was admitted under. Shared by a `/live`
+/// stream's door and its table entry, so a read added later records its
+/// version when it is added.
+pub(crate) type Admitted = Arc<std::sync::Mutex<HashMap<String, Option<String>>>>;
 
 impl Door {
     pub(crate) fn new(state: &ApiState, headers: &HeaderMap) -> Door {
@@ -1023,7 +1081,43 @@ impl Door {
         Door {
             state: state.clone(),
             headers: kept,
+            versions: Admitted::default(),
         }
+    }
+
+    /// Record the version `space` is served now, unless one is recorded.
+    pub(crate) fn note_version(&self, space: &str) {
+        note_version(&self.state, &self.versions, space);
+    }
+
+    /// The table of versions this door was admitted under.
+    pub(crate) fn admitted(&self) -> Admitted {
+        self.versions.clone()
+    }
+
+    /// `version_changed` when `space` is served another version than the
+    /// one recorded for it. The first pass for a space records it.
+    fn version_check(&self, space: &str) -> Result<(), ApiError> {
+        let now = self.state.registry.current().version_in(space);
+        let mut seen = self.versions.lock().unwrap_or_else(|p| p.into_inner());
+        match seen.get(space) {
+            Some(was) if *was != now => Err(ApiError::version_changed()),
+            Some(_) => Ok(()),
+            None => {
+                seen.insert(space.to_string(), now);
+                Ok(())
+            }
+        }
+    }
+
+    /// A re-check ticker for this door's feed: every
+    /// [`crate::LiveSettings::recheck`], and at once when the host asks
+    /// every feed to ([`crate::LiveStreams::recheck_now`]).
+    pub(crate) fn ticker(&self) -> Recheck {
+        recheck_ticker(
+            self.state.live_streams.settings().recheck,
+            self.state.live_streams.nudged(),
+        )
     }
 
     /// The token gate alone: what holds for the token whatever it reads.
@@ -1041,21 +1135,18 @@ impl Door {
     /// caller the access check admitted learns of the pause.
     pub(crate) fn access(&self, op: &OpSpec, space: &str) -> Result<(), ApiError> {
         check_access(&self.state, op, space, &self.headers)?;
-        match self.state.executor.held(op, space) {
-            Some(e) => Err(ApiError::from_exec(op, e)),
-            None => Ok(()),
+        if let Some(e) = self.state.executor.held(op, space) {
+            return Err(ApiError::from_exec(op, e));
         }
+        // Last: only a caller the door still admits learns that the
+        // tenant's version moved.
+        self.version_check(space)
     }
 
     /// The whole door for one read: the token gate, then the access check.
     pub(crate) async fn admit(&self, op: &OpSpec, space: &str) -> Result<(), ApiError> {
         self.token(&op.name).await?;
         self.access(op, space)
-    }
-
-    /// How often a quiet feed asks the door anyway.
-    pub(crate) fn recheck(&self) -> Duration {
-        self.state.live_streams.settings().recheck
     }
 }
 
@@ -1070,7 +1161,9 @@ pub(crate) fn refusal_frame(e: &ApiError, key: Option<&str>) -> Event {
     if let (Some(key), Some(obj)) = (key, body.as_object_mut()) {
         obj.insert("key".into(), Value::String(key.to_string()));
     }
-    let name = if e.code == ErrorCode::SpacePaused {
+    let name = if e.version_moved {
+        crate::error::VERSION_CHANGED_EVENT
+    } else if e.code == ErrorCode::SpacePaused {
         "space_paused"
     } else {
         "error"
@@ -1078,12 +1171,48 @@ pub(crate) fn refusal_frame(e: &ApiError, key: Option<&str>) -> Event {
     Event::default().event(name).data(body.to_string())
 }
 
-/// A ticker for [`Door::recheck`] whose first tick is one period away, not
-/// now: the feed was admitted a moment ago.
-pub(crate) fn recheck_ticker(period: Duration) -> tokio::time::Interval {
-    let mut t = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
-    t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    t
+/// Record the version `space` is served now in `versions`, unless one is
+/// recorded there.
+pub(crate) fn note_version(state: &ApiState, versions: &Admitted, space: &str) {
+    let now = state.registry.current().version_in(space);
+    versions
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .entry(space.to_string())
+        .or_insert(now);
+}
+
+/// A feed's re-check: a tick every period, the first one period away (the
+/// feed was admitted a moment ago), and one at once whenever the host asks
+/// every feed to ([`crate::LiveStreams::recheck_now`]).
+pub(crate) struct Recheck {
+    every: tokio::time::Interval,
+    nudge: tokio::sync::watch::Receiver<u64>,
+}
+
+impl Recheck {
+    /// Wait for the next re-check. Cancel-safe, as `select!` needs.
+    pub(crate) async fn tick(&mut self) {
+        tokio::select! {
+            _ = self.every.tick() => {}
+            changed = self.nudge.changed() => {
+                if changed.is_err() {
+                    // The table is gone, so no nudge can come: the period
+                    // alone.
+                    self.every.tick().await;
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn recheck_ticker(
+    period: Duration,
+    nudge: tokio::sync::watch::Receiver<u64>,
+) -> Recheck {
+    let mut every = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    Recheck { every, nudge }
 }
 
 fn wants_live(query: &HashMap<String, String>) -> bool {
@@ -1557,20 +1686,40 @@ pub(crate) fn check_access(
         )),
         Some(token) => match state.access.check(token, space, &op.name) {
             AccessDecision::Allow { principal, agent } => Ok((principal, agent, space.to_string())),
-            AccessDecision::Deny => match state.access.not_ready(token, space) {
-                // The person's own tenant, still being set up: a retryable
-                // refusal rather than the uniform denial.
-                Some(wait) => Err(ApiError::tenant_not_ready(&op.name, wait)),
-                // The door's member list for this tenant is behind its
-                // database: a retryable 503, never a denial it cannot back.
-                None if state.access.behind(token, space) => {
-                    Err(ApiError::server_busy().with_op(&op.name))
+            AccessDecision::Deny => {
+                match state.access.peer_refused(token, space, &op.name) {
+                    // Another deployment's call the holder refused by name: which
+                    // consumer, which op, the grant line to add (G3).
+                    Some(why) => Err(ApiError::new(ErrorCode::AccessDenied, why).with_op(&op.name)),
+                    None => match state.access.not_ready(token, space) {
+                        // The person's own tenant, still being set up: a retryable
+                        // refusal rather than the uniform denial.
+                        Some(wait) => Err(ApiError::tenant_not_ready(&op.name, wait)),
+                        // The door's member list for this tenant is behind its
+                        // database: a retryable 503, never a denial it cannot back.
+                        None if state.access.behind(token, space) => {
+                            Err(ApiError::server_busy().with_op(&op.name))
+                        }
+                        None if state.access.presence_required(token, space, &op.name) => {
+                            Err(ApiError::presence_required(&op.name))
+                        }
+                        // A grant pinned under another program version that
+                        // disagrees with the tenant's (`plan-versions.md` §1.7).
+                        // A grant a move killed: dead as a revoked share is
+                        // (`plan-versions.md` §2.5).
+                        None => match state.access.grant_killed(token, space, &op.name) {
+                            Some(why) => {
+                                Err(ApiError::new(ErrorCode::AccessDenied, why).with_op(&op.name))
+                            }
+                            None => match state.access.versions_disagree(token, space, &op.name) {
+                                Some(why) => Err(ApiError::new(ErrorCode::VersionsDisagree, why)
+                                    .with_op(&op.name)),
+                                None => Err(denied_after_check(&op.name, Some(token))),
+                            },
+                        },
+                    },
                 }
-                None if state.access.presence_required(token, space, &op.name) => {
-                    Err(ApiError::presence_required(&op.name))
-                }
-                None => Err(denied_after_check(&op.name, Some(token))),
-            },
+            }
         },
     }
 }
@@ -1968,11 +2117,23 @@ async fn run_call(
         KeyBinding::UntilExpiry
     };
     if let Some((replay_key, fingerprint)) = &slot {
+        // Honoured across one switch: the same request under the op as the
+        // tenant's previous version declared it (§1.9).
+        let prior = prior_hash(state, &space, op).map(|h| {
+            RequestFingerprint::compute(
+                &space,
+                &op.name,
+                &h,
+                &bound,
+                refinement.as_ref(),
+                cursor.as_ref(),
+            )
+        });
         // Reserve *before* executing (Z-012). A lookup here and a put after
         // execution would let two concurrent identical requests both miss and
         // both run.
         if let Some(outcome) =
-            reserve_or_replay(state, op, replay_key, fingerprint, binding).await?
+            reserve_or_replay(state, op, replay_key, fingerprint, prior, binding).await?
         {
             return Ok(outcome);
         }
@@ -2101,16 +2262,33 @@ async fn run_call(
 /// the call. The loser of a race never executes: it waits out the winner and
 /// replays, and if the wait budget elapses first it says
 /// `idempotency_in_flight` rather than running a second copy of the write.
+///
+/// `prior` is the same request's fingerprint under the op as the tenant's
+/// previous version declared it. A key whose stored payload matches it is
+/// honoured across that one switch (`plan-versions.md` §1.9).
+/// The op's hash in the version `space` was served before its last switch,
+/// when it differs from the hash serving it now.
+fn prior_hash(state: &ApiState, space: &str, op: &OpSpec) -> Option<String> {
+    state
+        .registry
+        .current()
+        .prior_version_hash(space, &op.name)
+        .filter(|h| *h != op.version_hash)
+}
+
 async fn reserve_or_replay(
     state: &ApiState,
     op: &OpSpec,
     replay_key: &ReplayKey,
     fingerprint: &RequestFingerprint,
+    prior: Option<RequestFingerprint>,
     binding: KeyBinding,
 ) -> Result<Option<CallOutcome>, ApiError> {
     let deadline = tokio::time::Instant::now() + REPLAY_WAIT_BUDGET;
+    let mut fingerprint = *fingerprint;
+    let mut prior = prior;
     loop {
-        match state.replay.claim(replay_key, fingerprint, binding).await {
+        match state.replay.claim(replay_key, &fingerprint, binding).await {
             ReplayClaim::Reserved => return Ok(None),
             ReplayClaim::Hit(stored) => {
                 return Ok(Some(CallOutcome {
@@ -2121,6 +2299,10 @@ async fn reserve_or_replay(
                 }));
             }
             ReplayClaim::Mismatch => {
+                if let Some(before) = prior.take() {
+                    fingerprint = before;
+                    continue;
+                }
                 return Err(ApiError::for_op(
                     ErrorCode::IdempotencyMismatch,
                     op,
@@ -2418,6 +2600,11 @@ async fn live_inner(
         return Ok(sse.into_response());
     }
 
+    // The version the tenant is served as the feed opens, recorded before
+    // the first read: a later pass that finds it on another ends the feed
+    // with `version_changed`.
+    let door = Door::new(state, headers);
+    door.note_version(space);
     let (subscription, initial) =
         subscribe_then_read(state, op, space, &gate.keyed_as(), bound, refinement).await?;
 
@@ -2436,8 +2623,7 @@ async fn live_inner(
     // tick ([`Door`]); a refusal is the feed's last frame. Signals that
     // queued behind one are answered by the same pass, so a burst of writes
     // costs one door check and one `invalidate`.
-    let door = Door::new(state, headers);
-    let tick = recheck_ticker(door.recheck());
+    let tick = door.ticker();
     let watched = (op.clone(), space.to_string());
     let invalidations = stream::unfold(
         Some((subscription, door, tick, watched)),
@@ -2766,12 +2952,19 @@ async fn live_add_inner(
         let mut bound = bind::bind_params(&op, &gate.params)?;
         gate.bind_caller(&mut bound);
         let refinement = live_refinement(state, &op, gate.refine_raw.clone(), false)?;
+        // The version the read's first envelope is read under, taken first.
+        let version = state.registry.current().version_in(space);
         let (subscription, initial) =
             subscribe_then_read(state, &op, space, &gate.keyed_as(), bound, refinement).await?;
-        match state
-            .live_streams
-            .add(stream_id, token, &add.key, subscription, &op, space)
-        {
+        match state.live_streams.add(
+            stream_id,
+            token,
+            &add.key,
+            subscription,
+            &op,
+            space,
+            version,
+        ) {
             Ok(()) => Ok((StatusCode::OK, Json(initial)).into_response()),
             Err(AddRefused::NoStream) => Err(no_such_stream()),
             Err(AddRefused::Full) => Err(full(&op)),
@@ -2779,7 +2972,7 @@ async fn live_add_inner(
     }
     .await
     .unwrap_or_else(IntoResponse::into_response);
-    Ok(with_version_headers(answer, &op, headers))
+    Ok(with_version_headers(state, answer, &op, headers))
 }
 
 /// `DELETE /live/{stream}/{key}`: drop one read. A key the stream does not
@@ -2844,9 +3037,30 @@ fn success_envelope(
 ///
 /// Applied to stage-2 responses only: announcing an op's version to a caller
 /// the door turned away would confirm the op exists, undoing [`door_denial`].
-fn with_version_headers(mut response: Response, op: &OpSpec, request: &HeaderMap) -> Response {
+///
+/// **The tenant's program version rides on every such answer**
+/// (`plan-versions.md` §1.9), as [`TENANT_VERSION_HEADER`]: during a rollout
+/// one front-end bundle meets 2 versions, and this is how it tells which it
+/// is talking to. A registry that serves one program everywhere sends none.
+fn with_version_headers(
+    state: &ApiState,
+    mut response: Response,
+    op: &OpSpec,
+    request: &HeaderMap,
+) -> Response {
     if let Ok(value) = HeaderValue::from_str(&op.version_hash) {
         response.headers_mut().insert("x-ordo-op-version", value);
+    }
+    let space = named_space(request)
+        .map(str::to_string)
+        .or_else(|| state.access.anonymous_space());
+    if let Some(version) = space
+        .and_then(|s| state.registry.current().version_in(&s))
+        .filter(|v| !v.is_empty())
+    {
+        if let Ok(value) = HeaderValue::from_str(&version) {
+            response.headers_mut().insert(TENANT_VERSION_HEADER, value);
+        }
     }
     let pinned = request.get("x-ordo-version").and_then(|v| v.to_str().ok());
     if pinned.is_some_and(|p| p != op.version_hash) {

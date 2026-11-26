@@ -677,6 +677,31 @@ impl IdentityKeys {
         )
     }
 
+    /// Verify a token another deployment presents (`ordo-peer+jwt`,
+    /// `ordo-client+jwt`; `plan-federation-grants.md` 5, step G3) against
+    /// the set held: the service signs them with the same keys. No set held
+    /// is `no-keys`.
+    pub fn verify_peer(
+        &self,
+        token: &str,
+        expect: &ordo_identity::peer_token::Expect<'_>,
+    ) -> Result<ordo_identity::peer_token::PeerClaims, ordo_identity::peer_token::PeerTokenError>
+    {
+        let jwks = self.held.read().expect("identity keys").jwks.clone();
+        let Some(jwks) = jwks else {
+            return Err(ordo_identity::peer_token::PeerTokenError::Unverifiable(
+                JoseError("no-keys"),
+            ));
+        };
+        ordo_identity::peer_token::verify(token, &jwks, expect)
+    }
+
+    /// Whether the service signed `token`, whatever it says.
+    pub fn signature_holds(&self, token: &str) -> bool {
+        let jwks = self.held.read().expect("identity keys").jwks.clone();
+        jwks.is_some_and(|j| jose::verify_with_jwks(token, &j, &[Alg::EdDSA]).is_ok())
+    }
+
     /// Fetch every [`REFRESH_SECS`] for as long as the door runs.
     pub fn spawn_refresher(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let keys = self.clone();

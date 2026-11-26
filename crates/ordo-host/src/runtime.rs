@@ -5325,10 +5325,16 @@ async fn assemble_program(
                 let _ = peer_ops.client.set(client.clone());
                 // Step G5: a peer with `ORDO_PEER_<NAME>_URL` is read
                 // through its door with the same client.
-                deployment.set_peer_reads(Arc::new(crate::peer_reads::DoorReads::new(
-                    client.clone(),
-                    Arc::new(|k: &str| std::env::var(k).ok()),
-                )));
+                // A tenant in a database of its own reads through the
+                // door too; its people's sign-in links are in the
+                // deployment's own database (step G7).
+                deployment.set_peer_reads(Arc::new(
+                    crate::peer_reads::DoorReads::new(
+                        client.clone(),
+                        Arc::new(|k: &str| std::env::var(k).ok()),
+                    )
+                    .with_directory(peer_ops.pool.clone()),
+                ));
                 if let Some(apply) = &apply_for_backfills {
                     let _ = apply.peer_client.set(client);
                 }

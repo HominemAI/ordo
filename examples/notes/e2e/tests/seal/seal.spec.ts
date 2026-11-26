@@ -129,7 +129,8 @@ test('a field sealed on live data: the page reads it, and the table holds no pla
       const said = `${plan.out}${plan.err}`;
       expect(said).toContain('seal_read_by_reader');
       expect(said).toContain('note_viewer');
-      expect(said).toContain('7b');
+      // The fix names the door, which opens the field in its own answers.
+      expect(said).toContain('ORDO_PEER_<NAME>_URL');
     });
 
     await test.step('0.3.3 takes notes off the reader line', () => {

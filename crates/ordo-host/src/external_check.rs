@@ -687,6 +687,62 @@ fn reads_of(f: &ordo_conformance::Fixture, op: &str) -> Vec<String> {
     reached
 }
 
+/// The class of the refusal for a tenant kept in a database of its own
+/// that reaches a peer through the shared database
+/// (`plan-federation-grants.md` §6, step G7).
+pub const PEER_TENANT_DATABASE: &str = "peer_tenant_database";
+
+/// **A tenant in a database of its own and a peer read through the shared
+/// database** (step G7). A peer's tables are in the deployment's own
+/// database, never in a tenant's, so such a read would find no table or,
+/// worse, another one. `Some` names the peer, the setting that moves it to
+/// its door, and the tenant, for `op` when it reads one; `None` when it
+/// reads no peer that way. The caller has found that `space` is served
+/// from a database other than the deployment's.
+pub fn shared_peer_refusal(
+    f: &ordo_conformance::Fixture,
+    op: &str,
+    space: &str,
+) -> Option<ExecError> {
+    // Each such entity: its peer's nickname and the peer's table.
+    let shared: BTreeMap<&str, (&str, &str)> = f
+        .schema
+        .externals
+        .iter()
+        .filter_map(|e| {
+            let x = e.external.as_ref()?;
+            let p = x.peer.as_ref()?;
+            (!p.door).then_some((e.name.as_str(), (p.name.as_str(), x.table.as_str())))
+        })
+        .collect();
+    if shared.is_empty() {
+        return None;
+    }
+    // A derived op names its entity: `std.<entity>.<verb>`.
+    let mut reached = reads_of(f, op);
+    if let Some(entity) = op
+        .strip_prefix("std.")
+        .and_then(|rest| rest.split('.').next())
+    {
+        reached.push(entity.to_string());
+    }
+    let (entity, (peer, table)) = reached
+        .iter()
+        .find_map(|n| shared.get_key_value(n.as_str()))?;
+    Some(ExecError::new(
+        ErrorCode::PeerRefused,
+        format!(
+            "{PEER_TENANT_DATABASE}: `{op}` reads `{entity}` from peer `{peer}` through the \
+             shared database, and space `{space}` is kept in a database of its own, where \
+             `{peer}`'s tables are not. Fix: read `{peer}` through its door, which reaches it \
+             from every database: set ORDO_PEER_{}_URL to its address and have its owner \
+             grant this deployment `std.{}.list`",
+            peer.to_ascii_uppercase(),
+            table,
+        ),
+    ))
+}
+
 impl ExternalGate {
     /// One program for every tenant: `source` returns the fixture the
     /// deployment serves now.

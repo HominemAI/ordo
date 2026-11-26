@@ -515,12 +515,45 @@ async fn a_seal_of_a_field_a_reader_reads_is_refused_naming_the_reader() {
     let text = format!("{err:?}");
     assert!(text.contains("seal_read_by_reader"), "{text}");
     assert!(text.contains("note_viewer"), "names the reader: {text}");
-    assert!(text.contains("7b"), "names what lets it through: {text}");
+    assert!(
+        text.contains("this deployment's door") && text.contains("ORDO_PEER_<NAME>_URL"),
+        "names what lets it through: {text}"
+    );
     assert!(
         evolve::path(&registry, "1.0.0", "1.1.0")
             .await
             .map_or(true, |p| p.is_empty()),
         "no step is stored"
+    );
+}
+
+/// **A consumer reading through the door does not stop a seal** (step G7
+/// of `plan-federation-grants.md`): a `grant` opening the table to it is
+/// not a `reader` line. The door opens the field in its own answers, so
+/// the seal's plan stores its step.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_seal_of_a_field_a_door_consumer_reads_is_not_refused() {
+    let with_grant = |src: String| src + "\ngrant note_viewer {\n  std.note.list\n}\n";
+    let (_rpg, registry) = empty("ordo_seal_grant_reg").await;
+    store(&registry, &with_grant(v1())).await;
+    store(&registry, &with_grant(v2())).await;
+    evolve::evolve(
+        &registry,
+        "1.0.0",
+        "1.1.0",
+        &Choices::default(),
+        None,
+        OWNER,
+        1,
+    )
+    .await
+    .expect("a grant is not a reader line");
+    assert!(
+        !evolve::path(&registry, "1.0.0", "1.1.0")
+            .await
+            .expect("a path")
+            .is_empty(),
+        "the step is stored"
     );
 }
 

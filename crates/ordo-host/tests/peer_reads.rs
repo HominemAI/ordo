@@ -44,6 +44,8 @@ use ordo_api::{
     OpExecutor, OpSpec, PageKey,
 };
 use ordo_conformance::{Fixture, Pg, FIXTURE, SEED};
+use ordo_crypto::SpaceId;
+use ordo_exec::route::PoolResolver;
 use ordo_exec::{Pool, PoolConfig};
 use ordo_host::auth::AuthState;
 use ordo_host::consumer_grants as cg;
@@ -88,8 +90,17 @@ entity secret {
   body: text
 }
 
+entity diary {
+  body: text sealed
+  std sealed
+}
+
+op addDiary($body: text) =
+  set diary { body: $body }
+
 grant note_viewer {
   std.memo.list
+  std.diary.list
 }
 "#;
 
@@ -143,6 +154,16 @@ op marksNotFirst =
 
 op allSecrets =
   secrets[id, body]
+  take 10
+
+external diaries from notes.diary shared {
+  id: text <- id
+  body: text <- body
+}
+
+op allDiaries =
+  diaries[id, body]
+  sort id
   take 10
 "#;
 
@@ -302,7 +323,7 @@ impl Ids {
 
 /// A person here: a principal linked to the identity service's `sub`, and
 /// a member of the space.
-async fn person(pg: &Pg, pool: &Pool, sub: &str, member: &str, name: &str) {
+async fn person(pg: &Pg, pool: &Pool, sub: &str, member: &str, name: &str) -> String {
     ordo_host::principal_directory::ensure_table(pool)
         .await
         .expect("a directory");
@@ -339,6 +360,7 @@ async fn person(pg: &Pg, pool: &Pool, sub: &str, member: &str, name: &str) {
         principal.0
     ))
     .expect("a member");
+    principal.0
 }
 
 fn executor_for(f: &Arc<Fixture>, pool: &Pool) -> ordo_exec::Executor {
@@ -359,6 +381,10 @@ type Seen = Arc<Mutex<Vec<Value>>>;
 struct Holder {
     address: String,
     memo_calls: Seen,
+    /// Its own executor, for its own writes, and its database.
+    executor: Arc<dyn OpExecutor>,
+    specs: Vec<OpSpec>,
+    pg: Pg,
 }
 
 async fn count_memo(
@@ -527,7 +553,7 @@ impl Holder {
         ));
         let state = ApiState {
             registry: deployment.handle(),
-            executor,
+            executor: executor.clone(),
             access: door,
             quota: Arc::new(ordo_api::NoQuota),
             bus: Arc::new(MemoryBus::new()),
@@ -554,6 +580,28 @@ impl Holder {
         Holder {
             address: format!("http://{addr}"),
             memo_calls,
+            executor,
+            specs: ordo_host::build_specs(&f),
+            pg,
+        }
+    }
+
+    /// Run the holder's own write `op` as Ada, in its own space.
+    async fn write(&self, op: &str, params: Value) {
+        let spec = self
+            .specs
+            .iter()
+            .find(|s| s.name == op)
+            .unwrap_or_else(|| panic!("no op {op}"));
+        let mut bound = params.as_object().unwrap().clone();
+        bound.insert("$caller".into(), json!("mem_ada"));
+        match self
+            .executor
+            .execute(spec, DEFAULT_SPACE, BoundParams(bound), None, None, None)
+            .await
+        {
+            Ok(ExecOutcome::Ran(_)) => {}
+            other => panic!("{op}: {other:?}"),
         }
     }
 
@@ -572,6 +620,45 @@ impl Holder {
 struct Consumer {
     exec: FixtureExecutor,
     specs: Vec<OpSpec>,
+    /// The deployment's own database.
+    pg: Pg,
+}
+
+/// A tenant of `viewer` kept in a database of its own (step G7), Ada its
+/// member as `mem_twin`.
+const TWIN: &str = "spc_twin";
+
+/// [`TWIN`] in its own database, every other space in the deployment's.
+struct TwinApart {
+    default: Pool,
+    twin: Pool,
+}
+
+impl PoolResolver for TwinApart {
+    fn resolve<'a>(&'a self, space: &'a SpaceId) -> ordo_exec::route::Resolving<'a> {
+        let pool = if space.0 == TWIN {
+            self.twin.clone()
+        } else {
+            self.default.clone()
+        };
+        Box::pin(async move { Ok(pool) })
+    }
+
+    fn targets<'a>(&'a self) -> ordo_exec::route::Targets<'a> {
+        let (default, twin) = (self.default.clone(), self.twin.clone());
+        Box::pin(async move {
+            Ok(vec![
+                ordo_exec::route::Target {
+                    label: "default".into(),
+                    pool: Ok(default),
+                },
+                ordo_exec::route::Target {
+                    label: "twin".into(),
+                    pool: Ok(twin),
+                },
+            ])
+        })
+    }
 }
 
 impl Consumer {
@@ -579,6 +666,20 @@ impl Consumer {
     /// member as `mem_ann` and 100 bookmarks, one on each of `m001` to
     /// `m100`.
     async fn start(name: &str, ids: &Ids, door: &str, ada: &str, extra: &[(&str, &str)]) -> Self {
+        Consumer::start_with(name, ids, Some(door), ada, extra, false).await
+    }
+
+    /// [`Consumer::start`], reading `notes` through its door when `door`
+    /// is set and through the shared database (`notes_home`) when not, and
+    /// with [`TWIN`] in a database of its own when `twin` is set.
+    async fn start_with(
+        name: &str,
+        ids: &Ids,
+        door: Option<&str>,
+        ada: &str,
+        extra: &[(&str, &str)],
+        twin: bool,
+    ) -> Self {
         let source = format!("{FIXTURE}\n{CONSUMER}");
         let mut f = Fixture::from_source(&source, SEED).expect("the consumer compiles");
         let mut vars: HashMap<String, String> = HashMap::from([
@@ -588,15 +689,18 @@ impl Consumer {
             ("ORDO_AUTH_METHODS".into(), "passkey,ids".into()),
             ("ORDO_AUTH_IDS_KIND".into(), "oidc".into()),
             ("ORDO_AUTH_IDS_ISSUER".into(), ids.issuer.clone()),
-            ("ORDO_PEER_NOTES_URL".into(), door.into()),
             ("ORDO_PEER_NOTES_SPACE".into(), DEFAULT_SPACE.into()),
         ]);
+        match door {
+            Some(d) => vars.insert("ORDO_PEER_NOTES_URL".into(), d.into()),
+            None => vars.insert("ORDO_PEER_NOTES_SCHEMA".into(), "notes_home".into()),
+        };
         for (k, v) in extra {
             vars.insert(k.to_string(), v.to_string());
         }
         let lookup = vars.clone();
         ordo_exec::peer::resolve_with(&mut f.schema, "public", |k| lookup.get(k).cloned())
-            .expect("a door peer needs no schema setting");
+            .expect("the peer resolves");
         let f = Arc::new(f);
         let pg = Pg::scoped(&format!("ordo_peerr_viewer_{name}"));
         f.reset(&pg).expect("seeded");
@@ -607,7 +711,7 @@ impl Consumer {
         })
         .await
         .expect("a pool");
-        person(&pg, &pool, ada, "mem_ann", "Ada").await;
+        let principal = person(&pg, &pool, ada, "mem_ann", "Ada").await;
         let marks: Vec<String> = (1..=100)
             .map(|i| format!("('{DEFAULT_SPACE}', 'b{i:03}', 'entr_m{i:03}', 'mark {i:03}')"))
             .collect();
@@ -626,19 +730,75 @@ impl Consumer {
         let client = Arc::new(PeerClient::new(key_of("viewer"), settings.clone(), now));
         let deployment =
             ordo_host::deploy::Deployment::pinned("viewer", f.clone(), executor_for(&f, &pool));
-        deployment.set_peer_reads(Arc::new(DoorReads::new(client, settings)));
+        deployment.set_peer_reads(Arc::new(
+            DoorReads::new(client, settings).with_directory(pool.clone()),
+        ));
+        let spaces = if twin {
+            // The tenant: custody and its owner through the one entry
+            // point, its rows in a database of its own. Ada's sign-in link
+            // stays in the deployment's database, as a deployment keeps it.
+            ordo_host::provision::provision_space(
+                &pool,
+                f.keys.as_ref(),
+                TWIN,
+                &ordo_host::provision::FoundingOwner {
+                    member_id: "mem_twin",
+                    principal: &principal,
+                    display_name: "Ada",
+                },
+            )
+            .await
+            .expect("the tenant provisions");
+            let twin_pg = Pg::scoped(&format!("ordo_peerr_twin_{name}"));
+            f.reset(&twin_pg).expect("the tenant's database");
+            let twin_pool = Pool::connect(PoolConfig {
+                db: twin_pg.db.clone(),
+                size: 3,
+                ..PoolConfig::from_env()
+            })
+            .await
+            .expect("a pool on the tenant's database");
+            twin_pg
+                .exec(&format!(
+                    "INSERT INTO members (\"$space\", id, principal, \"displayName\", kind, \
+                     \"memberCount\", role, status, joined) VALUES ('{TWIN}', 'mem_twin', \
+                     '{principal}', 'Ada', 'principal', 1, 'manager', 'active', '2026-11-26')"
+                ))
+                .expect("Ada in the tenant");
+            ordo_host::spaces::Spaces::routed(
+                deployment,
+                Arc::new(TwinApart {
+                    default: pool.clone(),
+                    twin: twin_pool,
+                }),
+                ordo_exec::witness::Witness::new(pool.clone()),
+            )
+        } else {
+            ordo_host::spaces::Spaces::new(deployment)
+        };
         Consumer {
             exec: FixtureExecutor {
-                spaces: ordo_host::spaces::Spaces::new(deployment),
+                spaces,
                 pg: pg.clone(),
                 page_size: 100,
             },
             specs: ordo_host::build_specs(&f),
+            pg,
         }
     }
 
     /// Read `op` as `caller`: the rows, or the refusal.
     async fn read(&self, op: &str, caller: &str) -> Result<Vec<Value>, ordo_api::ExecError> {
+        self.read_in(op, DEFAULT_SPACE, caller).await
+    }
+
+    /// Read `op` in `space` as `caller`.
+    async fn read_in(
+        &self,
+        op: &str,
+        space: &str,
+        caller: &str,
+    ) -> Result<Vec<Value>, ordo_api::ExecError> {
         let spec = self
             .specs
             .iter()
@@ -647,7 +807,7 @@ impl Consumer {
         let bound = BoundParams(json!({ "$caller": caller }).as_object().unwrap().clone());
         match self
             .exec
-            .execute(spec, DEFAULT_SPACE, bound, None, None, None)
+            .execute(spec, space, bound, None, None, None)
             .await?
         {
             ExecOutcome::Ran(r) => Ok(r.rows),
@@ -854,4 +1014,109 @@ async fn without_a_url_the_peer_stays_on_the_shared_database_path() {
     let p = src.peer.expect("a peer");
     assert!(!p.door);
     assert_eq!(p.schema.as_deref(), Some("notes_home"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sealed_field_is_opened_by_the_holder_and_never_stored_plain() {
+    let (_ids, holder, viewer) = stage("sealed").await;
+    holder
+        .write("addDiary", json!({ "body": "plain words" }))
+        .await;
+
+    // The consumer reads the plain value through the door: the holder
+    // opened it in its own answer, under its own rules for Ada.
+    let rows = viewer
+        .read("allDiaries", "mem_ann")
+        .await
+        .expect("read through the holder's door");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["body"], "plain words", "{rows:?}");
+
+    // The holder's table holds no plaintext, and no key left it: the
+    // consumer was handed text, never a seal.
+    let stored = holder
+        .pg
+        .query("SELECT body::text FROM diary")
+        .expect("the holder's table");
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    let cell = stored[0][0].clone().unwrap_or_default();
+    assert!(!cell.is_empty(), "a sealed value is stored");
+    assert!(!cell.contains("plain words"), "plaintext stored: {cell}");
+    let anywhere = holder
+        .pg
+        .query("SELECT count(*) FROM diary WHERE diary::text LIKE '%plain words%'")
+        .expect("the holder's row");
+    assert_eq!(anywhere[0][0].as_deref(), Some("0"), "plaintext in the row");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tenant_in_its_own_database_reaches_the_peer_through_the_door() {
+    let ids = Ids::start("tenantdb").await;
+    let ada = ids.sign_up("viewer", "Ada", 94).await;
+    let bob = ids.sign_up("notes", "Bob", 95).await;
+    let holder = Holder::start("tenantdb", &ids, &ada, &bob).await;
+    let viewer =
+        Consumer::start_with("tenantdb", &ids, Some(&holder.address), &ada, &[], true).await;
+
+    // From the tenant's own database: the holder decides `$caller` for
+    // Ada, whose sign-in link is in the deployment's database.
+    let rows = viewer
+        .read_in("myEntries", TWIN, "mem_twin")
+        .await
+        .expect("the tenant reads through the door");
+    assert_eq!(rows.len(), 50, "{rows:?}");
+    assert_eq!(rows[0]["title"], "memo 001");
+    assert!(!titles(&rows, "title").contains(&"memo 005".to_string()));
+    // And from the deployment's own space, as before.
+    let rows = viewer
+        .read("topEntries", "mem_ann")
+        .await
+        .expect("the own space reads");
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert_eq!(holder.calls(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tenant_in_its_own_database_is_refused_the_shared_database_path_by_name() {
+    let ids = Ids::start("tenantshared").await;
+    let ada = ids.sign_up("viewer", "Ada", 96).await;
+    let viewer = Consumer::start_with("tenantshared", &ids, None, &ada, &[], true).await;
+    // The peer's table, in the deployment's own database, as the shared
+    // path reads it.
+    viewer
+        .pg
+        .exec(
+            "CREATE SCHEMA notes_home; \
+             CREATE TABLE notes_home.memo (id text PRIMARY KEY, title text, owner text, \
+             rank int); \
+             INSERT INTO notes_home.memo VALUES ('m006', 'memo 006', 'mem_ada', 6);",
+        )
+        .expect("the peer's table");
+
+    // The deployment's own space reads it.
+    let rows = viewer
+        .read("topEntries", "mem_ann")
+        .await
+        .expect("the own space reads the shared table");
+    assert_eq!(titles(&rows, "title"), ["memo 006"], "{rows:?}");
+
+    // The tenant in its own database: a named refusal, never an empty or
+    // a wrong answer.
+    let e = viewer
+        .read_in("topEntries", TWIN, "mem_twin")
+        .await
+        .expect_err("no peer table in the tenant's database");
+    assert_eq!(e.code, ErrorCode::PeerRefused, "{e:?}");
+    assert!(
+        e.message.starts_with("peer_tenant_database:"),
+        "{}",
+        e.message
+    );
+    assert!(e.message.contains("peer `notes`"), "{}", e.message);
+    assert!(
+        e.message.contains(&format!("space `{TWIN}`")),
+        "{}",
+        e.message
+    );
+    assert!(e.message.contains("ORDO_PEER_NOTES_URL"), "{}", e.message);
 }

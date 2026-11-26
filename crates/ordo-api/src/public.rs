@@ -242,6 +242,8 @@ pub struct Ticket {
 /// How a public answer is described to downstream caches.
 pub struct Headers {
     pub cache_control: String,
+    /// CDN-only stale allowance; browsers must revalidate before reusing a response.
+    pub cdn_cache_control: String,
     pub etag: String,
     /// `op:<name>, entity:<e1>, …` for `Cache-Tag`; the same tags joined by
     /// spaces for `Surrogate-Key`.
@@ -649,17 +651,21 @@ impl PublicPath {
         remaining: Option<std::time::Duration>,
     ) -> Headers {
         let s = &self.inner.settings;
-        let cache_control = if self.deaf() {
-            // The listener is lost: what is served now could go stale with
-            // no signal, so no shared cache may hold it.
-            "public, max-age=0, s-maxage=0".to_string()
-        } else if let Some(left) = remaining {
-            format!("public, max-age=0, s-maxage={}", left.as_secs())
+        // stale-while-revalidate in Cache-Control also applies to a browser,
+        // even beside max-age=0. A page reload would render old data while
+        // its background fetch obtained the acknowledged edit. RFC 9213
+        // targets the stale allowance at CDN caches instead.
+        let deaf = self.deaf();
+        let ttl = if deaf {
+            0
         } else {
-            format!(
-                "public, max-age=0, s-maxage={}, stale-while-revalidate={}",
-                s.s_maxage, s.swr
-            )
+            remaining.map_or(s.s_maxage, |left| left.as_secs())
+        };
+        let cache_control = format!("public, max-age=0, s-maxage={ttl}");
+        let cdn_cache_control = if deaf || remaining.is_some() {
+            format!("max-age={ttl}")
+        } else {
+            format!("max-age={ttl}, stale-while-revalidate={}", s.swr)
         };
         let tags = self
             .state()
@@ -669,6 +675,7 @@ impl PublicPath {
             .unwrap_or_else(|| vec![format!("op:{op}")]);
         Headers {
             cache_control,
+            cdn_cache_control,
             etag: etag.to_string(),
             tags,
         }

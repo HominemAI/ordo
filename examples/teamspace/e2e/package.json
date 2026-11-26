@@ -1,0 +1,19 @@
+{
+  "name": "ordo-teamspace-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Teamspace tenant isolation and browser use cases",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "^22.10.1",
+    "typescript": "^5.6.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

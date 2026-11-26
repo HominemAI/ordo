@@ -131,7 +131,7 @@ TESTIMONIALS = [
 for i, (slug, name, tag, price, feats) in enumerate(PRODUCTS, 1):
     write("addProduct", {"slug": slug, "name": name, "tagline": tag,
                                "description": "%s. Made in small batches and sold direct." % tag,
-                               "price": price, "features": feats, "rank": i})
+                               "price": price, "features": feats, "rank": i, "internalNote": "INTERNAL-" + slug})
 for i, (name, tag, price, period, feats, best) in enumerate(PLANS, 1):
     write("addPlan", {"name": name, "tagline": tag, "price": price, "period": period,
                             "features": feats, "highlighted": best, "rank": i})

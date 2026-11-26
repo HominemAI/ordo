@@ -498,3 +498,59 @@ https front is the next port up), `E2E_NOTES_PAGE_PORT` and
 `E2E_VIEWER_PAGE_PORT`. `E2E_NO_PAGES=1 bash stack.sh` starts everything
 but the pages, for poking at the doors with curl. The artifact
 `federation-e2e-report` holds the traces and `.stack/*.log`.
+
+## Marketing site
+
+`examples/marketing-site/e2e` runs the real public site against a throwaway
+database. Install the web and e2e packages with `npm ci`, then run
+`npx playwright test` from the e2e directory. It has `api` and `browser`
+projects. See the example README for ports, PostgreSQL and binary overrides.
+
+The stack applies `site.ordo`, creates an owner through guest sign-in,
+restarts with that owner and runs `dev/seed`. Its private product sentinel
+must stay out of all public responses. Shutdown sends TERM and waits for
+each host so instrumented binaries can write their profiles.
+
+`examples-e2e.yml` runs the marketing site. Its `coverage` input builds with
+LLVM instrumentation and uploads `lcov-marketing-site`. The coverage helper
+is shared with increment 0. Merging that report into the overall ratchet
+requires the increment 0 coverage workflow integration.
+
+The marketing stack now starts 2 host replicas, A on 4850 and B on 4851.
+`E2E_DOOR_B_PORT` overrides B. The cache tests use the stack's `psql` path
+and database settings to read `pg_stat_user_tables`. They wait for statistics
+to settle and never reset shared PostgreSQL counters. All 3 host processes
+(the bootstrap host and the 2 serving replicas) must flush coverage profiles.
+
+The marketing suite also exercises `/studio`. Its throwaway stack enables the
+local blob store and registers a virtual passkey owner before the owner-configured
+restart. The browser tests use real passkey sign-in, live enquiries, campaign
+assets and reminders, editorial approval, and invitations. Test credentials
+are kept only under the ignored stack directory. The bootstrap origin is
+separate so Playwright cannot mistake early startup for a ready test stack.
+
+### Marketing lifecycle profile
+
+The marketing suite also runs the real console against its real host, with a
+real supervisor owning a third host. Build `ordo-host`, `ordo-cli`,
+`ordo-console` and `ordo-supervisor`, and run `npm ci` in
+`clients/ordo-console-web` before starting this profile. This is distinct from
+the console suite's stand-in door fixtures described above.
+
+The default ports are 5392 (console), 5393 (supervised host) and 5394
+(supervisor health). `console-stack.sh` reads the private host configuration
+written by `stack.sh`; neither configuration file is an uploaded artifact.
+Only the supervised fixture host is restarted by the Runtime journey.
+Coverage launchers exec the real child binaries and retain their process IDs
+across restarts so missing LLVM profiles fail reporting.
+
+The coverage artifacts now include raw LLVM JSON, toolchain details and source
+provenance. They remain setup-inclusive. See `coverage/web-outcomes.md` for the
+implemented journeys, executed evidence and outstanding outcomes.
+
+Full marketing CI also starts the disposable SeaweedFS profile through
+`examples/marketing-site/e2e/s3-fixture.sh`. `E2E_S3_ENDPOINT` enables the host's
+supported attached-bucket configuration with a private credential directory.
+The default store remains local, allowing one journey to verify both stores
+and retention across attachment changes. The test controls only the container
+named `ordo-marketing-s3`; production services are never fault-injected.

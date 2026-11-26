@@ -94,6 +94,16 @@ const run = (...files) => outputs(affected({ files, packages, readersOf, io, hos
 
 const cases = [
   {
+    name: 'marketing site and shared stack changes run the public path suite',
+    files: ['examples/marketing-site/site.ordo', 'examples/e2e-common/stack-lib.sh'],
+    want: { marketing_site_e2e: 'true', notes_e2e: 'false' },
+  },
+  {
+    name: 'host changes run the marketing site suite',
+    files: ['crates/ordo-host/src/lib.rs'],
+    want: { marketing_site_e2e: 'true' },
+  },
+  {
     name: 'docs only: nothing runs',
     files: ['docs/howto-e2e.md', 'AGENTS.md', 'docs/board.jsonl'],
     want: { full: 'false', crates: '', rest: 'false', host: 'false', clients: '', notes_e2e: 'false' },
@@ -185,9 +195,9 @@ const cases = [
     want: { identity_e2e: 'true', federation_e2e: 'true', notes_e2e: 'true' },
   },
   {
-    name: 'teamspace: its job, no e2e',
+    name: 'teamspace: its job and its own e2e',
     files: ['examples/teamspace/teamspace.ordo'],
-    want: { examples: ' teamspace ', notes_e2e: 'false', federation_e2e: 'false' },
+    want: { examples: ' teamspace ', notes_e2e: 'false', federation_e2e: 'false', teamspace_e2e: 'true' },
   },
   {
     name: 'a lockfile: the audit',
@@ -438,3 +448,10 @@ if (failed) {
   console.log(`${failed} failed`);
   process.exit(1);
 }
+
+
+// The shared example stack and teamspace source reach its new end-to-end job.
+for (const path of ['examples/teamspace/web/src/App.tsx', 'examples/e2e-common/stack-lib.sh', 'crates/ordo-host/src/serve.rs', 'crates/ordo-cli/src/main.rs', 'clients/ordo-sdk/src/core/client.ts']) {
+  assert.equal(run(path).teamspace_e2e, 'true', path);
+}
+assert.equal(run('docs/howto-e2e.md').teamspace_e2e, 'false');

@@ -112,8 +112,10 @@ stop() {
     PGHOST="$pg_host" PGPORT="$pg_port" PGUSER="$pg_user" ORDO_PSQL="${psql_bin:-}" \
       bash "$repo/scripts/pg-snapshot.sh" "$state/pg-at-stop.log" "stack stopping" || true
   fi
-  for p in $pids; do kill "$p" 2>/dev/null || true; done
-  wait 2>/dev/null || true
+  # LLVM flushes the host profile on normal exit. Keep Postgres alive until
+  # every child has handled SIGTERM and finished.
+  for p in $pids; do kill -TERM "$p" 2>/dev/null || true; done
+  for p in $pids; do wait "$p" 2>/dev/null || true; done
   if [ "$own_pg" = 1 ]; then
     ORDO_PGDATA="$pgdata" ORDO_PG_HOST="$socket" ORDO_PG_PORT="$pg_port" \
       bash "$repo/scripts/conformance-pg.sh" destroy >/dev/null 2>&1 || true
@@ -232,6 +234,8 @@ export ORDO_TEST_EDITION_2_SINCE=2026-11-01
 # the stack's own folder. `fs:` is for tests and development only, so the
 # door refuses to boot on it without the unsafe switch beside it. A real
 # deployment sets ORDO_BLOB_STORE=s3 and the ORDO_BLOB_S3_* settings.
+# Enable the real tenant export path for the isolation test.
+export ORDO_EXIT_BUNDLE_DIR="$state/exports"
 export ORDO_BLOB_STORE="fs:$state/blobs" ORDO_DEV_UNSAFE_BLOB_STORE=1
 # A person may export and erase their own tenant (`std.space.export` and
 # `std.space.delete`, tests/orphans). Bundles are written under the stack's
@@ -308,6 +312,7 @@ else
 fi
 last=$!
 pids="$pids $last"
+printf '%s\n' "$last" >> "$state/host-pids"
 wait_for "ordo-host" "$door/health/live" "$last"
 
 # ── 5. The program ─────────────────────────────────────────────────────────

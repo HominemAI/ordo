@@ -282,7 +282,8 @@ serves with `max-age=0, s-maxage=0` so nothing downstream extends the window.
 Every public response carries:
 
 ```
-Cache-Control: public, max-age=0, s-maxage=<public.cdn.s_maxage>, stale-while-revalidate=<public.cdn.swr>
+Cache-Control: public, max-age=0, s-maxage=<public.cdn.s_maxage>
+CDN-Cache-Control: max-age=<public.cdn.s_maxage>, stale-while-revalidate=<public.cdn.swr>
 ETag: "<sha256 of the body>"
 Cache-Tag: op:<name>, entity:<e1>, entity:<e2>, ...
 Vary: Accept

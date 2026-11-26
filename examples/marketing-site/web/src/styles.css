@@ -117,3 +117,34 @@ blockquote footer {
   cursor: pointer;
   justify-self: start;
 }
+
+/* The workspace inherits the public site's palette and quiet typography. */
+.studio { padding-block: 2rem 4rem; }
+.studio-header, .toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: .75rem; }
+.studio-header { justify-content: space-between; }
+.studio h1 { margin-block: .5rem 1.5rem; }
+.studio section { margin-block: 1.5rem; }
+.studio nav { border-block: 1px solid var(--line); padding-block: 1rem; }
+.studio button, .studio input, .studio textarea, .studio select { font: inherit; color: var(--fg); background: var(--card); border: 1px solid var(--line); border-radius: .3rem; padding: .65rem .8rem; min-block-size: 3rem; box-sizing: border-box; }
+.studio button { cursor: pointer; }
+.studio button[aria-current], .studio button[type=submit] { border-color: var(--accent); }
+.studio button[aria-current] { text-decoration: underline; text-underline-offset: .4rem; }
+.studio button:disabled { cursor: wait; opacity: .6; }
+.studio :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.studio a { color: var(--accent); }
+.studio .field { display: grid; gap: .25rem; }
+.studio .form { margin-block: 1rem; }
+.studio input:not([type=checkbox]), .studio textarea, .studio select { inline-size: 100%; }
+.studio input[type=checkbox] { justify-self: start; inline-size: 1.5rem; }
+.studio .toolbar form { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.studio .toolbar input, .studio .toolbar select { inline-size: auto; max-inline-size: 100%; }
+.table-wrapper { overflow: auto; max-inline-size: 100%; max-block-size: 65vh; margin-block: 1rem; border: 1px solid var(--line); }
+.studio table { border-collapse: separate; border-spacing: 0; inline-size: 100%; text-align: start; }
+.studio caption { text-align: start; font-weight: 600; padding: .75rem; }
+.studio th, .studio td { padding: .75rem; border-block-end: 1px solid var(--line); vertical-align: top; min-inline-size: 8rem; max-inline-size: 25rem; overflow-wrap: anywhere; }
+.studio thead { position: sticky; inset-block-start: 0; z-index: 1; background: var(--bg); }
+.studio tbody th { position: sticky; inset-inline-start: 0; background: var(--card); }
+.studio [role=alert] { padding: 1rem; border-inline-start: 3px solid var(--accent); background: var(--card); }
+.ticket { display: block; overflow-wrap: anywhere; padding: 1rem; border: 1px solid var(--line); }
+@media (max-width: 40rem) { .studio-header { align-items: start; } .studio .editor { padding: .75rem; } .studio .form { max-inline-size: 100%; } }
+@media (prefers-color-scheme: dark) { .button { color: #161616; } .error { color: #ffb4ab; } }

@@ -4,6 +4,8 @@ name: Coverage
 # database and runner as CI's `test` job, built with coverage instrumentation.
 # It answers "what has no test", so a red test here still writes the report.
 on:
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 env:
@@ -12,10 +14,11 @@ env:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
-  rust:
-    name: coverage
+  unit:
+    name: coverage (unit)
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
     timeout-minutes: ${{ vars.ORDO_RUNNERS == 'k8s' && 90 || 180 }}
@@ -70,18 +73,101 @@ jobs:
         run: bash scripts/ci-pg-fast-commits.sh
 
       - name: Test with coverage
-        continue-on-error: true
         run: cargo llvm-cov --workspace --no-fail-fast --no-report
 
+      - name: Two-instance coverage (owner ruling)
+        if: always()
+        run: cargo llvm-cov -p ordo-host --test two_instances --no-report -- --ignored --test-threads=1
+
       - name: Report
+        if: always()
         run: |
+          mkdir -p coverage-out
           cargo llvm-cov report --summary-only > coverage-summary.txt
-          cargo llvm-cov report --lcov --output-path lcov.info
+          cargo llvm-cov report --lcov --output-path coverage-out/lcov-unit.info
           tail -n 1 coverage-summary.txt
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
         with:
-          name: rust-coverage
+          name: lcov-unit
+          path: coverage-out/lcov-unit.info
+          if-no-files-found: error
+
+  notes:
+    uses: ./.github/workflows/e2e.yml
+    with:
+      coverage: true
+
+  federation:
+    uses: ./.github/workflows/federation-e2e.yml
+    with:
+      coverage: true
+
+  examples:
+    uses: ./.github/workflows/examples-e2e.yml
+    with:
+      coverage: true
+
+  public-baseline:
+    uses: ./.github/workflows/examples-e2e.yml
+    with:
+      coverage: true
+      public_only: true
+
+  ratchet:
+    name: coverage ratchet
+    needs: [unit, notes, federation, examples, public-baseline]
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+      - name: Test coverage accounting
+        run: node --test scripts/coverage-crates.test.mjs scripts/e2e-coverage.test.mjs scripts/web-coverage.test.mjs
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: lcov-*
+          path: coverage-out
+          merge-multiple: true
+      - name: Measure and check the floors
+        run: |
+          # Missing inputs must fail, rather than silently lower the denominator.
+          for suite in unit notes federation teamspace marketing-site marketing-public; do
+            test -s "coverage-out/lcov-$suite.info"
+          done
+          node scripts/coverage-crates.mjs --label unit --out coverage-out/unit.json coverage-out/lcov-unit.info > coverage-out/unit.md
+          node scripts/coverage-crates.mjs --label examples --out coverage-out/examples.json coverage-out/lcov-notes.info coverage-out/lcov-federation.info coverage-out/lcov-teamspace.info coverage-out/lcov-marketing-site.info > coverage-out/examples.md
+          node scripts/coverage-crates.mjs --label examples --out coverage-out/baseline.json coverage-out/lcov-notes.info coverage-out/lcov-federation.info coverage-out/lcov-teamspace.info coverage-out/lcov-marketing-public.info > coverage-out/baseline.md
+          # shellcheck disable=SC2016
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const pct = label => JSON.parse(readFileSync(`coverage-out/${label}.json`)).total.percent.toFixed(2);
+            console.log(`Unit ${pct("unit")}%. Examples ${pct("examples")}%. Public-workflow baseline ${pct("baseline")}%.\n`);
+          ' >> "$GITHUB_STEP_SUMMARY"
+          cat coverage-out/unit.md coverage-out/examples.md >> "$GITHUB_STEP_SUMMARY"
+          status=0
+          node scripts/coverage-crates.mjs --label unit --check coverage/floor.json coverage-out/lcov-unit.info || status=1
+          node scripts/coverage-crates.mjs --label examples --check coverage/floor.json coverage-out/lcov-notes.info coverage-out/lcov-federation.info coverage-out/lcov-teamspace.info coverage-out/lcov-marketing-site.info || status=1
+          exit "$status"
+      - name: Every coverage suite must pass
+        if: always()
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          # shellcheck disable=SC2016
+          node --input-type=module -e '
+            for (const [name, job] of Object.entries(JSON.parse(process.env.RESULTS))) {
+              if (job.result !== "success") { console.error(`${name}: ${job.result}`); process.exitCode = 1; }
+            }
+          '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: coverage-per-crate
           path: |
-            coverage-summary.txt
-            lcov.info
+            coverage-out/*.json
+            coverage-out/*.md
+          if-no-files-found: error

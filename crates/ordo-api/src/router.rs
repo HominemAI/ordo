@@ -665,17 +665,18 @@ async fn blob_meta(
         Err(e) => e.into_response(),
         Ok(m) => {
             let body = serde_json::json!({ "mime": m.mime, "size": m.size }).to_string();
-            axum::response::Response::builder()
+            let mut response = axum::response::Response::builder()
                 .status(StatusCode::OK)
-                .header("content-type", "application/json")
-                .header(
-                    "cache-control",
-                    if anonymous {
-                        state.public.headers("std.$blob.get", "").cache_control
-                    } else {
-                        "private, max-age=31536000, immutable".to_string()
-                    },
-                )
+                .header("content-type", "application/json");
+            response = if anonymous {
+                let described = state.public.headers("std.$blob.get", "");
+                response
+                    .header("cache-control", described.cache_control)
+                    .header("cdn-cache-control", described.cdn_cache_control)
+            } else {
+                response.header("cache-control", "private, max-age=31536000, immutable")
+            };
+            response
                 .body(axum::body::Body::from(body))
                 .unwrap_or_else(|_| {
                     ApiError::new(ErrorCode::Internal, "blob response").into_response()
@@ -768,6 +769,12 @@ async fn blob_get(
                         "private, max-age=31536000, immutable".to_string()
                     },
                 );
+            if anonymous {
+                res = res.header(
+                    "cdn-cache-control",
+                    state.public.headers("std.$blob.get", "").cdn_cache_control,
+                );
+            }
             // The mime is a caller-supplied label: the type, disposition,
             // sandbox and `nosniff` are set in the one place stored bytes
             // are served from.
@@ -1882,6 +1889,7 @@ async fn public_call(
             StatusCode::OK
         })
         .header("cache-control", described.cache_control)
+        .header("cdn-cache-control", described.cdn_cache_control)
         .header("etag", described.etag)
         .header("cache-tag", described.tags.join(", "))
         .header("surrogate-key", described.tags.join(" "))

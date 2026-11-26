@@ -27,8 +27,16 @@ on:
   pull_request:
     branches: [main, bleeding]
   workflow_dispatch:
+    inputs:
+      coverage:
+        type: boolean
+        default: false
   # Called by nightly.yml, one suite after another (owner ruling 2026-11-02).
   workflow_call:
+    inputs:
+      coverage:
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -38,7 +46,7 @@ env:
 
 # Runs on `main` (the nightly one) are never cancelled.
 concurrency:
-  group: federation-e2e-${{ github.ref }}
+  group: federation-e2e-${{ github.ref }}-${{ inputs.coverage && 'coverage' || 'tests' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
@@ -70,7 +78,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
-        run: node scripts/ci-affected.mjs
+        run: |
+          if [ "${{ inputs.coverage }}" = true ]; then
+            echo 'federation_e2e=true' >> "$GITHUB_OUTPUT"
+            echo 'authz=false' >> "$GITHUB_OUTPUT"
+          else
+            node scripts/ci-affected.mjs
+          fi
 
   throwaway:
     name: federation e2e
@@ -146,6 +160,31 @@ jobs:
         if: env.REACHED == 'true'
         run: bash scripts/ci-pg-fast-commits.sh
 
+      - name: Install coverage tools
+        if: inputs.coverage
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@c3076e6fa5aeb9a93daf1bd8eff73345250a8a9c # cargo-llvm-cov
+        if: inputs.coverage
+        with:
+          tool: cargo-llvm-cov
+      - name: Prepare coverage
+        if: inputs.coverage
+        run: |
+          mkdir -p coverage-out
+          bash scripts/e2e-coverage.sh env > coverage-out/env.sh
+          source coverage-out/env.sh
+          cargo llvm-cov clean --workspace
+          # Each subsequent shell step loads the exact same environment.
+          bindir="${CARGO_LLVM_COV_TARGET_DIR:?}/debug"
+          {
+            echo "BASH_ENV=$GITHUB_WORKSPACE/coverage-out/env.sh"
+            echo "ORDO=$bindir/ordo"
+            echo "ORDO_HOST_BIN=$bindir/ordo-host"
+            echo "E2E_IDENTITY_BIN=$bindir/ordo-identity-service"
+          } >> "$GITHUB_ENV"
+
       - name: Build ordo-host, ordo and ordo-identity-service
         if: env.REACHED == 'true'
         run: cargo build -p ordo-host -p ordo-cli -p ordo-identity-service
@@ -175,6 +214,21 @@ jobs:
         if: env.REACHED == 'true'
         working-directory: examples/note-viewer/e2e
         run: npx playwright test
+
+      - name: Report example coverage
+        if: ${{ always() && inputs.coverage && env.BASH_ENV != '' }}
+        run: bash scripts/e2e-coverage.sh report federation
+      - name: Upload example coverage
+        if: ${{ always() && inputs.coverage }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lcov-federation
+          path: |
+            coverage-out/lcov-federation.info
+            coverage-out/llvm-federation.json
+            coverage-out/provenance-federation.json
+            coverage-out/toolchain-federation.txt
+          if-no-files-found: error
 
       - name: Upload the traces and stack logs
         if: ${{ env.REACHED == 'true' && (failure()) }}

@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "sourceDigest": "8941f23fc332bca71aef5d7ab4d4b35bc538e1c98a246451ba573c3dc5b21b93",
+  "entries": [
+    {
+      "id": "crates/ordo-api/src/router.rs:153:route-candidate",
+      "status": "source-reviewed",
+      "registration": "Configured generated op registry; router or router_with_blobs",
+      "actors": "Anonymous for declared public ops; authenticated callers according to op access",
+      "contract": "Method derived from operation kind; bound parameters and refinements",
+      "journey": "W1 query/write/refusal and tenant isolation",
+      "downstream": [
+        "crates/ordo-api/src/bind.rs",
+        "crates/ordo-api/src/refine.rs",
+        "crates/ordo-host/src/lib.rs"
+      ],
+      "profile": "Runtime registration must be reconciled per enabled stack profile"
+    },
+    {
+      "id": "crates/ordo-api/src/router.rs:154:route-candidate",
+      "status": "source-reviewed",
+      "registration": "Generated router mounted; live authorization remains per call",
+      "actors": "Authenticated callers with access to each subscribed op",
+      "contract": "GET opens multiplexed stream; add/drop on stream routes",
+      "journey": "W1 live/reconnect/revocation",
+      "downstream": [
+        "crates/ordo-api/src/live.rs",
+        "crates/ordo-api/src/router.rs"
+      ],
+      "profile": "Runtime registration must be reconciled per enabled stack profile"
+    },
+    {
+      "id": "crates/ordo-api/src/router.rs:170:route-candidate",
+      "status": "source-reviewed",
+      "registration": "Configured generated op registry; router or router_with_blobs",
+      "actors": "Anonymous for declared public ops; authenticated callers according to op access",
+      "contract": "Method derived from operation kind; bound parameters and refinements",
+      "journey": "W1 query/write/refusal and tenant isolation",
+      "downstream": [
+        "crates/ordo-api/src/bind.rs",
+        "crates/ordo-api/src/refine.rs",
+        "crates/ordo-host/src/lib.rs"
+      ],
+      "profile": "Runtime registration must be reconciled per enabled stack profile"
+    },
+    {
+      "id": "crates/ordo-api/src/router.rs:171:route-candidate",
+      "status": "source-reviewed",
+      "registration": "Generated router mounted; live authorization remains per call",
+      "actors": "Authenticated callers with access to each subscribed op",
+      "contract": "GET opens multiplexed stream; add/drop on stream routes",
+      "journey": "W1 live/reconnect/revocation",
+      "downstream": [
+        "crates/ordo-api/src/live.rs",
+        "crates/ordo-api/src/router.rs"
+      ],
+      "profile": "Runtime registration must be reconciled per enabled stack profile"
+    },
+    {
+      "id": "crates/ordo-api/src/router.rs:186:route-candidate",
+      "status": "source-reviewed",
+      "registration": "router_with_blobs with configured BlobPort",
+      "actors": "Authorized writer for the target tenant row",
+      "contract": "PUT bytes; blob limits and target field contract",
+      "journey": "W3 file upload and boundary refusals",
+      "downstream": [
+        "crates/ordo-api/src/blob.rs",
+        "crates/ordo-host/src/blob.rs"
+      ],
+      "profile": "Runtime registration must be reconciled per enabled stack profile"
+    },
+    {
+      "id": "crates/ordo-api/src/router.rs:211:route-candidate",
+      "status": "source-reviewed",
+      "registration": "function_routes with configured FunctionRunner",
+      "actors": "Caller authorized by registered function spec",
+      "contract": "Function JSON call and declared resource limits",
+      "journey": "W4 function success/refusal/timeout",
+      "downstream": [
+        "crates/ordo-api/src/functions.rs",
+        "crates/ordo-host/src/fn_runs.rs"
+      ],
+      "profile": "Runtime registration must be reconciled per enabled stack profile"
+    }
+  ],
+  "ranges": []
+}

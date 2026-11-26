@@ -179,8 +179,9 @@ export function Tenants(props: { onSignedOut: () => void }) {
     e.preventDefault();
     const n = name.trim();
     if (!n) return;
+    const key = crypto.randomUUID();
     void act(async () => {
-      const r = await atDeployment(() => createTenant(n, owner.trim()));
+      const r = await atDeployment(() => createTenant(n, owner.trim(), key));
       setName('');
       setOwner('');
       setDone(`Created ${r.created.name}. Its id is ${r.created.space}.`);

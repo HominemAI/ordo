@@ -991,3 +991,415 @@ The list below is as first written.
 10. **The assistant page is new UI.** **Recommendation:** a minimal manager page (Pending, History, Assistant with consent and Revoke), in the teamspace page's style.
 11. **`crates/ordo-host/tests/two_instances.rs` stays `#[ignore]`.** S4 covers its cases end to end. **Recommendation:** leave it as is; revisit after S4 is green.
 12. **The audit says no example declares money or a multi-statement op.** Shopfront declares `money(2)` and `markShipped` writes twice. **Recommendation:** correct the audit's line in the owner's session; X2 step 9 proves the failed second write undoes the first.
+
+## W: reach the web-accessible Rust decision trees
+
+Planning supplement, 2026-11-24. This adds an execution plan, not a claim
+that these features or their tests are complete. It refines the earlier
+increments around the owner's request: minimum application functionality
+that exercises nearly all Rust reachable from an app, down its decision trees.
+
+### W scope and success measure
+
+The target is 100% of executable lines reachable through supported web
+interfaces, approached through real application journeys. There is no
+measured web-only percentage yet. The 33.57% report is a workspace example
+number; it is not this denominator and must not be relabelled as one.
+
+Include application ops, platform ops, authentication, live streams, blobs,
+functions, identity-service APIs and the console's web APIs. Include shared
+Rust libraries and asynchronous work caused by those calls: database work,
+scheduled jobs, delivery retries, invalidation, backfill and recovery.
+Deployment-owner APIs count, with their real authorization requirements.
+
+No unit-test hits contribute. No internal Rust function calls substitute for
+requests. CLI setup can provision the stack, but its coverage must be reported
+separately from coverage collected during web journeys. Keep the earlier CLI
+lifecycle work as a separate release check, not a way to inflate this target.
+
+Count lines and decision outcomes separately. A line executed once does not
+prove every branch on that line. The goal is all reachable outcomes, not all
+combinations of inputs. Add combinations where state, permissions, retries or
+concurrency interact. Do not promise a percentage gain from a feature list.
+
+### Starting evidence
+
+The last inspected matching-source example union measured 52,915 / 157,646
+Rust lines (33.57%). It includes failed scenarios and is not release acceptance.
+Useful priorities from its file-level report are:
+
+| Source | Example line coverage | Next slice |
+|---|---:|---|
+| `ordo-exec/src/import.rs`, `export.rs` | 0% | W3 |
+| `ordo-host/src/bucket_ops.rs`, `ordo-blob/src/s3.rs` | 0% | W3 |
+| `ordo-host/src/identity_ops.rs`, `auth/recover.rs` | 0% | W2 |
+| `ordo-host/src/attest_ops.rs` | 0% | W4 |
+| `ordo-host/src/backfill.rs` | 0% | W5 |
+| `ordo-host/src/evolve.rs` | 6.0% | W5 |
+| `ordo-host/src/clones.rs` | 10.0% | W5 |
+| `ordo-host/src/windows.rs` | 2.2% | W5 |
+| `ordo-console` | 0% | W0 inventory, then W5 |
+
+These are source targets, not estimates of attainable gains. Rebaseline at W0
+and do not compare these percentages to a different source revision.
+
+### W0: establish the denominator and the missing-journey ledger
+
+**First deliverable.** A versioned inventory, tied to a Rust commit, with one
+entry per route or registered operation family. Reconcile it with the runtime
+catalogue in each supported configuration. Regex searches are discovery aids,
+not proof that an operation is registered or callable.
+
+Source entry points to inventory:
+
+- `crates/ordo-api/src/router.rs`: `/op/{name}`, both live protocols, blob
+  upload/read/metadata, `/fn/{name}`.
+- `crates/ordo-host/src/auth/`: the shared authentication route registry.
+- `crates/ordo-host/src/serve.rs`: catalogue, interface, deployment health,
+  usage, metrics and security surfaces.
+- `crates/ordo-host/src/platform_ops.rs` and `runtime.rs`: platform specs,
+  dispatch and configuration-dependent registration.
+- `crates/ordo-identity-service/src/`: service routes and their host callers.
+- `crates/ordo-console/src/server.rs`: console web routes and downstream calls.
+
+For each entry record: method/name, registration condition, allowed actors,
+request contract, handler, downstream modules/workers, configuration profile,
+application action, test, observed result and remaining uncovered ranges.
+Trace call sites as well as declarations. Trace worker enqueue and completion.
+Do not assume a crate is out of scope because its first report is 0%.
+
+Classify executable ranges as:
+
+- **Reachable:** an identified web call or its downstream worker can execute it.
+- **Unresolved:** reachability has not yet been established. Keep these visible
+  and in the conservative denominator until reviewed.
+- **Non-web:** evidence identifies a CLI-only, startup-only or other path with
+  no web caller. Record the callers and why the path is excluded.
+- **Unreachable invariant:** a specific outcome is impossible under supported
+  wiring. Record the invariant and supporting source. Lack of a test is not proof.
+
+Review exclusions by function/range, not blanket crate exclusions. Keep raw
+workspace coverage beside the scoped result. Show excluded and unresolved line
+counts, and fail inventory validation when source changes invalidate ranges.
+Code absent from an instrumented binary is unmeasured, not automatically excluded.
+
+Add an application-only report script and a reachability manifest under
+`coverage/`, plus validation tests for the accounting itself. Those script tests
+are not product-coverage evidence. Reuse the existing LCOV union accounting.
+Collect raw LLVM coverage JSON as well, to preserve branch data when available.
+Check the pinned Rust/LLVM toolchain's branch support in CI before choosing
+flags. If it cannot report branches, publish the explicit outcome ledger;
+never present line coverage as branch coverage.
+
+Start profiling after provisioning; reset or separately tag setup profiles.
+Use distinct profiles per process and scenario, stop workers cleanly and merge
+only matching source revisions. Capture profiles on failed runs too, but label
+those results as failed. Compare baseline and additions using the same binaries,
+configuration and denominator. Record both newly reached and lost lines.
+
+**Acceptance:** every registered surface is mapped; every denominator exclusion
+has evidence; each zero-hit reachable range has an assigned journey or a named
+investigation. A missing route/configuration fails the inventory check.
+**Size:** L, 2 to 3 sessions, 2 CI rounds. Call-graph review and branch tooling set the pace.
+
+### Minimal application additions
+
+Reuse existing pages and authentication. Add controls only where they unlock a
+new path. Do not build a generic endpoint console or expose privileged actions
+to ordinary members. Page mutations use the shared typed client and error path.
+Tests may send malformed HTTP requests the UI correctly prevents, attached to
+the corresponding real user journey.
+
+| Surface | Minimum additional functionality | Why it exists |
+|---|---|---|
+| Marketing studio | Saved filters, paged results, bulk edit, conflict resolution, activity | Query and write branches without another business app |
+| Studio account and team | Credentials, sessions, recovery, groups, access policy and sharing | Full identity and permission lifecycle |
+| Studio data and storage | Import a staged bundle, export, files, tenant storage settings | Data portability, custody, ownership and backend failures |
+| Studio automation | Function runs, scheduled jobs, delivery status and retry | Async execution and its failure paths |
+| Existing owner console | Version preview/apply, evolution, backfill status, clone and rollback controls where supported | Web-accessible deployment operations |
+| Existing note-viewer and assistant | Federation consent and delegated-action controls | Cross-origin trust and delegated permissions |
+| Existing shopfront receiver | Verify delivered proof and show accepted/rejected delivery | Complete the app-triggered attestation journey |
+
+One small data model can cover most value paths: a campaign with money, dates,
+optional values, JSON tags and a sealed note; owned tasks and assets; a unique
+external reference; membership and sharing. Add a field or operation only after
+mapping it to an uncovered planner, executor or binding outcome. Duration
+semantics remain U3 product work, not an assumed existing capability.
+
+### Decision-tree template for every journey
+
+Each journey names its entry point, starting state, actor, action, branch and
+visible outcome. It also states which data and permissions must remain unchanged.
+Use the following applicable outcomes, marking unsupported ones with evidence:
+
+1. Allowed success; empty/single/multiple results; enough rows for 3 pages.
+2. Missing, malformed, wrong-type, out-of-range and boundary input; null versus
+   omitted/default; incompatible method, version, cursor or refinement.
+3. Anonymous, valid member, wrong role, foreign tenant, expired/revoked session,
+   stale presence, delegated caller and deployment owner where supported.
+4. Duplicate/idempotent retry, stale revision, uniqueness conflict and failure
+   after an earlier write in the same transaction. Observe rollback.
+5. Permission/state change while a read, live stream, upload or job is in flight.
+6. Real dependency timeout/disconnect/refusal, restart and recovery. Verify data
+   preservation and exactly the documented retry/delivery semantics.
+7. Configuration enabled, disabled and supported alternatives; registration and
+   refusal behavior must match the configured capability.
+
+Assert response class and status, user-visible state and subsequent reads by
+both authorized and unauthorized people. Use distinct tenants and principals.
+For absence on a live feed, wait for a permitted sentinel then assert the secret
+never arrived. Use observable readiness and bounded polling, not fixed sleeps.
+
+### W1: query, write and live behavior
+
+Extend the studio's existing lists and editor. Add filter/sort/search controls,
+relationship summaries and one atomic bulk action. Seed boundary values and
+more than 2 pages. Cover open/closed refinements, aggregates, joins, defaults,
+JSON, sealed searches where supported, delete/cascade and transaction rollback.
+
+Use 2 browsers on 2 host replicas. Cover both live transports, subscribe/remove,
+reconnect, stale cursors, empty results becoming nonempty, ordering changes,
+permission loss, tenant switching, backpressure and public cache invalidation.
+Reuse S1 through S5 assertions, including the currently failing strict checks.
+No cache bypass merely to make the page see a fresh answer.
+
+**Targets:** `ordo-api` bind/refine/page/router/live/idempotency, `ordo-plan`,
+`ordo-exec` query/write, host refinement, public/cache and invalidation paths.
+**Acceptance:** every selected query/write branch has a page journey and the
+matching malformed/refused request variants; live and tenant isolation survive
+concurrent changes. **Size:** L, 2 to 3 sessions, 2 to 3 CI rounds.
+
+### W2: account, access and recovery
+
+Add account settings to the existing session UI. Exercise every configured
+sign-in method, credential enrolment/removal, second factors, session renewal,
+sign-out, recovery codes, recovery holds/objections and owner succession.
+Use the actual mail capture service, virtual WebAuthn devices and a protocol
+OIDC provider. Ordo's auth, token checks, session storage and policy remain real.
+
+Add groups, scoped sharing, invitation expiry/reuse and tenant access choices.
+Use the existing assistant for delegation consent, scope restriction, expiry
+and withdrawal; use note-viewer for federation approval and revocation.
+Drive the already exposed `std.identity.*` recovery cases and
+`std.space.recoverMember`/`succeedOwner` as the proper actors.
+
+**Targets:** host `identity_ops.rs`, `auth/recover.rs`, credentials, factors,
+recovery policies, membership, consent, delegation and identity-service flows.
+**Acceptance:** each configured method works end to end and cannot bypass its
+required factor/presence/role; recovery does not transfer another person's data;
+revocation reaches both replicas and already open feeds.
+**Size:** L per authentication/recovery and sharing/federation slice, 4 to 6
+sessions total, 4 to 6 CI rounds. Provider and recovery state setup set the pace.
+
+### W3: data portability and storage
+
+Add a data panel using `std.space.export` and `std.space.import`, distinct from
+an ordinary SDK row download. The existing import reads a bundle staged under
+`ORDO_IMPORT_BUNDLE_DIR`; `runtime.rs` confirms that an unset directory
+leaves the import operation unregistered.
+The fixture stages real bundles in the destination space's authorized directory;
+the page selects a bundle and invokes import. Do not invent an upload API or
+let browser input select an arbitrary server path.
+
+Exercise correct and malformed bundles, schema mismatch, people mapping,
+sealed fields, attached blobs, duplicate import, resume after interruption and
+foreign-space/path traversal refusals. Compare actual row values, references,
+access and file bytes after export/import. Compare page reads after failure.
+
+Add storage controls for `std.space.attachBucket` and `detachBucket`. Run file
+journeys against both local storage and an S3-compatible service, including
+metadata, missing/corrupt objects, quota/size boundaries, backend outage and
+retry. Verify the applicable public/private and tenant authorization branches.
+Crypto-erasure/deletion uses disposable spaces and proves old credentials and
+handles no longer read data while an unaffected tenant continues working.
+
+**Targets:** host `exit_ops.rs`, `bucket_ops.rs`, `blob.rs`; executor import,
+export, bucket, usage; `ordo-blob/src/s3.rs`; relevant custody/crypto paths.
+**Acceptance:** a complete round trip preserves content and boundaries;
+interrupted imports resume without duplicate business records; storage failures
+do not acknowledge data that cannot subsequently be read.
+**Size:** L, 2 to 3 sessions, 3 CI rounds. Bundle and S3 profiles set the pace.
+
+### W4: functions, jobs and deliveries
+
+Extend campaign automation with run status and inputs, a bounded batch task,
+one scheduled task and one outbound integration. Cover typed result validation,
+permitted/forbidden nested ops, limits, timeout, cancellation where exposed,
+missing secrets and unavailable destinations. Use a controllable HTTPS receiver
+for delayed, malformed, refused and successful responses.
+
+Run the real scheduler and delivery workers. Observe the resulting data or
+receiver message, retry/dead-letter state, and replay/retry only through the
+supported application action. Do not manually call a worker's Rust function.
+Use shopfront's proof receiver for `std.space.attestTo`, `chainProof`,
+`attestation` and delivery dead letters. Verify tampering is rejected by the real
+verifier. Keep the existing V1 receipt capability questions visible.
+
+**Targets:** `ordo-fn`, `ordo-egress`, host routines, function runs, attestation
+and delivery workers, proof verification, command log and cryptographic checks.
+**Acceptance:** successful, refused and failed runs have the documented effects;
+retries and restarts preserve the stated delivery semantics and caller scope.
+**Size:** L, 2 to 3 sessions, 2 to 3 CI rounds.
+
+### W5: web owner operations and schema lifecycle
+
+Use the existing console where it already exposes the action. Add the smallest
+missing control for a registered web operation. Do not put deployment ownership
+credentials in the marketing app's public session or widen its roles.
+
+Exercise version source/preview, activation, tenant pinning, revocation,
+evolution, replay and rollback checks. Source anchors include `deploy_ops.rs`,
+`evolve.rs` (`std.deployment.evolve`, `plans`, `replay`, `rollbackCheck`),
+`clones.rs` (`cloneOut`, `cloneIn`) and `window_ops.rs`.
+
+Prepare 2 small schema revisions of the same campaign application. Add a
+required field through a backfill and change a constrained value type. Test
+invalid source, unsafe changes, explicit money rescale/keep, failed mapping,
+concurrent writes during backfill, interrupted worker, resume and activation
+only after verification. Exercise shared and dedicated tenant databases.
+Clone to an isolated destination; verify tenant data/custody restrictions and
+refusals for invalid keys/source. Exercise maintenance windows and environment
+promotion when registered. After every transition, both old and new browser
+sessions read/write according to the served-version contract.
+
+**Targets:** console HTTP handlers, syntax/sema/schema code reached by source
+submission, host apply/evolve/backfill/version/clone/window/promotion paths.
+**Acceptance:** data survives successful evolution and refused/failed changes;
+replicas agree on serving state; rollback eligibility is observed before use.
+**Size:** 2 L slices, 4 to 6 sessions, 4 to 6 CI rounds. Backfill and multi-node
+state convergence set the pace. This uses local disposable stacks, never Argo.
+
+### W6: failure profiles and the remaining branches
+
+Apply this alongside W1 through W5, then use the uncovered-range ledger to find
+what is still missing. Do not create more business pages until an existing page
+plus data/configuration/fault variation has been ruled out.
+
+Run supported profiles for public/authenticated access, shared/dedicated tenant
+DBs, local/S3 storage, single/multiple hosts and local/federated identity.
+Pairwise combinations limit routine CI cost; explicitly run combinations that
+share state or trust boundaries. Do not claim a pairwise matrix proves all cases.
+
+A fixture controller may stop/restart only test processes, interrupt proxy links,
+delay receiver replies and change supported configuration. Application actions
+still enter through HTTP. Do not fabricate a Rust error result or stub Ordo's
+clients, access checks, executor or storage implementation. Stage corrupt data
+only when modeling a real persisted-data failure, record how it can arise, and
+verify the app-visible diagnosis and unaffected tenant behavior.
+
+Include limits, retry exhaustion, contention, session expiry, concurrent owners,
+unsupported configuration and hostile requests. Test secret redaction on both
+success and error paths. Security-sensitive refusals remain release findings
+when wrong; never relax assertions to improve coverage.
+
+**Acceptance:** every remaining reachable zero-hit range has a concrete journey,
+a reproduced defect, or an explicit unresolved investigation. Documented gaps
+remain gaps, consistent with the owner's refusal to omit them in U3.
+**Size:** M per remaining family, 1 to 2 CI rounds each. Count is measured after W5.
+
+### Coverage review: explicit journeys missing from the first draft
+
+Source review on 2026-11-24 found the following families under-specified.
+They are mandatory entries in W0 and extensions to the named slices, not
+reasons to build another application. Their registration and supported behavior
+must be checked before selecting exact request parameters.
+
+| Family | Minimum journey and outcomes | Owner slice / source evidence |
+|---|---|---|
+| Tenant lifecycle | Create a space through the app; self-service allowed/refused; pause/resume as tenant and deployment owner; leave, last-owner refusal where required, reap and delete; unrelated tenant keeps working | W2/W3/W5; `tenant_ops.rs`, `self_serve.rs`, `pause.rs`, `release_ops.rs`, `reap_op.rs`, `fleet.rs` |
+| Console bootstrap and trust | First setup, owner invitation/removal, console passkey recovery and step-up; link the door, rotate/revoke its key, unlink/forget and relink; old authority stays refused | W5; `ordo-console/src/server.rs` setup, owner and door routes |
+| Console runtime control | Apply, rollback and restart through console HTTP; unavailable runtime/door and partial failure; browser reconnects and verifies persisted app data | W5/W6; console runtime routes and their real downstream supervisor calls |
+| Machine and device credentials | Browser approval followed by actual token redemption/use; rejected/expired/reused approval; wrong audience/grant, rotation and revocation; no elevation into human-only presence actions | W2; identity-service `/cli/approve`, `/cli/redeem`, `/machine/begin`, `/machine/complete`, host `deployment_access.rs` |
+| Live policy changes | Set tenant/deployment session policy and password slowdown; change provider connection, origin list and self-service policy while sessions/feeds exist; verify documented inheritance and effective permissions | W2/W6; `session_policy.rs`, `guess_limits.rs`, `tenant_providers.rs`, `tenant_origins.rs` |
+| Secret lifecycle | Set/list/replace/remove an integration secret; listing never returns its value; function/delivery observes permitted changes; removed and foreign secrets stay inaccessible | W4/W5; `secrets.rs`, function and egress consumers |
+| Operational read surfaces | Read usage, observed cost, health and security records as allowed/forbidden actors; empty/populated/paged output and unavailable dependency; no tenant names or secrets leaked | W5/W6; `serve.rs`, `observed_cost.rs`, `security_record.rs`, quotas and usage handlers |
+
+**Actual browser protocol behavior (W1/W2/W6).** Run same-origin and allowed/
+forbidden cross-origin pages, with actual preflight and fetch credential modes.
+Exercise public versus authenticated routes, tenant-specific origins, refresh
+cookie scope and supported cookie attributes, missing/mismatched Origin, expired
+refresh and concurrent renewal. Verify the implemented anti-forgery checks on
+cookie-authenticated mutations. A Node request cannot prove browser CORS or
+cookie enforcement. CORS refusal must not be confused with server authorization:
+`ordo-api/src/cors.rs` explicitly allows some actual requests while withholding
+browser-readable cross-origin access.
+
+At the HTTP boundary also cover malformed JSON, unexpected content types,
+invalid UTF-8 where applicable, body limits, duplicate/ambiguous parameters,
+wrong method, invalid encoded names and forwarded-address handling under trusted
+and untrusted proxy configurations. Assert named refusal and no side effects.
+Only test protocol variants the deployed server supports; record others as such.
+
+**Identity-provider lifecycle (W2/W6).** Cover discovery and JWKS retrieval,
+unknown key id, key rotation/cache refresh, issuer/audience/signature/time
+refusals, unavailable provider and changed/retired tenant connection. Browser
+consent must preserve redirect/state/nonce/PKCE requirements wherever the
+supported flow uses them. Include an actual identity-service-backed profile;
+a controlled external provider complements it rather than replacing it.
+Use `ordo-identity-service/src/routes.rs` and the host's federation callers as
+the inventory sources. Routes containing `cli` still count if they are HTTP
+callable; the name alone is not evidence of a non-web exclusion.
+
+**Stateful sequences and realistic scale (W6).** In addition to isolated tests,
+run a seeded sequence of create/share/edit/upload/revoke/delete/rejoin actions
+through normal interfaces. Persist the seed and action log for reproduction.
+Check tenant separation, reference integrity, acknowledged writes and permissions
+after each transition. Use actual read interfaces as the oracle, supplemented
+by independent artifact/receiver checks. Exercise one large supported dataset,
+slow consumer and sustained reconnect profile; define bounds from the product
+contract or mark a missing limit as unresolved instead of inventing an SLO.
+
+**Outcome completeness (W0/W6).** Map each applicable enum/error variant and
+important boolean outcome in the reached handler chain to a journey, invariant
+or unresolved entry. Reconcile this with dynamic branch data where supported.
+Line/branch totals cannot establish full path coverage, and the full combination
+of paths is generally unbounded. Focus sequence combinations on shared mutable
+state and trust boundaries; record the residual risk explicitly.
+
+These additions enlarge W2, W5 and W6. Re-estimate their session and CI counts
+after W0 rather than retaining the first draft's sizes as a complete total.
+
+### Known reachability questions, not assumed exclusions
+
+- `ordo-exec/src/undo.rs` and `reseal.rs`: initial caller search finds direct
+  invocations in CLI `operator.rs` and `keys.rs`. W0 must trace console/host
+  callers before classifying individual functions. A generic browser shell
+  executing CLI commands would not establish native web reachability.
+- Supervisor and generator: inspect actual console and web-deployment callers;
+  zero hits alone establishes nothing about reachability.
+- Import staging and export artifact retrieval: distinguish an HTTP operation
+  from a complete browser file-transfer path. Missing transport functionality
+  is a separately identified product gap, not an imaginary existing endpoint.
+- Disabled routes, impossible wiring guards and unbuilt semantics: retain
+  evidence and the expected user contract. Do not implement new public APIs
+  solely to turn currently non-web Rust into denominator coverage.
+
+### Execution order and release evidence
+
+1. W0 inventory and reproducible web-only baseline.
+2. W1 query/write/live, then W3 portability/storage. These reuse the existing
+   studio and attack measured executor gaps with little new UI.
+3. W2 account/recovery and federation, then W4 jobs/deliveries.
+4. W5 owner operations in 2 reviewed slices.
+5. W6 remaining outcomes, prioritized by impact and uncovered lines.
+
+Reuse the earlier S/U/X/V increments rather than implementing their tests twice.
+All slices stay in PR #59 (owner, 2026-11-24). Before page work, load the required modern web
+skill. Keep work in an isolated checkout, preserve Claude's active files and
+follow this plan's board/roadmap handoff. No local full Rust builds alongside
+another agent's builds. Sizes above are provisional; W0 resolves the unknowns.
+
+Every PR reports the exact source revision, scenario/profile matrix, assertions
+passed/failed, scoped line coverage, branch/outcome coverage, newly reached
+ranges and remaining gaps. Attach the per-scenario profiles and reproduction
+instructions. A failure found through usage gets a regression journey and a
+Reported fixes handoff with symptom, cause when established, expected fix and
+release impact. Do not mark the overall increment complete while its required
+journeys fail.
+
+Release evidence requires all supported entry points represented, all critical
+permission/data-loss/recovery outcomes passing, no unresolved release-blocking
+findings, and an honest disposition for every remaining uncovered range. A high
+percentage cannot override a failed isolation or durability assertion. The
+near-100% target is approached by closing that ledger, not by shrinking the
+reported denominator or adding unit-test hits.

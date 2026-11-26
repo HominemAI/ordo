@@ -1,7 +1,7 @@
 # A marketing site: products, pricing plans and testimonials that anyone can
 # read with no token, and a contact form that anyone can write to.
 #
-# Each content entity has a `public` line, so a public op may read its fields.
+# Products mark individual fields public; internalNote stays private.
 # The four reads below are `public`: a visitor calls `GET /op/pricing` with no
 # sign-in. The site owner fills the content with the ordinary add ops, signed
 # in, in the deployment's space (`system`).
@@ -12,17 +12,21 @@
 # `features` is a JSON array of short strings, `["SSO", "Audit log"]`.
 # `rank` orders each list on the page, lowest first.
 
-domain marketing @ 0.2.0
+domain marketing @ 0.3.0
+
+# Colleagues can leave; the platform still protects the last owner.
+release member open
 
 entity products {
-  slug:        text unique
-  name:        text
-  tagline:     text
-  description: text = ""
-  price:       money(2)
-  features:    json = []
-  rank:        int = 100
-  public
+  slug:        text unique public
+  name:        text public
+  tagline:     text public
+  description: text = "" public
+  price:       money(2) public
+  features:    json = [] public
+  rank:        int = 100 public
+  internalNote: text = ""
+  check price >= 0.00
 }
 
 entity plans {
@@ -33,6 +37,7 @@ entity plans {
   features:    json = []
   highlighted: bool = false
   rank:        int = 100
+  check price >= 0.00
   public
 }
 
@@ -43,6 +48,7 @@ entity testimonials {
   quote:   text
   stars:   int = 5
   rank:    int = 100
+  check stars >= 1 and stars <= 5
   public
 }
 
@@ -53,6 +59,9 @@ entity enquiries {
   email:   text(200)
   company: text(120) = ""
   message: text(2000)
+  status: text = "new"
+  notes: text = ""
+  check status == "new" or status == "responding" or status == "won" or status == "closed"
 }
 
 # The public reads the page calls. A visitor needs no token.
@@ -84,11 +93,140 @@ op enquiryList =
   enquiries[id, name, email, company, message]
   take 100
 
-op addProduct($slug: text, $name: text, $tagline: text, $description: text, $price: money(2), $features: json, $rank: int) =
-  set products { slug: $slug, name: $name, tagline: $tagline, description: $description, price: $price, features: $features, rank: $rank }
+op addProduct($slug: text, $name: text, $tagline: text, $description: text, $price: money(2), $features: json, $rank: int, $internalNote: text = "") =
+  set products { slug: $slug, name: $name, tagline: $tagline, description: $description, price: $price, features: $features, rank: $rank, internalNote: $internalNote }
 
 op addPlan($name: text, $tagline: text, $price: money(2), $period: text, $features: json, $highlighted: bool, $rank: int) =
   set plans { name: $name, tagline: $tagline, price: $price, period: $period, features: $features, highlighted: $highlighted, rank: $rank }
 
 op addTestimonial($author: text, $role: text, $company: text, $quote: text, $stars: int, $rank: int) =
   set testimonials { author: $author, role: $role, company: $company, quote: $quote, stars: $stars, rank: $rank }
+
+# The studio workspace. Public content keeps its existing wire shape.
+# Staff edits compare revisions; drafts live in guarded campaigns until published.
+op studioProducts unbounded download =
+  products[id, rev, slug, name, tagline, description, price, features, rank, internalNote]
+  sort rank
+op editProduct($id: id, $rev: int, $name: text, $tagline: text, $description: text, $price: money(2), $features: json, $rank: int, $internalNote: text) =
+  set products { id: $id, rev: $rev, name: $name, tagline: $tagline, description: $description, price: $price, features: $features, rank: $rank, internalNote: $internalNote }
+op deleteProduct($id: id) = del products { id: $id }
+op studioPlans unbounded download =
+  plans[id, rev, name, tagline, price, period, features, highlighted, rank]
+  sort rank
+op editPlan($id: id, $rev: int, $name: text, $tagline: text, $price: money(2), $period: text, $features: json, $highlighted: bool, $rank: int) =
+  set plans { id: $id, rev: $rev, name: $name, tagline: $tagline, price: $price, period: $period, features: $features, highlighted: $highlighted, rank: $rank }
+op deletePlan($id: id) = del plans { id: $id }
+op studioReviews unbounded download =
+  testimonials[id, rev, author, role, company, quote, stars, rank]
+  sort rank
+op editReview($id: id, $rev: int, $author: text, $role: text, $company: text, $quote: text, $stars: int, $rank: int) =
+  set testimonials { id: $id, rev: $rev, author: $author, role: $role, company: $company, quote: $quote, stars: $stars, rank: $rank }
+op deleteReview($id: id) = del testimonials { id: $id }
+op inbox unbounded download =
+  enquiries[id, rev, name, email, company, message, status, notes]
+  sort name
+op triageEnquiry($id: id, $rev: int, $status: text, $notes: text) =
+  set enquiries { id: $id, rev: $rev, status: $status, notes: $notes }
+op deleteEnquiry($id: id) = del enquiries { id: $id }
+op enquiryReport =
+  enquiries[status] group status { total: count }
+
+entity campaigns {
+  title: text(200)
+  brief: text = ""
+  tags: json = []
+  budget: money(2) = 0.00
+  status: text = "draft"
+  due: date?
+  created: datetime
+  check status == "draft" or status == "review" or status == "published" or status == "archived"
+  check budget >= 0.00
+  acl (read, write, admin)
+}
+entity assets {
+  campaign -> campaigns owned
+  name: text
+  kind: text = ""
+  size: int = 0
+  file: blob?
+}
+entity reminders {
+  campaign -> campaigns owned unique
+  due: datetime
+  fired: datetime?
+}
+op campaignList unbounded download =
+  campaigns[id, rev, title, brief, tags, budget, status, due, created]
+  sort -created
+op campaignsTagged($tag: text) unbounded =
+  campaigns(tags contains $tag)[id, rev, title, brief, tags, budget, status, due, created]
+  sort -created
+op createCampaign($title: text(200), $brief: text, $tags: json, $budget: money(2), $due: date = null, $created: datetime filled) =
+  set campaigns { title: $title, brief: $brief, tags: $tags, budget: $budget, due: $due, created: $created }
+op editCampaign($id: id, $rev: int, $title: text(200), $brief: text, $tags: json, $budget: money(2), $due: date = null, $status: text) =
+  set campaigns { id: $id, rev: $rev, title: $title, brief: $brief, tags: $tags, budget: $budget, due: $due, status: $status }
+op deleteCampaign($id: id) = del campaigns { id: $id }
+op campaignReport =
+  campaigns[status] group status { total: count }
+op campaignAccess($campaign: id) unbounded =
+  campaignsAccess(campaign == $campaign)[id, member, level]
+op unshareCampaign($campaign: id, $member: id) =
+  del campaignsAccess(campaign == $campaign and member == $member)
+op campaignFiles($campaign: id) unbounded =
+  assets(campaign == $campaign)[id, rev, campaign, name, kind, size, file]
+op addAsset($campaign: id, $name: text, $kind: text, $size: int) =
+  set assets { campaign: $campaign, name: $name, kind: $kind, size: $size }
+op deleteAsset($id: id) = del assets { id: $id }
+op campaignReminders unbounded =
+  reminders[id, campaign, due, fired]
+  sort due
+op setReminder($campaign: id, $due: datetime) =
+  set reminders { campaign: $campaign, due: $due, fired: null }
+op clearReminder($campaign: id) = del reminders(campaign == $campaign)
+routine fireReminders in marketing {
+  trigger every 30s
+  notify admin "A campaign reminder is due"
+  run($now: datetime):
+    reminders(due <= $now and fired == null)[id]
+    each -> set reminders { id: id, fired: $now }
+}
+op people unbounded =
+  members(kind == "principal")[id, displayName, role, status]
+  sort displayName
+op me = members(id == $caller)[id, displayName, role]
+
+op allAssets unbounded download = assets[id, campaign, name, kind, size, file]
+
+# A brief review runs beside the data as the caller, with no external service.
+op oneCampaign($id: id) =
+  campaigns(id == $id)[id, title, brief, budget, due, status]
+function reviewBrief in marketing {
+  call($campaign: id) -> json by member
+  code "fn/review-brief.js"
+  uses oneCampaign
+  limit wall 5s, memory 32 mb
+}
+
+# Record approval and change state in one command group. A stale revision
+# refuses the whole group, including the approval record.
+entity approvals {
+  campaign -> campaigns owned
+  reviewer -> members
+  at: datetime
+  note: text
+  check note != ""
+}
+op approveCampaign($id: id, $rev: int, $note: text, $at: datetime filled) =
+  set campaigns { id: $id, rev: $rev, status: "published" }
+  set approvals { campaign: $id, reviewer: $caller, at: $at, note: $note }
+op approvalHistory($campaign: id) unbounded =
+  approvals(campaign == $campaign)[id, reviewer, at, note]
+  sort -at
+
+# File inspection uses the same caller and blob door as downloading a file.
+function inspectCampaignFile in marketing {
+  call($campaign: id, $file: blob) -> json by member
+  code "fn/inspect-files.js"
+  uses oneCampaign, campaignFiles
+  limit wall 10s, memory 32 mb
+}

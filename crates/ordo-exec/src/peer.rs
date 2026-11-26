@@ -187,7 +187,7 @@ external tags from crm.tags shared {
         let mut s = compiled();
         resolve_with(&mut s, |v| match v {
             "ORDO_PEER_JOURNAL_URL" => Some("https://journal.example.com".into()),
-            "ORDO_PEER_JOURNAL_SCHEMA" | "ORDO_EXTERNAL_JOURNAL_SCHEMA" => Some("alpha".into()),
+            "ORDO_EXTERNAL_JOURNAL_SCHEMA" => Some("alpha".into()),
             _ => None,
         })
         .expect("resolves");

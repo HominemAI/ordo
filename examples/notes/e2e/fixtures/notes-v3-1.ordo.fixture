@@ -67,13 +67,13 @@ domain notes @ 0.3.1
 # note_viewer's id at the identity service is the setting
 # ORDO_CONSUMER_NOTE_VIEWER_CLIENT.
 #
-# - On behalf of a person, `std.notes.list` answers the notes that person
-#   may read here: this file's acl decides, as it does for this app's page.
+# - On behalf of a person, `myNotes` answers the notes that person may read
+#   here, as it does for this app's own page: this file's acl decides.
 # - As itself, with nobody signed in there, `publicNotes` answers the notes
-#   tagged `public`. `std.notes.list` answers nothing as itself: no acl row
-#   names a deployment.
+#   tagged `public`. `myNotes` answers nothing as itself: no acl row names a
+#   deployment.
 grant note_viewer as itself {
-  std.notes.list
+  myNotes
   publicNotes
 }
 

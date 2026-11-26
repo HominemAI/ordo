@@ -336,7 +336,7 @@ fn notes_v2_with_a_grant_to_note_viewer_compiles_and_expands() {
     assert_eq!(program.schema.grants.len(), 2, "note_viewer's and this one");
     let ops = cg::program_ops(&program.doc);
     let own = cg::expand(&program.schema.grants[0], &ops).expect("expands");
-    assert_eq!(own.grant.ops, ["publicNotes", "std.notes.list"]);
+    assert_eq!(own.grant.ops, ["myNotes", "publicNotes"]);
     assert!(own.grant.as_itself);
     let x = cg::expand(&program.schema.grants[1], &ops).expect("expands");
     let granted = &x.grant.ops;

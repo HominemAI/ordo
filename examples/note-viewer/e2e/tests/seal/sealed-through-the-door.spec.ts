@@ -2,10 +2,10 @@
  * A sealed field shown through the door (plan-federation-grants.md §6,
  * steps G7 and G8; plan-versions.md increment 13).
  *
- * notes moves from 0.3.3 to 0.3.4, which seals `notes.body` and says
- * `std sealed` on `notes`, so its `std.notes.list` carries the field. The
- * grant to note_viewer does not stop the seal: notes opens the field in its
- * own answers, under its own rules for the person, and no key leaves it.
+ * notes moves from 0.3.3 to 0.3.4, which seals `notes.body`, a field its
+ * `myNotes` answers. The grant to note_viewer does not stop the seal: notes
+ * opens the field in its own answers, under its own rules for the person,
+ * and no key leaves it.
  * The developer runs the step through notes' door and activates 0.3.4.
  *
  * The viewer's page then shows the person's note with its body, and notes'
@@ -26,7 +26,10 @@ import { expect, test } from '@playwright/test';
 import { developer, door } from '../developer.js';
 import { addNote, joinNotes, list, person, refusal, shows, signInToViewer, sqlAs, stack, unique } from '../support.js';
 
-/** 0.3.4: the 0.3.3 fixture with `notes.body` sealed and `std sealed`. */
+/**
+ * 0.3.4: the 0.3.3 fixture with `notes.body` sealed, and a `createNote` that
+ * takes the notes page's `tags` again, unused, so the page can write.
+ */
 function sealed(): string {
   const dir = mkdtempSync(join(tmpdir(), 'notes-sealed-'));
   let source = readFileSync(
@@ -35,7 +38,8 @@ function sealed(): string {
   );
   for (const [from, to] of [
     ['domain notes @ 0.3.3', 'domain notes @ 0.3.4'],
-    ['  body:  text = ""\n', '  body:  text sealed\n  std sealed\n'],
+    ['  body:  text = ""\n', '  body:  text sealed\n'],
+    ['op createNote($title: text, $body: text, $created: datetime) =', 'op createNote($title: text, $body: text, $tags: json, $created: datetime) ='],
   ]) {
     expect(source, `the fixture still holds ${from}`).toContain(from);
     source = source.replace(from, to);
@@ -53,9 +57,6 @@ test('notes seals a field the viewer reads: the viewer shows it, opened by notes
   const dev = await developer(browser);
   try {
     await joinNotes(fay.page, 'Fay');
-    const title = unique('Fay sealed');
-    const body = unique('kept-under-key-');
-    await addNote(fay.page, title, body);
 
     const dir = sealed();
     const stored = dev.ordo('notes', ['apply', dir, '--no-activate', ...door('notes')]);
@@ -63,13 +64,18 @@ test('notes seals a field the viewer reads: the viewer shows it, opened by notes
     const plan = dev.ordo('notes', ['evolve', '--from', '0.3.3', '--to', '0.3.4', ...door('notes')]);
     expect(plan.code, `${plan.out}\n${plan.err}`).toBe(0);
     expect(plan.out).toContain('backfill: notes.body = seal');
-    // Not refused: the grant is named, as a warning.
-    expect(plan.out).toContain('`grant note_viewer` opens `notes` to another deployment, field `body`');
     const ran = dev.ordo('notes', ['evolve', '--from', '0.3.3', '--to', '0.3.4', '--run', ...door('notes')]);
     expect(ran.code, `${ran.out}\n${ran.err}`).toBe(0);
     const active = dev.ordo('notes', ['apply', dir, ...door('notes')]);
     expect(active.code, `${active.out}\n${active.err}`).toBe(0);
     expect(active.out).toContain('activated  0.3.4');
+
+    // Fay writes a note under 0.3.4, from the notes page. Its `createNote`
+    // takes the page's `tags` again and stores nothing of them.
+    const title = unique('Fay sealed');
+    const body = unique('kept-under-key-');
+    await fay.page.reload();
+    await addNote(fay.page, title, body);
 
     // The table holds no plaintext.
     expect(

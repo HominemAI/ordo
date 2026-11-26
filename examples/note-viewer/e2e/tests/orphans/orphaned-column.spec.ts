@@ -5,20 +5,19 @@
  *
  * notes moves to 0.3.3 (fixtures/notes-no-tags), which stops declaring
  * `notes.tags`. Its column is an orphan: kept, never written, and never
- * answered by notes' door. Without tags notes has no public list, so its
- * grant opens `std.notes.list` only.
+ * answered by notes' door. `myNotes` no longer answers `tags`, and without
+ * tags notes has no public list, so its grant opens `myNotes` only.
  *
- * - The person's list still asks `std.notes.list` for `tags`: notes
- *   refuses by name, and the page shows the refusal in its place.
- * - The public list calls `publicNotes`, which notes no longer grants: the
- *   refusal names the op and the grant.
+ * - The person's list still asks `myNotes` for `tags`: notes refuses by
+ *   name, and the page shows the refusal in its place.
+ * - The public list calls `publicNotes`, which notes no longer has: the
+ *   refusal names the op.
  *
  * The viewer stops reading `tags` (0.2.2), and the person's list shows
  * again. A regression looks like the viewer listing notes with frozen
  * tags, or a refusal that does not name the field or the op.
  *
- * It changes notes' program for the whole stack, so it runs after `rename`,
- * whose last step leaves the viewer mapping `heading`.
+ * It changes notes' program for the whole stack, so it runs after `rename`.
  */
 
 import { copyFileSync, cpSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -39,16 +38,12 @@ function withoutTags(): string {
   return dir;
 }
 
-/** note_viewer at 0.2.2: 0.2.1 (`heading`) with `tags` no longer read. */
+/** note_viewer at 0.2.2: `tags` no longer read. */
 function viewerWithoutTags(): string {
   const dir = mkdtempSync(join(tmpdir(), 'viewer-no-tags-'));
   let source = readFileSync(fileURLToPath(new URL('../../../viewer.ordo', import.meta.url)), 'utf8');
   const swaps: [string, string][] = [
     ['domain noteviewer @ 0.2.0', 'domain noteviewer @ 0.2.2'],
-    [
-      'external entries from notes.notes shared {\n  id: text <- id\n  title: text <- title\n',
-      'external entries from notes.notes shared {\n  id: text <- id\n  title: text <- heading\n',
-    ],
     ['  tags: json <- tags\n', ''],
     ['entries[id, title, body, tags, created]', 'entries[id, title, body, created]'],
   ];
@@ -87,8 +82,8 @@ test('notes stops declaring `tags`: each list the viewer reads is refused by nam
       await expect(mineSaid).toContainText('tags');
       const openSaid = refusal(viewer, 'Public notes');
       await expect(openSaid).toBeVisible({ timeout: 3_000 });
+      await expect(openSaid).toContainText('peer_refused');
       await expect(openSaid).toContainText('publicNotes');
-      await expect(openSaid).toContainText('grant');
     }).toPass({ timeout: 90_000 });
 
     const r = ordoAs('viewer', ['apply', viewerWithoutTags(), '--direct', '--as', 'fed-e2e', '--wait-secs', '240']);

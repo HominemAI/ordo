@@ -1174,12 +1174,12 @@ mod tests {
         // Peers and consumers are named, and never fail the check.
         assert!(
             text.contains(
-                "peer journal (`journal`, as of 2027-01-15 08:00): Ordo 9.8.0, ANOTHER RELEASE"
+                "peer journal (`journal`, as of 2027-01-15 08:00 UTC): Ordo 9.8.0, ANOTHER RELEASE"
             ),
             "{text}"
         );
         assert!(
-            text.contains("consumer note_viewer (`viewer`, as of 2027-01-15 08:00): not sent"),
+            text.contains("consumer note_viewer (`viewer`, as of 2027-01-15 08:00 UTC): not sent"),
             "{text}"
         );
         assert!(text.contains("only through its door"), "{text}");

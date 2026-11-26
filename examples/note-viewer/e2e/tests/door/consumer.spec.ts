@@ -47,7 +47,7 @@ test('the viewer registers its key and its apply is checked against notes v2’s
     const applied = dev.ordo('viewer', ['apply', viewerDir, ...door('viewer')]);
     expect(applied.code, `${applied.out}\n${applied.err}`).toBe(0);
     expect(applied.out).toContain('peer        notes: 2 op(s) granted');
-    expect(applied.out).toContain('peer        notes: told it this version calls std.notes.list, publicNotes');
+    expect(applied.out).toContain('peer        notes: told it this version calls myNotes, publicNotes');
   } finally {
     await dev.close();
   }

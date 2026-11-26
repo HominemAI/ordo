@@ -65,10 +65,10 @@ domain notes @ 0.3.3
 
 # note_viewer (examples/note-viewer) reads these notes through this
 # deployment's door. Without `tags` there is no public list to give it, so
-# only `std.notes.list` is granted, and a consumer that reads `tags` there
-# is refused, naming the field.
+# only `myNotes` is granted, and a consumer that reads `tags` from it is
+# refused, naming the field.
 grant note_viewer as itself {
-  std.notes.list
+  myNotes
 }
 
 entity notes {

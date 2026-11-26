@@ -19,12 +19,12 @@ import type { OpSpec } from '@hominemai/ordo-sdk/core/spec.js';
 export const DESCRIPTOR = {
   schemaVersion: 'ordo.interface/2',
   domain: 'noteviewer',
-  digest: '9984a56cd435979f',
+  digest: '8a406fd08d6492bd',
 } as const;
 
 export const spec_myNotes = {
     op: 'myNotes',
-    version: '244e050d70959442',
+    version: 'efa969075977823d',
     method: 'GET',
     kind: 'read',
     terminal: ['fetch', 'live', 'pages'],
@@ -61,7 +61,7 @@ export const spec_publicNotes = {
 
 export const spec_std$entries$count = {
     op: 'std.entries.count',
-    version: '43b34b065c7f0d61',
+    version: 'caca0f6ae187619b',
     method: 'GET',
     kind: 'read',
     terminal: ['fetch', 'live'],
@@ -79,7 +79,7 @@ export const spec_std$entries$count = {
 
 export const spec_std$entries$get = {
     op: 'std.entries.get',
-    version: '02cae9e329798482',
+    version: '3879dc8c6fdb1964',
     method: 'GET',
     kind: 'read',
     terminal: ['fetch', 'live', 'pages'],
@@ -98,7 +98,7 @@ export const spec_std$entries$get = {
 
 export const spec_std$entries$list = {
     op: 'std.entries.list',
-    version: '2611f4bbd5a97fed',
+    version: 'cf4098a35889443d',
     method: 'GET',
     kind: 'read',
     terminal: ['fetch', 'live', 'pages'],

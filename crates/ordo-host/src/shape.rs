@@ -146,7 +146,7 @@ pub enum ShapeRefusal {
     Mismatch(Vec<ShapeMismatch>),
     /// Every registered read op turned out to be undescribable, so the gate
     /// verified nothing. A gate with zero coverage is not a gate.
-    NoCoverage(ShapeReport),
+    NoCoverage(Box<ShapeReport>),
     /// The shadow schema could not be built, or the database was
     /// unreachable. Verification could not run, so it did not pass.
     Unavailable(String),
@@ -552,7 +552,7 @@ async fn verify_on(
     }
     // A program whose every read is a peer's has nothing here to verify.
     if report.verified.is_empty() && report.peer_reads.is_empty() {
-        return Err(ShapeRefusal::NoCoverage(report));
+        return Err(ShapeRefusal::NoCoverage(Box::new(report)));
     }
     Ok(report)
 }

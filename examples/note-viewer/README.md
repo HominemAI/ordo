@@ -9,7 +9,7 @@ definition file (`viewer.ordo`) and its own page (`web/`).
 - **Shared sign-in.** Both apps sign people in through Ordo's identity
   service, as an OIDC provider, with open sign-up and a passkey. One person
   has one subject at the service, so one passkey works in both apps.
-- **Data through the door.** `peer notes { std.notes.list  publicNotes }`
+- **Data through the door.** `peer notes { myNotes  publicNotes }`
   names notes v2 and the 2 of its ops this app calls. Each read is a call to
   notes v2's door. Nothing is copied, nothing is written into notes v2, and
   this app's database role is granted nothing there.
@@ -18,7 +18,7 @@ definition file (`viewer.ordo`) and its own page (`web/`).
   `ORDO_CONSUMER_NOTE_VIEWER_CLIENT`. notes v2's door refuses every other op,
   by name.
 - **notes v2 decides who sees what.** A signed-in person's list is
-  `std.notes.list`, called for that person: notes v2's acl answers every
+  notes v2's `myNotes`, called for that person: notes v2's acl answers every
   note they hold a level on, their own and the ones shared with them.
 - **A public list.** A note tagged `public` in notes v2 shows to anyone,
   with no sign-in. The external `published` reads notes v2's op

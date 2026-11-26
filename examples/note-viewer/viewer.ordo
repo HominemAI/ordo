@@ -14,7 +14,7 @@
 domain noteviewer @ 0.2.0
 
 peer notes {
-  std.notes.list
+  myNotes
   publicNotes
 }
 
@@ -30,9 +30,9 @@ external published from notes.publicNotes shared {
   created: datetime <- created
 }
 
-# Every note the signed-in person may read in notes v2: `std.notes.list`,
+# Every note the signed-in person may read in notes v2: its `myNotes`,
 # asked for that person. notes v2's acl decides which.
-external entries from notes.notes shared {
+external entries from notes.myNotes shared {
   id: text <- id
   title: text <- title
   body: text <- body

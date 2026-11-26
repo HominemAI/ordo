@@ -30,9 +30,10 @@ pub use decl::{
     AggDecl, DomainDecl, EditionDecl, EntityDecl, ExternalDecl, ExternalField, ExternalKeyTy,
     FieldDecl, FieldKind, FunctionDecl, FunctionHost, FunctionLimits, GrantDecl, GrantLine,
     GrantPattern, GuardAtom, GuardClause, GuardExpr, OpBody, OpDecl, OpFlags, ParamDecl, PeerDecl,
-    Pipeline, PrevName, Program, ProjItem, ReaderDecl, ReassignTarget, ReleaseAtom, ReleaseCond,
-    ReleaseDecl, ReleaseEffect, ReleaseMode, RoutineDecl, RoutineNotify, RoutineTrigger, ScalarTy,
-    SecretDecl, SortKey, Source, SourceArg, Step, TakeCount, WriteStmt, DIVISION_SCALE,
+    PeerUse, Pipeline, PrevName, Program, ProjItem, ReaderDecl, ReassignTarget, ReleaseAtom,
+    ReleaseCond, ReleaseDecl, ReleaseEffect, ReleaseMode, RoutineDecl, RoutineNotify,
+    RoutineTrigger, ScalarTy, SecretDecl, SortKey, Source, SourceArg, Step, TakeCount, WriteStmt,
+    DIVISION_SCALE,
 };
 pub use declparse::{
     bare_money_sites, parse_pipeline, parse_program, parse_whole, AggShape, AGGREGATE_NAMES,
@@ -44,8 +45,8 @@ pub use parser::{
     BARE_FIELD_IN_GROUP, DUPLICATE_AUTH, DUPLICATE_EDITION, DUPLICATE_RELEASE, EXTERNAL_ACL,
     EXTERNAL_COMPOSITE_KEY, EXTERNAL_NOT_SHARED, EXTERNAL_OWNED, EXTERNAL_READ_ONLY,
     EXTERNAL_SEALED, EXTERNAL_UNSUPPORTED, GRANT_BLOCK, INVALID_GUARD_WALK, INVALID_SECRET_HOST,
-    PARSE_ERROR, PEER_NAME, PREV_DUPLICATE, PREV_SELF, PREV_STILL_DECLARED, READER_LINE,
-    RELEASE_SUBJECT,
+    PARSE_ERROR, PEER_BLOCK, PEER_NAME, PREV_DUPLICATE, PREV_SELF, PREV_STILL_DECLARED,
+    READER_LINE, RELEASE_SUBJECT,
 };
 pub use span::Span;
 pub use text::{is_nfc, nfc};

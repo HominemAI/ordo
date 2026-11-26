@@ -1,3 +1,8 @@
+peer journal {
+  std.entries.list
+  addEntry
+}
+
 grant note_viewer {
   std.notes.get
   std.notes.list

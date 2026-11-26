@@ -1531,15 +1531,113 @@ fn peer_decl(p: &mut Parser) -> Result<PeerDecl, ParseError> {
             ),
         ));
     }
+    if matches!(p.peek(), TokenKind::LBrace) {
+        return peer_block(p, name, start);
+    }
     if !matches!(p.peek(), TokenKind::Newline | TokenKind::Eof) {
         return Err(p.err_here(format!(
-            "`peer {}` is the whole line. The peer's schema is set by \
-             `ORDO_PEER_{}_SCHEMA`, never in the file",
+            "`peer {}` is the whole line, or a block of the ops it calls: `peer {} {{ \
+             std.notes.list }}`. The peer's address is set by `ORDO_PEER_{}_URL` and its \
+             schema by `ORDO_PEER_{}_SCHEMA`, never in the file",
             name.name,
+            name.name,
+            name.name.to_ascii_uppercase(),
             name.name.to_ascii_uppercase()
         )));
     }
-    Ok(PeerDecl { name, span })
+    Ok(PeerDecl {
+        name,
+        uses: None,
+        span,
+    })
+}
+
+/// `peer <name> { op  op … }` (`plan-federation-grants.md` §4, step G4): the
+/// holder's ops this deployment calls through the holder's door, one exact
+/// name per line. The holder grants by pattern; the consumer names what it
+/// uses, so the holder can tell it which change would break it.
+fn peer_block(p: &mut Parser, name: Ident, start: Span) -> Result<PeerDecl, ParseError> {
+    p.bump(); // `{`
+    let header = format!("peer {}", name.name);
+    let mut uses: Vec<PeerUse> = Vec::new();
+    loop {
+        let line_start = p.tok().span;
+        if matches!(p.peek(), TokenKind::RBrace) {
+            break;
+        }
+        if let Some(prev) = uses.last() {
+            if prev.span.line == line_start.line {
+                return Err(p.err_class_at(
+                    parser::PEER_BLOCK,
+                    line_start,
+                    format!(
+                        "`{header}`: one op per line; put {} on a line of its own",
+                        describe(p.peek())
+                    ),
+                ));
+            }
+        }
+        let op = match p.peek().clone() {
+            TokenKind::Ident(first) => {
+                p.bump();
+                let mut op = first;
+                while matches!(p.peek(), TokenKind::Dot) {
+                    p.bump();
+                    let s = segment(p, "the rest of an op name")?;
+                    op.push('.');
+                    op.push_str(&s.name);
+                }
+                op
+            }
+            // The lexer ends an unclosed brace with the line.
+            TokenKind::Eof | TokenKind::Newline => {
+                return Err(p.err_here(format!("`{header}` is not closed; end it with `}}`")))
+            }
+            other => {
+                return Err(p.err_class_at(
+                    parser::PEER_BLOCK,
+                    line_start,
+                    format!(
+                        "expected an op name in `{header}`, found {}. A line is one exact op \
+                         name of the holder (`std.notes.list`, `addComment`); patterns and \
+                         `!` belong in the holder's `grant` block",
+                        describe(&other)
+                    ),
+                ))
+            }
+        };
+        let span = line_start.to(p.prev_span());
+        if uses.iter().any(|u| u.op == op) {
+            return Err(p.err_class_at(
+                parser::PEER_BLOCK,
+                span,
+                format!("`{header}` names `{op}` twice; keep one line"),
+            ));
+        }
+        uses.push(PeerUse { op, span });
+    }
+    let end = p.bump().span; // `}`
+    if uses.is_empty() {
+        return Err(p.err_class_at(
+            parser::PEER_BLOCK,
+            start.to(end),
+            format!(
+                "`{header} {{ }}` names no op. List the holder's ops this deployment calls, \
+                 one per line, or write `{header}` alone"
+            ),
+        ));
+    }
+    if !matches!(p.peek(), TokenKind::Newline | TokenKind::Eof) {
+        return Err(p.err_here(format!(
+            "expected the end of the line after the `}}` of `{header}`, found {}",
+            describe(p.peek())
+        )));
+    }
+    Ok(PeerDecl {
+        name,
+        uses: Some(uses),
+        span: start.to(end),
+    })
 }
 
 /// `reader <name> reads <table>, <table>` (owner, 2026-11-18,

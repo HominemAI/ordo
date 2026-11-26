@@ -128,8 +128,19 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
     // Peers print before the externals that read them, as `synth` requires.
     for p in &program.peers {
         let bind = e.bind(&p.name.name);
+        // A block lists the holder's ops this deployment calls (step G4).
+        let uses = match &p.uses {
+            None => String::new(),
+            Some(uses) => format!(
+                ", [{}]",
+                uses.iter()
+                    .map(|u| ts::str_lit(&u.op))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
         body.push_str(&format!(
-            "const {bind} = peer({});\n\n",
+            "const {bind} = peer({}{uses});\n\n",
             ts::str_lit(&p.name.name)
         ));
         e.peers.insert(p.name.name.clone(), bind.clone());

@@ -620,7 +620,9 @@ export function printDeclaration(d: Declaration): string {
     case 'domain':
       return d.version ? `domain ${d.name} @ ${d.version}` : `domain ${d.name}`;
     case 'peer':
-      return `peer ${d.name}`;
+      return d.uses === null
+        ? `peer ${d.name}`
+        : [`peer ${d.name} {`, ...d.uses.map((op) => `  ${op}`), '}'].join('\n');
     case 'reader':
       return `reader ${d.name} reads ${d.tables.join(', ')}`;
     case 'grant': {

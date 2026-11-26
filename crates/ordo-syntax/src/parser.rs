@@ -59,6 +59,10 @@ pub const RELEASE_SUBJECT: &str = "release_subject";
 /// A `peer` line that cannot be one: a name that is not lowercase letters
 /// and digits, or a second line with the same name.
 pub const PEER_NAME: &str = "peer_name";
+/// A `peer` block that cannot be one: no line, two ops on one line, an op
+/// named twice, or a line that is not an exact op name
+/// (`plan-federation-grants.md` §4).
+pub const PEER_BLOCK: &str = "peer_block";
 /// A `reader` line that cannot be one: a name that is not lowercase
 /// letters, digits and underscores, a second line with the same name, no
 /// table, or a table named twice.

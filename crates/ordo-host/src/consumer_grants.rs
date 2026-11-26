@@ -566,7 +566,24 @@ pub async fn plan_with(
     var: &(dyn Fn(&str) -> Option<String> + Sync),
 ) -> Result<GrantReport, String> {
     let serving = serving(pool).await?;
-    Ok(check(&schema.grants, &program_ops(doc), &serving, var))
+    let ops = program_ops(doc);
+    let mut report = check(&schema.grants, &ops, &serving, var);
+    // **The consumers this change would break** (`plan-federation-grants.md`
+    // §4, step G4): each op a consumer recorded it calls that these grants
+    // no longer open to it, named before the apply. Warned, not refused.
+    if report.refusals.is_empty() {
+        let uses = crate::peer_ops::recorded(pool)
+            .await
+            .map_err(|e| format!("the consumers' recorded uses could not be read: {e}"))?;
+        report.notes.extend(crate::peer_ops::breaks(
+            &report.expanded,
+            &serving,
+            &ops,
+            &uses,
+            var,
+        ));
+    }
+    Ok(report)
 }
 
 #[cfg(test)]

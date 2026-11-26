@@ -1,5 +1,11 @@
 # Grants to other Ordo deployments (`plan-federation-grants.md` §3): every
-# header and every kind of line, beside the entity they name.
+# header and every kind of line, beside the entity they name. And a `peer`
+# block (§4): the ops this deployment calls through another's door.
+
+peer journal {
+  std.entries.list
+  addEntry
+}
 
 grant note_viewer {
   std.notes.get

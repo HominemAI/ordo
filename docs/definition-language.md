@@ -2478,6 +2478,38 @@ Refusals, each naming the fix:
 | `external_no_key` | `ordo introspect --external`: no single-column unique, not null key |
 | `external_unsupported` | `unique`, `index`, `check`, `std sealed`, `tree`, `normalize`, `prev`, a default or a `blob` on an external; `public*` (an external owns nothing, write `public`); `public` on the `id` line; or `whole` anchored on one |
 
+### `peer { … }`: the ops this deployment calls on another [ruled 2026-11-26, built in G4]
+
+A `peer` block lists the holder's ops this deployment calls through the
+holder's door (`plan-federation-grants.md` §4):
+
+```
+peer notes {
+  std.notes.list
+  addComment
+}
+```
+
+- Each line is one exact op name of the holder. Patterns and `!` belong in
+  the holder's `grant` block, never here. No line, two ops on one line, or an
+  op named twice is refused (`peer_block`).
+- The holder's address is the setting `ORDO_PEER_NOTES_URL`, its handle at
+  the identity service `ORDO_PEER_NOTES_DEPLOYMENT` (default the nickname),
+  and the space each call is bound to `ORDO_PEER_NOTES_SPACE`. Never the file.
+- At each apply, Ordo reads the holder's grant for this deployment
+  (`std.peer.grant`, as itself) and refuses, by name, any listed op it does
+  not grant (`peer_refused`, line `peer_op_not_granted`). Nothing is stored.
+- When nothing is refused, the holder records what this version calls
+  (`std.peer.recordUse`). The holder's plan and apply then name each consumer
+  a change would break: "note_viewer calls archiveNote". A warning; the
+  holder's apply goes on.
+- `ordo plan` (`std.deployment.plan`) checks the same, recording nothing.
+- A block needs no external. The one-line form below keeps working until the
+  shared-database path is removed (G8).
+- This deployment registers its consumer key at the identity service once,
+  with a token for its own admin: `std.peer.registerKey($token)`. Until then
+  the apply is refused naming that op.
+
 ### `peer`: another Ordo deployment's tables [ruled 2026-11-17, built]
 
 Two Ordo deployments can share one database, each in its own schema

@@ -2117,6 +2117,8 @@ fn platform_specs(exit: bool, imports: bool, attest: bool, buckets: bool) -> Vec
             apply_op::APPLY => true,
             // G1 to G3, wired with `APPLY`'s state.
             name if crate::deploy_ops::OPS.contains(&name) => true,
+            // Between Ordo deployments (step G4), wired beside `APPLY`.
+            name if crate::peer_ops::OPS.contains(&name) => true,
             // Staging clones (versions increment 12), wired with
             // `APPLY`'s state and the deployment's keys.
             name if crate::clones::OPS.contains(&name) => true,
@@ -3164,6 +3166,14 @@ async fn platform_ops_for(
         Some(stream.clone()),
     );
     ops = ops.with_apply(apply.clone());
+    // Step G4 of `plan-federation-grants.md`: the ops between Ordo
+    // deployments. The door for other deployments and the client are given
+    // to them once each is built.
+    ops = ops.with_peer(crate::peer_ops::PeerOps::new(
+        w.pool.clone(),
+        &w.home.0,
+        now.clone(),
+    ));
     // 17aa piece 3. Always, for `with_apply`'s reason and one more: the
     // `KeyProvider` is here already (`ExitOps` took it above), and a
     // deployment that registered `std.space.create` and wired nothing for
@@ -4835,6 +4845,8 @@ async fn assemble_program(
     // Step 3 of `plan-identity-service.md`: the identity service's keys,
     // from `$identitykeys` first so a restart with the service down still
     // verifies, then fetched. Unset, the door accepts no deployment token.
+    // The door for other deployments, kept for the ops that answer them.
+    let mut peer_door: Option<Arc<crate::peer_door::PeerDoor>> = None;
     match crate::identity_keys::IdentitySettings::from_env()
         .map_err(|(var, detail)| BootRefusal::Invalid { var, detail })?
     {
@@ -4876,7 +4888,9 @@ async fn assemble_program(
             if let Err(why) = peer.settings() {
                 eprintln!("  {why}");
             }
-            access.wire_peer(Arc::new(peer));
+            let peer = Arc::new(peer);
+            peer_door = Some(peer.clone());
+            access.wire_peer(peer);
             access.wire_identity_keys(keys);
             if let Some(note) =
                 crate::provision::ignored_deployment_owners_note(&|k: &str| std::env::var(k).ok())
@@ -5287,6 +5301,36 @@ async fn assemble_program(
     // from the deployment's custody.
     if let Some(apply) = &apply_for_backfills {
         let _ = apply.backfill_keys.set(keys.clone());
+    }
+    // Step G4 of `plan-federation-grants.md`: the holder's ops get the door
+    // for other deployments; the apply and the key registration get the
+    // client, signing with a key derived from this deployment's custody.
+    if let Some(peer_ops) = &platform_ops.peer {
+        if let Some(door) = &peer_door {
+            let _ = peer_ops.door.set(door.clone());
+        }
+        let handle = std::env::var(crate::identity_keys::DEPLOYMENT_ENV)
+            .ok()
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| crate::identity_keys::DEFAULT_DEPLOYMENT.to_string());
+        match crate::peer_client::consumer_key_from_custody(keys.as_ref(), &space.0, &handle) {
+            Ok(key) => {
+                let client = Arc::new(crate::peer_client::PeerClient::new(
+                    key,
+                    Arc::new(|k: &str| std::env::var(k).ok()),
+                    Arc::new(now_secs),
+                ));
+                let _ = peer_ops.client.set(client.clone());
+                if let Some(apply) = &apply_for_backfills {
+                    let _ = apply.peer_client.set(client);
+                }
+            }
+            Err(e) => eprintln!(
+                "  the consumer key could not be derived ({e}); this deployment cannot call \
+                 another deployment's door"
+            ),
+        }
     }
     // Tenant-owned sign-in providers (`plan-tenant-providers.md`): one state
     // for the four ops and the sign-in routes. Wired whenever there is

@@ -1,4 +1,7 @@
-peer journal
+peer journal {
+  std.notes.list
+  addComment
+}
 
 external entries from journal.notes shared {
   id: text <- "id"

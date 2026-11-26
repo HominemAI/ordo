@@ -1047,19 +1047,22 @@ routine thirstCheck in plantcare {
 
 ---
 
-## 10. Peers: another Ordo deployment's tables
+## 10. Peers: another Ordo deployment, through its door
 
 ```
-peer journal                                 # a nickname for another Ordo deployment
+peer journal {                               # a nickname for another Ordo deployment
+  std.notes.list                             # the holder's ops this one calls
+  addComment
+}
 
-external entries from journal.notes shared { # the peer's own `notes` table
+external entries from journal.notes shared { # read through journal's door
   id: text <- "id"
   title: text <- "title"
   owner: text <- "owner"
-  access read owner == $caller               # the peer's member for this person
+  access read owner == $caller               # journal decides who $caller is
 }
 
-external customers from crm.customers shared { # no peer line: a plain schema
+external customers from crm.customers shared { # no peer: a plain schema
   id <- "customer_id"
   name: text <- "full_name"
 }
@@ -1068,21 +1071,31 @@ op myEntries =
   entries[title]
   sort title
   take 50
-# `peer journal` names no schema. The deployment owner sets it with
-# ORDO_PEER_JOURNAL_SCHEMA, the schema the other deployment's ORDO_PG_SCHEMA
-# names. Unset, or a schema with no Ordo deployment in it, refuses the boot.
-# On `entries`, `$caller` is the person's member in the peer, found through
-# the sign-in subject both deployments hold. A person with no member there
-# reads no rows. ORDO_EXTERNAL_CRM_SCHEMA=crm_dev reads `crm_dev.customers`
-# instead of `crm.customers`; unset, the schema is as written.
+# `peer journal` names no address. The deployment owner sets it with
+# ORDO_PEER_JOURNAL_URL, journal's door. Unset refuses the boot. Each read of
+# `entries` is one call to journal's `std.notes.list`, for the person signed
+# in here, and journal's own rules decide what they see. The apply checks
+# each op of the block against journal's grant to this deployment.
+# ORDO_EXTERNAL_CRM_SCHEMA=crm_dev reads `crm_dev.customers` instead of
+# `crm.customers`; unset, the schema is as written.
 ```
 
 ---
 
-## 11. Readers: who may read this deployment's tables
+## 11. Grants: what another deployment may call through this one's door
 
 ```
-reader note_viewer reads notes, notesAccess  # in the file of the app being read
+# In the file of the holder.
+grant note_viewer {
+  std.notes.list
+  /add.*/                                    # every op whose name matches
+  !addAdmin                                  # but this one
+}
+
+# Calls with no person behind them.
+grant billing as itself {
+  markPaid
+}
 
 entity notes {
   title: text
@@ -1091,14 +1104,17 @@ entity notes {
   access write owner == $caller
 }
 
-entity notesAccess {
-  note -> notes owned
-  member -> members
-}
-# `note_viewer` is a local nickname. The deployment owner sets its database
-# role with ORDO_READER_NOTE_VIEWER_ROLE. At apply and at start this
-# deployment grants that role SELECT on `notes` and `notesAccess`, and on
-# the sign-in columns a `$caller` guard reads. Nothing else. Take a table
-# off the line and the next apply or start revokes it. A reader line with
-# no role setting refuses the start.
+op addNote($title: text) =
+  set notes { title: $title, owner: $caller }
+
+op addAdmin($title: text) =
+  set notes { title: $title }
+
+op markPaid($title: text) =
+  set notes { title: $title }
+# `note_viewer` is a local nickname. The deployment owner ties it to that
+# deployment's id at the identity service with
+# ORDO_CONSUMER_NOTE_VIEWER_CLIENT. Lines are read top to bottom and the last
+# that matches an op decides. The door refuses every op no grant opens, by
+# name. Nothing here opens a table: another deployment reads through ops.
 ```

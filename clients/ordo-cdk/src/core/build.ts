@@ -28,7 +28,6 @@ import type {
   ExternalKeyType,
   ExternalNode,
   PeerNode,
-  ReaderNode,
   GrantNode,
   FieldKindNode,
   FieldNode,
@@ -842,54 +841,47 @@ export function entity(
 }
 
 /**
- * `peer journal`: a local nickname for another Ordo deployment in the same
- * database. An external with `{ peer: journal, table: 'notes' }` reads the
- * peer's `notes`, in the schema `ORDO_PEER_JOURNAL_SCHEMA` names, and
- * `$caller` on it means the peer's member for the same person. Pass the
- * peer to `synth` before the externals that read it.
- *
- * With `uses`, `peer('notes', ['std.notes.list', 'addComment'])` prints the
- * block form: the holder's ops this deployment calls through the holder's
- * door (`plan-federation-grants.md` §4). The holder's address is the
- * setting `ORDO_PEER_<NAME>_URL`, never the file.
+ * `peer('notes', ['std.notes.list', 'addComment'])`: a local nickname for
+ * another Ordo deployment, and the holder's ops this deployment calls
+ * through the holder's door (`plan-federation-grants.md` §4). An external
+ * with `{ peer: notes, table: 'notes' }` reads the holder's `std.notes.list`,
+ * or the op of `uses` named like the table, and `$caller` on it is decided
+ * by the holder. The holder's address is the setting `ORDO_PEER_<NAME>_URL`,
+ * never the file. Pass the peer to `synth` before the externals that read it.
  */
 export class Peer {
   readonly kind = 'peer' as const;
   readonly name: string;
-  readonly uses: readonly string[] | null;
+  readonly uses: readonly string[];
 
-  constructor(name: string, uses?: readonly string[]) {
+  constructor(name: string, uses: readonly string[]) {
     if (!/^[a-z][a-z0-9]*$/.test(name)) {
       throw new Error(
         `peer_name: \`peer ${name}\`: a peer name is lowercase letters and digits, ` +
-          'starting with a letter. It is upper-cased into ORDO_PEER_<NAME>_SCHEMA',
+          'starting with a letter. It is upper-cased into ORDO_PEER_<NAME>_URL',
       );
     }
     this.name = name;
-    if (uses !== undefined) {
-      if (uses.length === 0) {
+    if (uses === undefined || uses.length === 0) {
+      throw new Error(
+        `peer_block: \`peer ${name} { }\` names no op. List the holder's ops this ` +
+          `deployment calls: peer('${name}', ['std.notes.list'])`,
+      );
+    }
+    const seen = new Set<string>();
+    for (const op of uses) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/.test(op)) {
         throw new Error(
-          `peer_block: \`peer ${name} { }\` names no op. List the holder's ops this ` +
-            'deployment calls, or leave `uses` out',
+          `peer_block: \`peer ${name}\`: \`${op}\` is not an op name. A line is one exact ` +
+            "op name of the holder; patterns belong in the holder's grant",
         );
       }
-      const seen = new Set<string>();
-      for (const op of uses) {
-        if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/.test(op)) {
-          throw new Error(
-            `peer_block: \`peer ${name}\`: \`${op}\` is not an op name. A line is one exact ` +
-              "op name of the holder; patterns belong in the holder's grant",
-          );
-        }
-        if (seen.has(op)) {
-          throw new Error(`peer_block: \`peer ${name}\` names \`${op}\` twice; keep one`);
-        }
-        seen.add(op);
+      if (seen.has(op)) {
+        throw new Error(`peer_block: \`peer ${name}\` names \`${op}\` twice; keep one`);
       }
-      this.uses = [...uses];
-    } else {
-      this.uses = null;
+      seen.add(op);
     }
+    this.uses = [...uses];
   }
 
   node(): PeerNode {
@@ -897,40 +889,9 @@ export class Peer {
   }
 }
 
-/** `peer('journal')` or `peer('notes', ['std.notes.list'])`: see {@link Peer}. */
-export function peer(name: string, uses?: readonly string[]): Peer {
+/** `peer('notes', ['std.notes.list'])`: see {@link Peer}. */
+export function peer(name: string, uses: readonly string[]): Peer {
   return new Peer(name, uses);
-}
-
-/**
- * `reader note_viewer reads notes, notesAccess`: another Ordo deployment that
- * may read these tables of this one. Its database role is the setting
- * `ORDO_READER_NOTE_VIEWER_ROLE`, never the file, and this deployment grants
- * that role `SELECT` on exactly these tables. Each table is an entity passed
- * to `synth`, or the platform's `members`.
- */
-export function reader(name: string, tables: readonly (string | Entity)[]): ReaderNode {
-  if (!/^[a-z][a-z0-9_]*$/.test(name)) {
-    throw new Error(
-      `reader_line: \`reader ${name}\`: a reader name is lowercase letters, digits and ` +
-        'underscores, starting with a letter. It is upper-cased into ORDO_READER_<NAME>_ROLE',
-    );
-  }
-  const names = tables.map((t) => (typeof t === 'string' ? t : t.name));
-  if (names.length === 0) {
-    throw new Error(
-      `reader_line: \`reader ${name}\` names no table; pass the tables it reads: ` +
-        `reader('${name}', [notes])`,
-    );
-  }
-  const seen = new Set<string>();
-  for (const n of names) {
-    if (seen.has(n)) {
-      throw new Error(`reader_line: \`reader ${name}\` names \`${n}\` twice. Name each table once`);
-    }
-    seen.add(n);
-  }
-  return { kind: 'reader', name, tables: names };
 }
 
 /** What `grant()` and `grantProvider()` take beside the lines. */
@@ -1006,9 +967,6 @@ export function grant(
 export function grantProvider(name: string, lines: readonly (string | Op)[]): GrantNode {
   return grantNode(name, true, false, lines);
 }
-
-/** The platform's own entities, which a reader line may name without declaring. */
-const PLATFORM_ENTITIES = new Set(['members', 'groupMembers']);
 
 /** Where an external's table lives: a schema written out, or a {@link Peer}. */
 type ExternalWhere =
@@ -1312,7 +1270,6 @@ export function synth(...decls: Synthesizable[]): string {
   const nodes = decls.map(declaration);
   checkExternalRefs(nodes);
   checkPeers(nodes);
-  checkReaders(nodes);
   checkGrants(nodes);
   const out = nodes.map(printDeclaration);
   return out.join('\n\n') + '\n';
@@ -1320,21 +1277,19 @@ export function synth(...decls: Synthesizable[]): string {
 
 /**
  * Every peer an external reads is passed to `synth`, once, before that
- * external, and every peer passed is read. Without its `peer` line,
+ * external. A block needs no external: it lists the ops it calls. Without
+ * its `peer`,
  * `from journal.notes` would read a plain schema named `journal`, so a
  * missing peer is refused here rather than printed.
  */
 function checkPeers(nodes: Declaration[]): void {
   const declared = new Set<string>();
-  const read = new Set<string>();
   for (const n of nodes) {
     if (n.kind === 'peer') {
       if (declared.has(n.name)) {
         throw new Error(`peer_name: \`peer ${n.name}\` is passed twice; pass it once`);
       }
       declared.add(n.name);
-      // A block is used by its own ops, through the holder's door.
-      if (n.uses !== null) read.add(n.name);
     }
     if (n.kind === 'external' && n.peer !== null) {
       if (!declared.has(n.peer)) {
@@ -1343,15 +1298,6 @@ function checkPeers(nodes: Declaration[]): void {
             'synth before it. Pass the peer first: synth(journal, entries)',
         );
       }
-      read.add(n.peer);
-    }
-  }
-  for (const p of declared) {
-    if (!read.has(p)) {
-      throw new Error(
-        `peer_unused: \`peer ${p}\` is read by no external. Remove it, or read a table with ` +
-          `external(name, fields, { peer: ${p}, table: '…', shared: true })`,
-      );
     }
   }
 }
@@ -1368,38 +1314,6 @@ function checkGrants(nodes: Declaration[]): void {
       );
     }
     names.add(key);
-  }
-}
-
-/**
- * Each reader is passed once, and every table it names is an entity of this
- * file (or the platform's `members`), as the schema check requires.
- */
-function checkReaders(nodes: Declaration[]): void {
-  const entities = new Set<string>();
-  const externals = new Set<string>();
-  for (const n of nodes) {
-    if (n.kind === 'entity') entities.add(n.name);
-    if (n.kind === 'external') externals.add(n.name);
-  }
-  const names = new Set<string>();
-  for (const n of nodes) {
-    if (n.kind !== 'reader') continue;
-    if (names.has(n.name)) {
-      throw new Error(
-        `reader_line: \`reader ${n.name}\` is passed twice. Pass one reader with every table`,
-      );
-    }
-    names.add(n.name);
-    for (const t of n.tables) {
-      if (entities.has(t) || PLATFORM_ENTITIES.has(t)) continue;
-      const why = externals.has(t)
-        ? 'an external. A reader reads this deployment\'s own tables'
-        : 'not an entity passed to synth';
-      throw new Error(
-        `reader_unknown_table: \`reader ${n.name}\` names \`${t}\`, ${why}. Remove it from the line`,
-      );
-    }
   }
 }
 

@@ -11,7 +11,7 @@
 
 import { asc, external, f, g, key, op, peer, src, synth, t } from '../../src/index.js';
 
-const journal = peer('journal');
+const journal = peer('journal', ['std.notes.list', 'addComment']);
 
 const entries = external('entries', {
   id: key.text('id'),

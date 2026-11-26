@@ -1031,6 +1031,18 @@ pub trait AccessChecker: Send + Sync {
         None
     }
 
+    /// Asked only after [`Self::check`] denied, first: was this another
+    /// deployment's call, with a token the identity service signed, that
+    /// the holder refused for a reason it names
+    /// (`plan-federation-grants.md` 5, step G3)? The answer is the message:
+    /// which consumer, which op, and the grant line or setting that would
+    /// allow it. The door answers [`crate::ErrorCode::AccessDenied`] with
+    /// it. A token whose signature fails keeps the uniform denial. The
+    /// default is `None`.
+    fn peer_refused(&self, _token: &str, _space: &str, _op: &str) -> Option<String> {
+        None
+    }
+
     /// Asked only after [`Self::check`] allowed `principal` to call `op`:
     /// does the app developer require a verified email address for this
     /// op, and does this person lack one? The answer is the refusal's

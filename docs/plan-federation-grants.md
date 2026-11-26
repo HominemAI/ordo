@@ -1,7 +1,7 @@
 # Federation through the door: grants between Ordo deployments
 
 Status: **design agreed with the owner in conversation, 2026-11-25 and 2026-11-26.**
-Not built. Board task `federation-ordo-deployments-share-data-through`.
+G1 to G3 built; G4 to G8 not yet. Board task `federation-ordo-deployments-share-data-through`.
 Replaces the shared-database peer path (`peer`, `reader`, Postgres grants)
 described in `definition-language.md` "`peer`" and `plan-evolution-federation.md`.
 
@@ -144,8 +144,12 @@ peer notes {
   connection whose `ORDO_AUTH_<NAME>_ISSUER` is `ORDO_IDENTITY_ORIGIN`.
   G2 now exists; whether the service should mark itself (for example in
   its discovery document) is for G6.
-- How the call chain is carried for the loop check (a header listing the
-  deployments a call has passed through, signed with the token).
+- How the call chain is carried for the loop check. **Settled in G3**: a
+  `chain` claim in the token itself, not a header, so it is under the
+  service's signature and cannot be stripped. The consumer sends its own
+  incoming chain as `ordo_chain` at the token endpoint; the service adds the
+  consumer last (at most 8). The holder refuses a chain that names it. The
+  consumer's host passing its incoming chain on is G4 and G5.
 
 ## 8 · Build order
 
@@ -153,7 +157,7 @@ peer notes {
 |---|---|---|
 | G1 | `grant` blocks: parser, expansion at apply, plan output, refusals. **Built** (branch `fed-g1-grant-blocks`): the parser and the CDK's `grant()` and `grantProvider()`; `ordo_host::consumer_grants` expands each block at plan and apply, stores the lists in `$consumergrant` by version, and shows each list, its changes and `ORDO_CONSUMER_<NAME>_CLIENT`; the 4 refusals are `grant_refused`. A provider is the identity service when its OIDC issuer is `ORDO_IDENTITY_ORIGIN`. Not enforced on the door (G3). Tests: `ordo-syntax/tests/grant.rs`, `ordo-host/tests/consumer_grants.rs` (notes v2 with a `grant note_viewer` block), `ordo-cdk/test/grant.test.ts`, the isomorphism corpus | M |
 | G2 | The identity service: consumer credentials, token exchange with the actor claim. **Built** on `fed-g2-token-exchange`: consumer key derived from the master key, public half registered (`consumerKey`, `deployment consumer-key`); RFC 7523 assertions, each `jti` once; RFC 8693 exchange (`typ` `ordo-peer+jwt`, `act.sub`) and `client_credentials` (`typ` `ordo-client+jwt`, `kind` `client`), `aud` `ordo-peer:<holder>`; `ORDO_IDENTITY_PEER_TOKEN_SECS` 300, `ORDO_IDENTITY_CLIENT_ASSERTION_SECS` 120; audit `oidc.exchange`, `oidc.client-token`. Tests: `ordo-identity-service/tests/federation_exchange.rs`, 7. The host deriving and registering its key is G4 | M |
-| G3 | The holder's door: grant check on every call, on behalf or as itself, the loop check, audit | M |
+| G3 | The holder's door: grant check on every call, on behalf or as itself, the loop check, audit. **Built** on `fed-g3-holder-door` (c4b6cd8d): `ordo_host::peer_door`. The token gate verifies `ordo-peer+jwt` and `ordo-client+jwt` with the identity service's keys (`typ`, the issuer of the one sign-in connection to the service, `aud` `ordo-peer:<ORDO_IDENTITY_DEPLOYMENT>`, `exp`), refuses a chain that names this deployment, and resolves the person as a direct sign-in does (`oidc:<connection>:<sub>`, the sign-up rules and ceiling). `check` then needs the op in the consumer's grants for the serving version (`ORDO_CONSUMER_<NAME>_CLIENT`; `grant provider <connection>` on behalf of a person only); as itself, a grant marked `as itself`, in the deployment's own space only; on behalf, the access engine for that person. Refusals name the consumer, the op and the fix (`AccessChecker::peer_refused`, answered `access_denied`); a bad signature keeps the uniform denial. Recorded as `PeerTokenRefused`, `ConsumerNotGranted`, `PeerLoop`, and each allowed call with the person and the consumer (`peer-person`/`peer-client`); a write's command log names `consumer:<handle>` as the agent. G2 change: the service writes the `chain` claim from `ordo_chain`. Tests: `ordo-host/tests/peer_door.rs` (4, real service and door), `federation_exchange.rs` chain test, `peer_token` unit tests. No live stream for a peer token yet | M |
 | G4 | The consumer: `peer` block checked against the holder at apply; the holder records uses and names breaks | M |
 | G5 | Peer entities served by door calls: pushdown, batched joins, `$caller` through the exchanged token | L |
 | G6 | `grant provider` | S |

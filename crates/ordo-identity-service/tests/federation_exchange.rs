@@ -821,3 +821,58 @@ async fn the_consumer_key_is_set_by_the_registry_or_the_deployment_itself() {
         .iter()
         .any(|(a, _, s, o, _)| a == "deployment.consumer-key" && s == "viewer" && o == "ok"));
 }
+
+/// The call chain (`plan-federation-grants.md` 7, step G3): the service
+/// writes the consumer's incoming `ordo_chain` with the consumer added last
+/// into the token, under its signature, so a holder can refuse a loop.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_call_chain_is_carried_in_the_token_with_the_consumer_last() {
+    let h = three("fed-chain", &[]).await;
+    let t = |v: &Value| v["access_token"].as_str().unwrap().to_string();
+
+    // A call that starts at the consumer: the consumer alone.
+    let (s, v) = as_itself(
+        &h,
+        &assertion(&h, "notes", &key_of("notes"), "ch-1"),
+        "viewer",
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(verified(&h, &t(&v)).await["chain"], json!(["notes"]));
+
+    // A call that came to the consumer through `hal`.
+    let (s, v) = token(
+        &h,
+        &[
+            ("grant_type", GRANT_CLIENT_CREDENTIALS),
+            ("client_assertion_type", ASSERTION_TYPE),
+            (
+                "client_assertion",
+                &assertion(&h, "notes", &key_of("notes"), "ch-2"),
+            ),
+            ("audience", "viewer"),
+            (peer_token::CHAIN_PARAM, "hal"),
+        ],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(verified(&h, &t(&v)).await["chain"], json!(["hal", "notes"]));
+
+    // A chain that is not handles is refused, naming the field.
+    let (s, v) = token(
+        &h,
+        &[
+            ("grant_type", GRANT_CLIENT_CREDENTIALS),
+            ("client_assertion_type", ASSERTION_TYPE),
+            (
+                "client_assertion",
+                &assertion(&h, "notes", &key_of("notes"), "ch-3"),
+            ),
+            ("audience", "viewer"),
+            (peer_token::CHAIN_PARAM, "Not A Handle!"),
+        ],
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v.to_string().contains("ordo_chain"), "{v}");
+}

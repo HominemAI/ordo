@@ -958,8 +958,8 @@ function grantNode(
  * `{ asItself: true }`). The consumer's id is the setting
  * `ORDO_CONSUMER_NOTE_VIEWER_CLIENT`, never the file. Each line is an op (or
  * its name), `'/regex/'`, or `'*'`, optionally after `'!'`; the last line
- * that matches an op decides. Expanded against the ops at apply; the door
- * checks it from step G3.
+ * that matches an op decides. Expanded against the ops at apply, and
+ * checked by the door on every call from another deployment.
  */
 export function grant(
   name: string,

@@ -28,8 +28,9 @@
 //!   `ORDO_CONSUMER_<NAME>_CLIENT` that ties the name to a consumer.
 //! - [`store`] the expanded lists with the version, in [`TABLE`].
 //!
-//! Nothing here is enforced on the door yet: that is step G3. The setting is
-//! read and shown; unset is a warning, not a refusal, until then.
+//! The door enforces the stored lists ([`crate::peer_door`], step G3). An
+//! unset setting is a warning here: the apply goes on, and the door refuses
+//! the calls that grant would cover, naming the setting.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -443,8 +444,8 @@ pub fn check(
                 Some(id) => r.notes.push(format!("grant       {}: {env}={id}", e.name)),
                 None => r.notes.push(format!(
                     "warning     grant {}: {env} is not set, so no consumer is tied to it. Set it \
-                     to the consumer's client id at the identity service. The door checks it \
-                     from step G3",
+                     to the consumer's client id at the identity service. Until then the door \
+                     refuses every call that grant would cover",
                     e.name
                 )),
             }

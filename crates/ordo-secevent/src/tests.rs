@@ -1083,6 +1083,9 @@ fn every_deny_reason_maps_to_a_distinct_recorded_decision() {
         RecordedDecision::ConsoleKeyClosed,
         RecordedDecision::VersionsDisagree,
         RecordedDecision::GrantKilledByMove,
+        RecordedDecision::PeerTokenRefused,
+        RecordedDecision::ConsumerNotGranted,
+        RecordedDecision::PeerLoop,
     ] {
         assert_eq!(RecordedDecision::from_tag(d.tag()), Some(d));
     }

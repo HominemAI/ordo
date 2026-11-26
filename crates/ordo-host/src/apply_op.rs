@@ -714,6 +714,7 @@ pub async fn run_with(
     activate: bool,
     provenance: &versions::Provenance,
 ) -> Result<Report, ApplyRefused> {
+    let _ = crate::input_caps::refresh(pool).await;
     checked(provenance)?;
     let (mut program, broken, notes) = compile_checked(source)?;
     if !broken.is_empty() {
@@ -789,6 +790,7 @@ pub async fn run_program_with(
     activate: bool,
     provenance: &versions::Provenance,
 ) -> Result<Report, ApplyRefused> {
+    let _ = crate::input_caps::refresh(pool).await;
     checked(provenance)?;
     // **The lock, before anything reads the schema.** Taken here rather
     // than around the DDL alone, because what must not interleave is the

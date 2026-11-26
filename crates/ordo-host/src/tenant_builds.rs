@@ -66,9 +66,8 @@ pub const OPS: [&str; 5] = [BUILDS, SET_BUILD, JOIN_BUILD, LEAVE_BUILD, REMOVE_B
 /// The actor of a pin a build made is the person; this is the op string.
 const OP: &str = "tenant_build";
 
-/// A build's name: 1 to 40 characters, lowercase letters, digits and `-`,
-/// starting with a letter.
-pub const MAX_NAME_CHARS: usize = 40;
+// A build's name: 1 to `limits.build_name_chars` (40) characters, lowercase
+// letters, digits and `-`, starting with a letter.
 
 /// Why a tenant build act was refused. The one error of [`TenantBuilds`].
 #[derive(Debug)]
@@ -121,8 +120,9 @@ impl std::fmt::Display for BuildRefusal {
         match self {
             BuildRefusal::Name(n) => write!(
                 f,
-                "`{n}` is not a build name: 1 to {MAX_NAME_CHARS} characters, lowercase \
-                 letters, digits and `-`, starting with a letter, like `beta`"
+                "`{n}` is not a build name: 1 to {} characters (`limits.build_name_chars`), \
+                 lowercase letters, digits and `-`, starting with a letter, like `beta`",
+                crate::input_caps::InputCaps::current().build_name_chars
             ),
             BuildRefusal::NoSuchBuild { name, builds } => write!(
                 f,
@@ -212,7 +212,7 @@ impl BuildRefusal {
 pub fn check_name(name: &str) -> Result<String, BuildRefusal> {
     let n = name.trim();
     let ok = !n.is_empty()
-        && n.chars().count() <= MAX_NAME_CHARS
+        && n.chars().count() <= crate::input_caps::InputCaps::current().build_name_chars
         && n.starts_with(|c: char| c.is_ascii_lowercase())
         && n.chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');

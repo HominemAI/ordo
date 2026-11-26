@@ -37,7 +37,7 @@
 //!
 //! A person names a stored version by its name or by its order number,
 //! `#4` ([`Versions::resolve`]). A version may carry a **label**, one line
-//! of at most [`MAX_LABEL_CHARS`] characters, and the **git commit** of the
+//! of at most `limits.label_chars` characters, and the **git commit** of the
 //! source it was applied from ([`Provenance`]). Neither is part of the
 //! version's identity.
 //!
@@ -675,12 +675,6 @@ impl ServedPolicy {
     }
 }
 
-/// The longest label a version may carry, in characters.
-pub const MAX_LABEL_CHARS: usize = 80;
-
-/// The longest reason a revoke or unrevoke may carry, in characters.
-pub const MAX_REASON_CHARS: usize = 500;
-
 /// The most tenants [`Versions::pinned_to_revoked`] names for one version.
 /// The count is always whole.
 pub const MAX_REVOKED_TENANTS: usize = 1_000;
@@ -697,26 +691,27 @@ pub struct Provenance {
     pub git_commit: Option<String>,
 }
 
-/// A label as stored: trimmed, one line, at most [`MAX_LABEL_CHARS`]
+/// A label as stored: trimmed, one line, at most `limits.label_chars`
 /// characters. Anything else is refused, saying the limit.
 pub fn check_label(text: &str) -> Result<String, VersionRefusal> {
+    let max = crate::input_caps::InputCaps::current().label_chars;
     let label = text.trim();
     let n = label.chars().count();
     if n == 0 {
         return Err(VersionRefusal::Label(format!(
-            "a label is 1 to {MAX_LABEL_CHARS} characters; this one is empty. \
+            "a label is 1 to {max} characters; this one is empty. \
              `ordo versions label <version> --clear` removes a label"
         )));
     }
     if label.chars().any(char::is_control) {
         return Err(VersionRefusal::Label(format!(
-            "a label is one line of at most {MAX_LABEL_CHARS} characters; this one has a \
+            "a label is one line of at most {max} characters; this one has a \
              line break or another control character"
         )));
     }
-    if n > MAX_LABEL_CHARS {
+    if n > max {
         return Err(VersionRefusal::Label(format!(
-            "a label is at most {MAX_LABEL_CHARS} characters; this one is {n}"
+            "a label is at most {max} characters; this one is {n}. `ordo versions set limits.label_chars <n> --reason \"...\"` changes the limit"
         )));
     }
     Ok(label.to_string())
@@ -741,20 +736,21 @@ pub fn check_git_commit(text: &str) -> Result<String, VersionRefusal> {
 }
 
 /// A revoke's or unrevoke's reason as stored: trimmed, 1 to
-/// [`MAX_REASON_CHARS`] characters, any text. Anything else is refused,
+/// `limits.reason_chars` characters, any text. Anything else is refused,
 /// saying the limit.
 pub fn check_reason(text: &str) -> Result<String, VersionRefusal> {
+    let max = crate::input_caps::InputCaps::current().reason_chars;
     let reason = text.trim();
     let n = reason.chars().count();
     if n == 0 {
         return Err(VersionRefusal::Reason(format!(
-            "a reason is 1 to {MAX_REASON_CHARS} characters; this one is empty. \
+            "a reason is 1 to {max} characters; this one is empty. \
              `--reason \"...\"` says why, and stays on record"
         )));
     }
-    if n > MAX_REASON_CHARS {
+    if n > max {
         return Err(VersionRefusal::Reason(format!(
-            "a reason is at most {MAX_REASON_CHARS} characters; this one is {n}"
+            "a reason is at most {max} characters; this one is {n}. `ordo versions set limits.reason_chars <n> --reason \"...\"` changes the limit"
         )));
     }
     Ok(reason.to_string())
@@ -1798,7 +1794,7 @@ pub enum VersionRefusal {
     /// No version is stored under the name or `#n` a person gave. Fix the
     /// input; `stored` names every version there is, `#n · name`.
     NotStored { asked: String, stored: Vec<String> },
-    /// A label that is empty, longer than [`MAX_LABEL_CHARS`], or more than
+    /// A label that is empty, longer than `limits.label_chars`, or more than
     /// one line. Fix the input.
     Label(String),
     /// A git commit that is not one. Fix the input.
@@ -1833,7 +1829,7 @@ pub enum VersionRefusal {
         named: String,
         setting: &'static str,
     },
-    /// A reason that is empty or longer than [`MAX_REASON_CHARS`]. Fix the
+    /// A reason that is empty or longer than `limits.reason_chars`. Fix the
     /// input.
     Reason(String),
     /// A pin of a tenant there is none of, or one that serves nothing

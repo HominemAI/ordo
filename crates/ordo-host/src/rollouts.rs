@@ -186,10 +186,8 @@ pub const FAILURE_THRESHOLD_DEFAULT: i64 = 1;
 pub const CANARY_COUNT_DEFAULT: i64 = 1;
 /// `rollout.canary_wait`'s default: 1 hour.
 pub const CANARY_WAIT_DEFAULT: i64 = 3_600;
-/// How many tenants a group names at most.
-pub const MAX_GROUP: usize = 1_000;
-/// How long a query or an order may be, in characters.
-pub const MAX_QUERY: usize = 2_000;
+// The most tenants a group names (`limits.rollout_group`) and the longest
+// query or order (`limits.query_chars`) are settings: `crate::input_caps`.
 
 // ── the words ────────────────────────────────────────────────────────────
 
@@ -625,22 +623,34 @@ pub fn check_setting(setting: &str, value: Option<&str>) -> Result<Option<String
             .ok_or_else(|| bad("it is `on` or `off`")),
         GROUP_SETTING => {
             let list = group_list(v);
-            if list.len() > MAX_GROUP {
-                return Err(bad(&format!("a group names {MAX_GROUP} tenants at most")));
+            let max_group = crate::input_caps::InputCaps::current().rollout_group;
+            if list.len() > max_group {
+                return Err(bad(&format!(
+                    "a group names {max_group} tenants at most (`limits.rollout_group`; \
+                     `ordo versions set limits.rollout_group <n> --reason \"...\"` changes it)"
+                )));
             }
             Ok(Some(list.join(",")))
         }
         QUERY_SETTING => {
-            if v.chars().count() > MAX_QUERY {
-                return Err(bad(&format!("a query is {MAX_QUERY} characters at most")));
+            let max_query = crate::input_caps::InputCaps::current().query_chars;
+            if v.chars().count() > max_query {
+                return Err(bad(&format!(
+                    "a query is {max_query} characters at most (`limits.query_chars`; \
+                     `ordo versions set limits.query_chars <n> --reason \"...\"` changes it)"
+                )));
             }
             crate::rollout_strategies::Query::parse(v, None)
                 .map(|_| Some(v.to_string()))
                 .map_err(|why| bad(&why))
         }
         ORDER_SETTING => {
-            if v.chars().count() > MAX_QUERY {
-                return Err(bad(&format!("an order is {MAX_QUERY} characters at most")));
+            let max_query = crate::input_caps::InputCaps::current().query_chars;
+            if v.chars().count() > max_query {
+                return Err(bad(&format!(
+                    "an order is {max_query} characters at most (`limits.query_chars`; \
+                     `ordo versions set limits.query_chars <n> --reason \"...\"` changes it)"
+                )));
             }
             crate::rollout_strategies::Query::parse("true", Some(v))
                 .map(|_| Some(v.to_string()))
@@ -1669,11 +1679,16 @@ impl<'a> Rollouts<'a> {
                          or `ordo rollout set rollout.group a,b --reason \"...\"`",
                     ));
                 }
-                if group.len() > MAX_GROUP {
+                let max_group = crate::input_caps::InputCaps::current().rollout_group;
+                if group.len() > max_group {
                     return Err(bad(
                         GROUP_SETTING,
                         &group.len().to_string(),
-                        &format!("a group names {MAX_GROUP} tenants at most"),
+                        &format!(
+                            "a group names {max_group} tenants at most (`limits.rollout_group`; \
+                             `ordo versions set limits.rollout_group <n> --reason \"...\"` \
+                             changes it)"
+                        ),
                     ));
                 }
                 let known = crate::rollout_strategies::facts(
@@ -1708,13 +1723,18 @@ impl<'a> Rollouts<'a> {
                          `--query \"members < 5\"` or `ordo rollout set rollout.query ...`",
                     ));
                 };
-                if q.chars().count() > MAX_QUERY
-                    || order.as_deref().unwrap_or_default().chars().count() > MAX_QUERY
+                let max_query = crate::input_caps::InputCaps::current().query_chars;
+                if q.chars().count() > max_query
+                    || order.as_deref().unwrap_or_default().chars().count() > max_query
                 {
                     return Err(bad(
                         QUERY_SETTING,
                         &q,
-                        &format!("a query and its order are {MAX_QUERY} characters at most"),
+                        &format!(
+                            "a query and its order are {max_query} characters at most \
+                             (`limits.query_chars`; `ordo versions set limits.query_chars <n> \
+                             --reason \"...\"` changes it)"
+                        ),
                     ));
                 }
                 let limit = opts.limit.or(settings.limit);
@@ -3290,8 +3310,16 @@ pub fn specs() -> Vec<OpSpec> {
                 text("alertChannel", 320, false),
                 flag("sharePartners"),
                 text("group", 65_536, false),
-                text("query", MAX_QUERY as u32, false),
-                text("order", MAX_QUERY as u32, false),
+                text(
+                    "query",
+                    crate::input_caps::InputCaps::current().query_chars as u32,
+                    false,
+                ),
+                text(
+                    "order",
+                    crate::input_caps::InputCaps::current().query_chars as u32,
+                    false,
+                ),
                 int("limit"),
             ],
             rollout_fields,

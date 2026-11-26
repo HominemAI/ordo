@@ -873,6 +873,9 @@ pub fn execute_boxed<'a>(
     }
     let step = crate::evolve::execute_boxed(ops, name, bound, caller);
     Box::pin(async move {
+        crate::input_caps::refresh(&ops.pool)
+            .await
+            .map_err(|e| e.to_exec_error("the input caps could not be read"))?;
         Ok(ExecResult {
             position: None,
             rows: vec![step.await?],
@@ -889,6 +892,12 @@ pub async fn execute(
     caller: &str,
 ) -> Result<ExecResult, ExecError> {
     ops.home_only(space)?;
+    // The input caps are settings (2026-11-25): put the stored ones in force
+    // here before any check reads them, so a change made on another node
+    // holds on this one.
+    crate::input_caps::refresh(&ops.pool)
+        .await
+        .map_err(|e| e.to_exec_error("the input caps could not be read"))?;
     let row = match name {
         VERSIONS => {
             let limit = bound
@@ -1285,6 +1294,7 @@ pub async fn execute(
                 .await
                 .map_err(|e| e.to_exec_error("the window settings could not be read"))?
                 .to_json();
+            row["limits"] = crate::input_caps::InputCaps::current().to_json();
             row["soakSecs"] = json!(crate::dual_writes::stored_soak_secs(&ops.pool)
                 .await
                 .map_err(|e| e.to_exec_error("soak.length could not be read"))?);
@@ -1461,19 +1471,61 @@ pub async fn execute(
                     next_cursor: None,
                 });
             }
+            // And the input caps (owner, 2026-11-25).
+            if named.trim().starts_with("limits.") {
+                let value = text(bound, "value").filter(|v| !v.is_empty());
+                let reason = text(bound, "reason").unwrap_or_default();
+                let (changed, now) = crate::input_caps::set_setting(
+                    &ops.pool,
+                    named,
+                    value,
+                    caller,
+                    reason,
+                    crate::runtime::now_secs(),
+                )
+                .await
+                .map_err(|e| e.to_exec_error("the input cap was not changed"))?;
+                let setting = crate::input_caps::setting_name(named).unwrap_or_default();
+                let value = now.to_json()[crate::input_caps::InputCaps::json_key(setting)].clone();
+                if changed {
+                    ops.record(
+                        caller,
+                        SET_VERSION_SETTING,
+                        "version-setting",
+                        format!("setting={setting} value={value} by={caller}"),
+                    );
+                }
+                let v = crate::versions::Versions::on(&ops.pool);
+                let mut row = settings_json(
+                    &v.settings()
+                        .await
+                        .map_err(|e| e.to_exec_error("the version settings could not be read"))?,
+                );
+                row["limits"] = now.to_json();
+                row["setting"] = json!(setting);
+                row["value"] = value;
+                row["changed"] = json!(changed);
+                row["waiting"] = waiting_json(&ops.pool).await;
+                return Ok(ExecResult {
+                    position: None,
+                    rows: vec![row],
+                    next_cursor: None,
+                });
+            }
             let Some(setting) = crate::versions::VersionSetting::parse(named) else {
                 return Err(ExecError::new(
                     ordo_api::ErrorCode::InvalidParam,
                     format!(
                         "the version setting was not changed: `{named}` is not one. There are \
                          {}, soak.length, the rollout settings {}, the backfill settings {}, \
-                         and the window settings {}",
+                         the window settings {} and the input caps {}",
                         crate::versions::VersionSetting::ALL
                             .map(|s| s.name())
                             .join(", "),
                         crate::rollouts::SETTINGS.join(", "),
                         crate::backfill::SETTINGS.join(", "),
-                        crate::windows::SETTINGS.map(|(n, ..)| n).join(", ")
+                        crate::windows::SETTINGS.map(|(n, ..)| n).join(", "),
+                        crate::input_caps::SETTINGS.map(|(n, ..)| n).join(", ")
                     ),
                 ));
             };

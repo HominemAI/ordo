@@ -25,6 +25,7 @@ const MIGRATIONS: &[(i32, &str)] = &[
     (5, MIGRATION_5),
     (6, MIGRATION_6),
     (7, MIGRATION_7),
+    (8, MIGRATION_8),
 ];
 
 /// Open sign-up, per deployment (owner, 2026-11-17). Every deployment
@@ -73,6 +74,15 @@ CREATE TABLE client_assertions (
   created_at bigint NOT NULL,
   PRIMARY KEY (deployment, client, jti_hash)
 );
+"#;
+
+/// Rotating a consumer key (`plan-federation-grants.md` G9). The key a
+/// rotation replaced stays accepted until `prev_consumer_key_until`, so a
+/// holder node still signing with it is not cut off at the moment of the
+/// swap.
+const MIGRATION_8: &str = r#"
+ALTER TABLE deployments ADD COLUMN prev_consumer_key text;
+ALTER TABLE deployments ADD COLUMN prev_consumer_key_until bigint;
 "#;
 
 /// The advisory lock migrations run under, so two services booting at once

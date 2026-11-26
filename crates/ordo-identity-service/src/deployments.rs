@@ -120,11 +120,27 @@ pub struct Registered {
     /// assertions it calls another deployment with
     /// (`plan-federation-grants.md` 5). `None`: it calls no one.
     pub consumer_key: Option<[u8; 32]>,
+    /// The consumer key a rotation replaced, and the second until which it
+    /// is still accepted (`plan-federation-grants.md` G9).
+    pub previous_key: Option<([u8; 32], u64)>,
     pub created_by: String,
     pub created_at: u64,
 }
 
 impl Registered {
+    /// The consumer keys that sign for this deployment at `now`: the
+    /// current one, then the one a rotation replaced while its overlap
+    /// lasts.
+    pub fn keys_at(&self, now: u64) -> Vec<[u8; 32]> {
+        let mut keys: Vec<[u8; 32]> = self.consumer_key.into_iter().collect();
+        if let Some((old, until)) = self.previous_key {
+            if now < until {
+                keys.push(old);
+            }
+        }
+        keys
+    }
+
     pub fn json(&self) -> Value {
         json!({
             "handle": self.handle,
@@ -134,6 +150,8 @@ impl Registered {
             "trustedAppOrigins": self.trusted_app_origins().iter().map(Origin::to_string).collect::<Vec<_>>(),
             "signUp": self.sign_up.as_str(),
             "consumerKey": self.consumer_key.as_ref().map(|k| b64url_encode(k)),
+            "previousConsumerKey": self.previous_key.as_ref().map(|(k, _)| b64url_encode(k)),
+            "previousConsumerKeyUntil": self.previous_key.as_ref().map(|(_, u)| *u),
             "createdBy": self.created_by,
             "createdAt": self.created_at,
         })
@@ -300,6 +318,7 @@ impl Registration {
             return_urls: returns,
             sign_up: self.sign_up,
             consumer_key,
+            previous_key: None,
             created_by: String::new(),
             created_at: 0,
         })
@@ -417,6 +436,9 @@ fn row(r: &ordo_exec::TextRow) -> Registered {
         client_origins: words(1).iter().filter_map(|o| Origin::parse(o)).collect(),
         return_urls: words(2),
         consumer_key: cell(r, 6).and_then(|k| parse_consumer_key(k).ok()),
+        previous_key: cell(r, 7)
+            .and_then(|k| parse_consumer_key(k).ok())
+            .zip(num(r, 8)),
         created_by: text(r, 3),
         created_at: num(r, 4).unwrap_or(0),
         sign_up: if text(r, 5) == SignUp::Open.as_str() {
@@ -428,7 +450,8 @@ fn row(r: &ordo_exec::TextRow) -> Registered {
 }
 
 const COLUMNS: &str =
-    "handle, client_origins, return_urls, created_by, created_at, sign_up, consumer_key";
+    "handle, client_origins, return_urls, created_by, created_at, sign_up, consumer_key, \
+     prev_consumer_key, prev_consumer_key_until";
 
 /// Every live deployment registered with the service, by handle.
 pub async fn list(pool: &Pool, home: &str) -> Result<Vec<Registered>, IdentityError> {
@@ -721,23 +744,50 @@ fn key_id_text(key: Option<&[u8; 32]>) -> String {
 }
 
 /// Set or replace a registered deployment's consumer key, or remove it
-/// with `None`. Replacing it is how a deployment rotates its key: an
-/// assertion signed with the old key is refused from then on. Recorded.
+/// with `None`. Replacing it is how a deployment rotates its key: the key
+/// it replaces stays accepted for `overlap_secs` more seconds (none with
+/// 0), then an assertion signed with it is refused. Registering the key
+/// already current changes nothing, so a rotation that is asked again
+/// does not push the old key out. Recorded.
+#[allow(clippy::too_many_arguments)]
 pub async fn set_consumer_key(
     pool: &Pool,
     home: &str,
     keys: &KeyRing,
     handle: &str,
     key: Option<&[u8; 32]>,
+    overlap_secs: u64,
     by: Actor<'_>,
     now: u64,
 ) -> Result<(), IdentityError> {
     let tx = pool.begin().await?;
+    let new = key_lit(key);
+    // The right side of each assignment reads the row as it was.
+    let (prev, until) = if key.is_none() {
+        ("NULL".to_string(), "NULL".to_string())
+    } else if overlap_secs == 0 {
+        (
+            format!("CASE WHEN consumer_key = {new} THEN prev_consumer_key END"),
+            format!("CASE WHEN consumer_key = {new} THEN prev_consumer_key_until END"),
+        )
+    } else {
+        (
+            format!(
+                "CASE WHEN consumer_key = {new} THEN prev_consumer_key \
+                 ELSE consumer_key END"
+            ),
+            format!(
+                "CASE WHEN consumer_key = {new} THEN prev_consumer_key_until \
+                 WHEN consumer_key IS NULL THEN NULL ELSE {} END",
+                now + overlap_secs
+            ),
+        )
+    };
     let done = tx
         .rows(&format!(
-            "UPDATE deployments SET consumer_key = {} WHERE {} AND handle = {} \
+            "UPDATE deployments SET prev_consumer_key = {prev}, \
+             prev_consumer_key_until = {until}, consumer_key = {new} WHERE {} AND handle = {} \
              AND ended_at IS NULL RETURNING 1",
-            key_lit(key),
             dep(home),
             sql_lit(handle)
         ))

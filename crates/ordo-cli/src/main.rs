@@ -656,6 +656,7 @@ fn main() {
             | "fleet"
             | "touches"
             | "triggers"
+            | "peers"
     ) {
         let out = ordo_cli::operator::run(cmd, rest);
         if out.code == 0 {

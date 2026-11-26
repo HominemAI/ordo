@@ -43,7 +43,8 @@
 //! turns it into a refusal line; a door op into an [`ExecError`].
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
@@ -106,10 +107,22 @@ pub fn consumer_key_from_custody(
     home: &str,
     handle: &str,
 ) -> Result<SigningKey, ordo_crypto::KeyError> {
+    consumer_key_version(keys, home, handle, 1)
+}
+
+/// The consumer key of label version `version` (`v1`, `v2`, ...): a
+/// rotation bumps the version and needs no new index key
+/// ([`crate::peer_key`]).
+pub fn consumer_key_version(
+    keys: &dyn ordo_crypto::KeyProvider,
+    home: &str,
+    handle: &str,
+    version: u32,
+) -> Result<SigningKey, ordo_crypto::KeyError> {
     let seed = keys.blind_index(
         &ordo_crypto::SpaceId(home.to_string()),
         "$consumerkey",
-        "v1",
+        &crate::peer_key::label(version),
         ordo_crypto::BlindValue::Text(handle),
     )?;
     Ok(peer_token::consumer_key(&seed, handle))
@@ -351,9 +364,36 @@ pub use ordo_api::OpKind as Method;
 pub struct PeerClient {
     service: Result<ServiceSettings, PeerClientError>,
     timeout: Result<Duration, PeerClientError>,
-    key: SigningKey,
+    /// The label version and the key derived under it.
+    key: RwLock<(u32, SigningKey)>,
+    /// Where the version is kept, and how a version becomes a key: set by
+    /// [`PeerClient::with_custody`].
+    custody: OnceLock<Custody>,
+    /// When the stored version was last looked at, in seconds.
+    synced: AtomicU64,
     var: Settings,
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
+}
+
+/// How a node learns of a rotation another node made: it looks at the
+/// stored version at most this often, in seconds.
+pub const KEY_SYNC_SECS: u64 = 15;
+
+/// Derives the key of a label version.
+pub type Derive = Arc<dyn Fn(u32) -> Result<SigningKey, String> + Send + Sync>;
+
+struct Custody {
+    store: Arc<crate::peer_key::KeyStore>,
+    derive: Derive,
+}
+
+/// What a rotation did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rotated {
+    pub version: u32,
+    pub public: String,
+    /// The key it replaced, still accepted until the overlap ends.
+    pub previous: String,
 }
 
 impl fmt::Debug for PeerClient {
@@ -375,7 +415,9 @@ impl PeerClient {
         PeerClient {
             service: ServiceSettings::from_vars(&*var),
             timeout: timeout_from(&*var),
-            key,
+            key: RwLock::new((1, key)),
+            custody: OnceLock::new(),
+            synced: AtomicU64::new(0),
             var,
             now,
         }
@@ -397,7 +439,75 @@ impl PeerClient {
 
     /// The consumer key's public half, as the service registers it.
     pub fn public_key(&self) -> String {
-        peer_token::public_text(&self.key.verifying_key())
+        peer_token::public_text(&self.signing_key().verifying_key())
+    }
+
+    fn signing_key(&self) -> SigningKey {
+        self.key.read().unwrap_or_else(|e| e.into_inner()).1.clone()
+    }
+
+    /// The label version this node signs with now.
+    pub fn key_version(&self) -> u32 {
+        self.key.read().unwrap_or_else(|e| e.into_inner()).0
+    }
+
+    /// Keep the key's version in `store`, and derive a version's key with
+    /// `derive`, so a rotation persists and every node takes it up
+    /// ([`PeerClient::sync_key`]). The version stored now becomes this
+    /// node's key at once.
+    pub async fn with_custody(
+        &self,
+        store: Arc<crate::peer_key::KeyStore>,
+        derive: Derive,
+    ) -> Result<(), PeerClientError> {
+        let _ = self.custody.set(Custody { store, derive });
+        self.sync_key_now().await
+    }
+
+    /// Take up the stored version when another node rotated: looked at
+    /// every [`KEY_SYNC_SECS`] seconds, never more often.
+    async fn sync_key(&self) {
+        let now = (self.now)();
+        let last = self.synced.load(Ordering::Relaxed);
+        if self.custody.get().is_none() || (last != 0 && now < last + KEY_SYNC_SECS) {
+            return;
+        }
+        self.synced.store(now, Ordering::Relaxed);
+        // A store that cannot be read leaves the key this node has.
+        let _ = self.sync_key_now().await;
+    }
+
+    async fn sync_key_now(&self) -> Result<(), PeerClientError> {
+        let Some(c) = self.custody.get() else {
+            return Ok(());
+        };
+        let record = c.store.load().await.map_err(store_error)?;
+        if record.version != self.key_version() {
+            let key = (c.derive)(record.version).map_err(PeerClientError::Custody)?;
+            *self.key.write().unwrap_or_else(|e| e.into_inner()) = (record.version, key);
+        }
+        Ok(())
+    }
+
+    /// What the identity service was last given, against this node's key.
+    /// Only a deployment with its custody wired can say.
+    pub async fn key_state(&self) -> Result<crate::peer_key::KeyState, PeerClientError> {
+        let public = self.public_key();
+        let Some(c) = self.custody.get() else {
+            return Ok(crate::peer_key::KeyState {
+                version: self.key_version(),
+                public,
+                registered: false,
+                registered_at: 0,
+            });
+        };
+        let record = c.store.load().await.map_err(store_error)?;
+        Ok(crate::peer_key::KeyState {
+            version: self.key_version(),
+            registered: record.registered.as_deref() == Some(public.as_str()),
+            registered_at: record.registered_at,
+            public,
+        })
     }
 
     /// The holder the nickname `peer` names, from its settings.
@@ -463,12 +573,86 @@ impl PeerClient {
 
     /// Register this deployment's consumer key at the identity service,
     /// with `admin_token`: a token for an admin of this deployment, which
-    /// the service takes for its own registration (step G2). Replaces a key
-    /// registered before.
+    /// the service takes for its own registration (step G2). Registering
+    /// the key the service already holds changes nothing there. What it was
+    /// given is kept ([`crate::peer_key`]), so a plan can say so.
     pub async fn register_key(&self, admin_token: &str) -> Result<String, PeerClientError> {
+        self.sync_key_now().await?;
+        let public = self.public_key();
+        self.post_key_of(admin_token, &public, None).await?;
+        self.keep_registered(&public).await?;
+        Ok(public)
+    }
+
+    /// Rotate the consumer key: bump its label version, register the new
+    /// public key, and keep the old one accepted for `overlap_secs` (the
+    /// service's default with `None`, never more than its setting). Asked
+    /// again after a failure part way, it registers the same new key.
+    pub async fn rotate_key(
+        &self,
+        admin_token: &str,
+        overlap_secs: Option<u64>,
+    ) -> Result<Rotated, PeerClientError> {
+        let Some(c) = self.custody.get() else {
+            return Err(PeerClientError::Custody(
+                "this node keeps no record of the consumer key's version, so it cannot rotate it"
+                    .into(),
+            ));
+        };
+        self.sync_key_now().await?;
+        let record = c.store.load().await.map_err(store_error)?;
+        // The key the service holds now: the stored one, or the one this
+        // node signs with when nothing was stored yet.
+        let previous = record
+            .registered
+            .clone()
+            .unwrap_or_else(|| self.public_key());
+        let version = record.version + 1;
+        let key = (c.derive)(version).map_err(PeerClientError::Custody)?;
+        let public = peer_token::public_text(&key.verifying_key());
+        self.post_key_of(admin_token, &public, overlap_secs).await?;
+        c.store
+            .save(&crate::peer_key::KeyRecord {
+                version,
+                registered: Some(public.clone()),
+                registered_at: (self.now)(),
+            })
+            .await
+            .map_err(store_error)?;
+        *self.key.write().unwrap_or_else(|e| e.into_inner()) = (version, key);
+        Ok(Rotated {
+            version,
+            public,
+            previous,
+        })
+    }
+
+    async fn keep_registered(&self, public: &str) -> Result<(), PeerClientError> {
+        let Some(c) = self.custody.get() else {
+            return Ok(());
+        };
+        c.store
+            .save(&crate::peer_key::KeyRecord {
+                version: self.key_version(),
+                registered: Some(public.to_string()),
+                registered_at: (self.now)(),
+            })
+            .await
+            .map_err(store_error)
+    }
+
+    async fn post_key_of(
+        &self,
+        admin_token: &str,
+        public: &str,
+        overlap_secs: Option<u64>,
+    ) -> Result<Value, PeerClientError> {
         let s = self.service()?;
         let path = format!("{}/deployments/{}/consumer-key", s.url.prefix, s.handle);
-        let body = json!({ "consumerKey": self.public_key() }).to_string();
+        let mut body = json!({ "consumerKey": public });
+        if let Some(o) = overlap_secs {
+            body["overlapSecs"] = json!(o);
+        }
         let (status, answer) = send(
             self.timeout(),
             &s.url,
@@ -478,12 +662,12 @@ impl PeerClient {
                 ("authorization".into(), format!("Bearer {admin_token}")),
                 ("content-type".into(), "application/json".into()),
             ],
-            Some(body.into_bytes()),
+            Some(body.to_string().into_bytes()),
             "the identity service",
         )
         .await?;
         match status {
-            200 => Ok(self.public_key()),
+            200 => Ok(serde_json::from_slice(&answer).unwrap_or(Value::Null)),
             s if s >= 500 => Err(PeerClientError::Unreachable {
                 what: format!("the identity service at {}", self.service()?.url.display()),
                 cause: format!("it answered {s}"),
@@ -506,13 +690,15 @@ impl PeerClient {
         chain: &[String],
     ) -> Result<String, PeerClientError> {
         let s = self.service()?;
+        self.sync_key().await;
+        let key = self.signing_key();
         let now = (self.now)();
         let mut jti = [0u8; 16];
         ordo_crypto::fill_random(&mut jti);
         let assertion = peer_token::client_assertion(
             &s.handle,
             &s.issuer,
-            &self.key,
+            &key,
             now,
             now + ASSERTION_SECS,
             &ordo_identity::webauthn::b64url_encode(&jti),
@@ -536,7 +722,7 @@ impl PeerClient {
                     &s.handle,
                     &s.issuer,
                     subject,
-                    &self.key,
+                    &key,
                     now,
                     now + ASSERTION_SECS,
                 );
@@ -814,6 +1000,13 @@ impl HolderGrant {
 
 /// [`TIMEOUT_ENV`], or the default when unset. Anything but a whole number
 /// of seconds from 1 is a setting error naming it.
+fn store_error(e: ordo_exec::PoolError) -> PeerClientError {
+    PeerClientError::Unreachable {
+        what: "the control database, which keeps the consumer key's version".into(),
+        cause: e.to_string(),
+    }
+}
+
 fn timeout_from(var: &dyn Fn(&str) -> Option<String>) -> Result<Duration, PeerClientError> {
     match var(TIMEOUT_ENV).map(|v| v.trim().to_string()) {
         None => Ok(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),

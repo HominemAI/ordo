@@ -272,19 +272,9 @@ impl Service {
         let Some(d) = deployments::get(pool, self.handle(), &claimed).await? else {
             return Err(refused());
         };
-        let Some(public) = d.consumer_key else {
-            return Err(refused());
-        };
-        let jwk = Jwk::parse(&json!({
-            "kty": "OKP",
-            "crv": "Ed25519",
-            "x": b64url_encode(&public),
-        }))
-        .map_err(|_| refused())?;
-        let verified =
-            jose::verify_with_key(assertion, &jwk, &[Alg::EdDSA]).map_err(|_| refused())?;
-        let c = verified.claims().map_err(|_| refused())?;
         let now = self.now();
+        let verified = verify_consumer(&d.keys_at(now), assertion).ok_or_else(refused)?;
+        let c = verified.claims().map_err(|_| refused())?;
         let text = |k: &str| c.get(k).and_then(Value::as_str);
         let endpoint = format!("{}{TOKEN_PATH}", self.config().public_url());
         let issuer = self.oidc_issuer();
@@ -399,17 +389,11 @@ impl Service {
         token: &str,
         now: u64,
     ) -> Result<Result<(String, u64), (String, &'static str)>, IdentityError> {
-        let Some(public) = consumer.consumer_key else {
+        let keys = consumer.keys_at(now);
+        if keys.is_empty() {
             return Ok(Err((String::new(), "no consumer key")));
-        };
-        let Ok(jwk) = Jwk::parse(&json!({
-            "kty": "OKP",
-            "crv": "Ed25519",
-            "x": b64url_encode(&public),
-        })) else {
-            return Ok(Err((String::new(), "no consumer key")));
-        };
-        let Ok(verified) = jose::verify_with_key(token, &jwk, &[Alg::EdDSA]) else {
+        }
+        let Some(verified) = verify_consumer(&keys, token) else {
             return Ok(Err((String::new(), "not signed by the consumer")));
         };
         let Ok(c) = verified.claims() else {
@@ -553,4 +537,19 @@ pub async fn sweep_assertions(
         ))
         .await?
         .len() as u64)
+}
+
+/// `token` verified under the first of the consumer's accepted keys that
+/// signed it: its current key, or the one a rotation replaced while the
+/// overlap lasts ([`Registered::keys_at`]).
+fn verify_consumer(keys: &[[u8; 32]], token: &str) -> Option<jose::Verified> {
+    keys.iter().find_map(|public| {
+        let jwk = Jwk::parse(&json!({
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": b64url_encode(public),
+        }))
+        .ok()?;
+        jose::verify_with_key(token, &jwk, &[Alg::EdDSA]).ok()
+    })
 }

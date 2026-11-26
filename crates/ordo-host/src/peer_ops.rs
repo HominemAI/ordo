@@ -38,6 +38,10 @@
 //!
 //! [`REGISTER_KEY`] is the consumer's: it registers this deployment's
 //! consumer key at the identity service with a token for its own admin.
+//! `ordo apply` calls it by itself before the first apply of a file with a
+//! `peer` block, and not again once [`KEY_STATUS`] says the key is
+//! registered. [`ROTATE_KEY`] moves to the next key version
+//! ([`crate::peer_key`]) and keeps the old key accepted for an overlap.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, OnceLock};
@@ -62,8 +66,17 @@ pub const RECORD_USE: &str = "std.peer.recordUse";
 /// token for this deployment's own admin. A write, the deployment owner's.
 pub const REGISTER_KEY: &str = "std.peer.registerKey";
 
+/// Rotate the consumer key: the next label version, registered at the
+/// identity service with a token for this deployment's own admin; the old
+/// key stays accepted there for an overlap. A write, the deployment
+/// owner's.
+pub const ROTATE_KEY: &str = "std.peer.rotateKey";
+/// Which consumer key this deployment signs with, and whether the identity
+/// service was given it. A read, the deployment owner's.
+pub const KEY_STATUS: &str = "std.peer.keyStatus";
+
 /// Every op of this module.
-pub const OPS: [&str; 3] = [GRANT, RECORD_USE, REGISTER_KEY];
+pub const OPS: [&str; 5] = [GRANT, RECORD_USE, REGISTER_KEY, ROTATE_KEY, KEY_STATUS];
 /// The ops another deployment calls, as itself.
 pub const CONSUMER_OPS: [&str; 2] = [GRANT, RECORD_USE];
 
@@ -132,7 +145,41 @@ pub fn specs() -> Vec<OpSpec> {
             // A token for an admin of this deployment at the identity
             // service. Held for the one request and never stored.
             vec![text("token", 16 * 1024)],
-            &["handle", "consumerKey"],
+            &["handle", "consumerKey", "version", "registered"],
+        ),
+        spec(
+            ROTATE_KEY,
+            OpKind::Write,
+            vec![
+                text("token", 16 * 1024),
+                // How long the key it replaces stays accepted, in seconds;
+                // the identity service's setting when absent.
+                ParamSpec {
+                    name: "overlapSecs".to_string(),
+                    ty: ParamTy::Int,
+                    required: false,
+                    bounds: None,
+                },
+            ],
+            &[
+                "handle",
+                "consumerKey",
+                "previousConsumerKey",
+                "version",
+                "registered",
+            ],
+        ),
+        spec(
+            KEY_STATUS,
+            OpKind::Read,
+            vec![],
+            &[
+                "handle",
+                "consumerKey",
+                "version",
+                "registered",
+                "registeredAt",
+            ],
         ),
     ]
 }
@@ -412,6 +459,8 @@ impl PeerOps {
         }
         let row = match name {
             REGISTER_KEY => self.register_key(bound).await?,
+            ROTATE_KEY => self.rotate_key(bound).await?,
+            KEY_STATUS => self.key_status().await?,
             _ => {
                 let consumer = caller.strip_prefix("consumer:").ok_or_else(|| {
                     ExecError::new(
@@ -508,8 +557,8 @@ impl PeerOps {
         Ok(json!({ "consumer": consumer, "version": version, "ops": ops }))
     }
 
-    async fn register_key(&self, bound: &BoundParams) -> Result<Value, ExecError> {
-        let client = self.client.get().ok_or_else(|| {
+    fn key_client(&self) -> Result<&Arc<PeerClient>, ExecError> {
+        self.client.get().ok_or_else(|| {
             PeerClientError::Setting {
                 setting: crate::identity_keys::URL_ENV.into(),
                 why: "is unset, or the consumer key could not be derived, so this deployment \
@@ -517,19 +566,64 @@ impl PeerOps {
                     .into(),
             }
             .to_exec_error()
-        })?;
-        let token = bound
-            .0
-            .get("token")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .trim();
+        })
+    }
+
+    async fn register_key(&self, bound: &BoundParams) -> Result<Value, ExecError> {
+        let client = self.key_client()?;
+        let token = token_param(bound);
         let key = client
-            .register_key(token)
+            .register_key(&token)
             .await
             .map_err(|e| e.to_exec_error())?;
-        Ok(json!({ "handle": client.handle(), "consumerKey": key }))
+        Ok(json!({
+            "handle": client.handle(),
+            "consumerKey": key,
+            "version": client.key_version(),
+            "registered": true,
+        }))
     }
+
+    async fn rotate_key(&self, bound: &BoundParams) -> Result<Value, ExecError> {
+        let client = self.key_client()?;
+        let token = token_param(bound);
+        let overlap = bound.0.get("overlapSecs").and_then(|v| v.as_u64());
+        let done = client
+            .rotate_key(&token, overlap)
+            .await
+            .map_err(|e| e.to_exec_error())?;
+        Ok(json!({
+            "handle": client.handle(),
+            "consumerKey": done.public,
+            "previousConsumerKey": done.previous,
+            "version": done.version,
+            "registered": true,
+        }))
+    }
+
+    async fn key_status(&self) -> Result<Value, ExecError> {
+        let client = self.key_client()?;
+        let state = client.key_state().await.map_err(|e| e.to_exec_error())?;
+        Ok(json!({
+            "handle": client.handle(),
+            "consumerKey": state.public,
+            "version": state.version,
+            "registered": state.registered,
+            "registeredAt": state.registered_at,
+        }))
+    }
+}
+
+/// The identity service token a key op carries. Held for the one request
+/// and never stored.
+fn token_param(bound: &BoundParams) -> String {
+    bound
+        .0
+        .get("token")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 #[cfg(test)]

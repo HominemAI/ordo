@@ -469,6 +469,7 @@
       "peer_reads"
     ],
     "crates/ordo-host/src/peer_door.rs": "all",
+    "crates/ordo-host/src/peer_key.rs": "all",
     "crates/ordo-host/src/peer_ops.rs": "all",
     "crates/ordo-host/src/peer_reads.rs": [
       "peer_consumer",

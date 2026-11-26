@@ -549,6 +549,14 @@ impl Service {
         })
     }
 
+    /// A live registered deployment, as stored now.
+    pub async fn deployment(
+        &self,
+        handle: &str,
+    ) -> Result<Option<deployments::Registered>, IdentityError> {
+        deployments::get(self.0.store.pool(), self.handle(), handle).await
+    }
+
     /// Refuse open sign-up into `handle` unless it is a live registered
     /// deployment whose mode is open. Read from the database, so a change
     /// of mode counts at once on every instance. The service's own
@@ -1251,13 +1259,19 @@ impl Service {
         by: Actor<'_>,
         handle: &str,
         key: Option<&[u8; 32]>,
+        overlap_secs: Option<u64>,
     ) -> Result<(), IdentityError> {
+        // The key it replaces stays accepted for the overlap: the setting's
+        // value, or the shorter one the caller asked for.
+        let most = self.config().consumer_key_overlap_secs;
+        let overlap = overlap_secs.map_or(most, |o| o.min(most));
         deployments::set_consumer_key(
             self.0.store.pool(),
             self.handle(),
             &self.0.keys,
             handle,
             key,
+            overlap,
             by,
             self.now(),
         )

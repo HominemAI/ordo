@@ -185,6 +185,9 @@ const READS: &[&str] = &[
     // shape: another deployment's apply reads it as itself, through the
     // door for other deployments (`plan-federation-grants.md` §4, G4).
     "std.peer.grant",
+    // Which consumer key this deployment signs with and whether the
+    // identity service has it; deployment owner only (G9).
+    "std.peer.keyStatus",
     // The stored plans and their receipts; deployment owner only, home
     // space (versions increment 8).
     "std.deployment.plans",

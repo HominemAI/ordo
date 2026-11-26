@@ -110,6 +110,7 @@ pub mod passkeys;
 pub mod pause;
 pub mod peer_client;
 pub mod peer_door;
+pub mod peer_key;
 pub mod peer_ops;
 pub mod peer_reads;
 pub mod people_ops;

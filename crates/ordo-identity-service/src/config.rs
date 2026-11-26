@@ -51,6 +51,8 @@ pub const TOKEN_SECS_ENV: &str = "ORDO_IDENTITY_TOKEN_SECS";
 pub const PEER_TOKEN_SECS_ENV: &str = "ORDO_IDENTITY_PEER_TOKEN_SECS";
 /// The longest a consumer's client assertion may live (G2).
 pub const CLIENT_ASSERTION_SECS_ENV: &str = "ORDO_IDENTITY_CLIENT_ASSERTION_SECS";
+/// How long a consumer key a rotation replaced stays accepted (G9).
+pub const CONSUMER_KEY_OVERLAP_SECS_ENV: &str = "ORDO_IDENTITY_CONSUMER_KEY_OVERLAP_SECS";
 pub const SESSION_IDLE_ENV: &str = "ORDO_IDENTITY_SESSION_IDLE_HOURS";
 pub const SESSION_MAX_ENV: &str = "ORDO_IDENTITY_SESSION_MAX_HOURS";
 pub const GUESSES_PER_ADDRESS_ENV: &str = "ORDO_IDENTITY_GUESSES_PER_ADDRESS";
@@ -114,6 +116,15 @@ pub const CLIENT_ASSERTION_SECS: Range = Range {
     default: 120,
     min: 10,
     max: 600,
+    unit: "seconds",
+};
+/// How long the consumer key a rotation replaced stays accepted beside the
+/// new one. Long enough for every node of the consumer to take the new key
+/// up (they do within a minute); the rotation may ask for less, never more.
+pub const CONSUMER_KEY_OVERLAP_SECS: Range = Range {
+    default: 3600,
+    min: 1,
+    max: 604_800,
     unit: "seconds",
 };
 /// 7 days. The owner expects 24 or 12 to be common, so the unit is hours.
@@ -215,6 +226,8 @@ pub struct IdentityConfig {
     pub peer_token_secs: u64,
     /// [`CLIENT_ASSERTION_SECS_ENV`].
     pub client_assertion_secs: u64,
+    /// [`CONSUMER_KEY_OVERLAP_SECS_ENV`].
+    pub consumer_key_overlap_secs: u64,
     pub session_idle_hours: u64,
     pub session_max_hours: u64,
     pub key_rotate_days: u64,
@@ -451,6 +464,11 @@ impl IdentityConfig {
             token_secs: whole(get, TOKEN_SECS_ENV, TOKEN_SECS)?,
             peer_token_secs: whole(get, PEER_TOKEN_SECS_ENV, PEER_TOKEN_SECS)?,
             client_assertion_secs: whole(get, CLIENT_ASSERTION_SECS_ENV, CLIENT_ASSERTION_SECS)?,
+            consumer_key_overlap_secs: whole(
+                get,
+                CONSUMER_KEY_OVERLAP_SECS_ENV,
+                CONSUMER_KEY_OVERLAP_SECS,
+            )?,
             session_idle_hours,
             session_max_hours,
             key_rotate_days: whole(get, KEY_ROTATE_DAYS_ENV, KEY_ROTATE_DAYS)?,

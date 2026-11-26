@@ -437,6 +437,7 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         "fleet" => rt.block_on(fleet_cmd(flags)),
         "touches" => rt.block_on(touches_cmd(flags)),
         "triggers" => rt.block_on(crate::triggers::run(flags)),
+        "peers" => rt.block_on(crate::peers::run(flags)),
         _ => Outcome::usage(format!("unknown command `{cmd}`")),
     }
 }
@@ -2130,12 +2131,28 @@ async fn apply_once(flags: &Flags) -> Outcome {
         // each again, refuses a mismatch, and stores it by hash. A program
         // the CLI cannot compile goes as it is: the door's refusal names
         // the error.
+        let mut has_peer = false;
         let code = match crate::load_sources(&src) {
-            Ok((schema, _)) => match crate::function_code(std::path::Path::new(&path), &schema) {
-                Ok(c) => c,
-                Err(e) => return Outcome::failed(format!("REFUSED  {e}\n")),
-            },
+            Ok((schema, _)) => {
+                has_peer = !schema.peers.is_empty() || !schema.peer_uses.is_empty();
+                match crate::function_code(std::path::Path::new(&path), &schema) {
+                    Ok(c) => c,
+                    Err(e) => return Outcome::failed(format!("REFUSED  {e}\n")),
+                }
+            }
             Err(_) => crate::FunctionCode::default(),
+        };
+        // A file with a `peer` block calls another deployment, which takes
+        // this deployment's consumer key only once it is registered at the
+        // identity service. The first apply registers it with the token it
+        // holds; a later one finds it registered and does nothing (G9).
+        let key_line = if has_peer {
+            match crate::peers::ensure_registered(&host, flags).await {
+                Ok(line) => line,
+                Err(o) => return o,
+            }
+        } else {
+            None
         };
         let provenance = ordo_host::versions::Provenance {
             label,
@@ -2158,7 +2175,7 @@ async fn apply_once(flags: &Flags) -> Outcome {
             )
             .await;
         }
-        return crate::wire::apply_over_the_wire(
+        let mut out = crate::wire::apply_over_the_wire(
             &host,
             flags,
             src.text(),
@@ -2170,6 +2187,10 @@ async fn apply_once(flags: &Flags) -> Outcome {
             wait,
         )
         .await;
+        if let Some(line) = key_line {
+            out.report = line + &out.report;
+        }
+        return out;
     }
 
     let actor = flags.named.get("--as").cloned().unwrap_or_else(|| {

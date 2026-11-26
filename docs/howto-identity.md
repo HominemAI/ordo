@@ -679,6 +679,14 @@ deployment may also set it with the deployment token they hold, `POST
 Setting a new key rotates it. `--none`, or `null`, removes it, and the
 deployment can then call no one. `deployment list` shows which have one.
 
+A deployment running Ordo registers and rotates its own key, with
+`ordo apply` and `ordo peers rotate-key`. A rotation through the endpoint
+keeps the key it replaces accepted for an overlap,
+`ORDO_IDENTITY_CONSUMER_KEY_OVERLAP_SECS`, 3600 by default. The body may
+carry `"overlapSecs": <n>` for a shorter one, 0 for none. The answer names
+`previousConsumerKey` and `previousConsumerKeyUntil` while one is kept.
+The command line above keeps no overlap: it replaces the key at once.
+
 At `POST /oidc/token`, with a client assertion
 (`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer`,
 an EdDSA JWT with `iss` and `sub` the handle, `aud` the token endpoint, a

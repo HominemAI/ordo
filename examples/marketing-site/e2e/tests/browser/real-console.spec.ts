@@ -54,6 +54,9 @@ test('the real console sets up, links, rotates its key and manages a disposable 
     const name = `Console ${randomUUID()}`;
     await page.getByLabel('Name', { exact: true }).fill(name);
     await page.getByRole('button', { name: 'Create tenant' }).click();
+    await deploymentOnly(async () => {
+      await page.getByRole('dialog', { name: 'Touch your passkey for the deployment' }).getByRole('button', { name: 'Use my passkey' }).click();
+    });
     await expect(page.getByRole('status')).toContainText(`Created ${name}.`);
     const row = page.getByRole('region', { name: 'Tenants, newest first' }).getByRole('row').filter({ hasText: name });
     await expect(row).toContainText('Active');

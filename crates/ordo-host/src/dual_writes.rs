@@ -1395,10 +1395,6 @@ pub async fn close(
             .await
             .map_err(|e| run_err("internal", e))?,
     );
-    // Q1: a reader loses the old column now, by a column grant.
-    ordo_exec::peer::grant_readers(&target, &y.schema)
-        .await
-        .map_err(|e| run_err("reader_grants", e.to_string()))?;
     for t in &together {
         let epoch = v.close_dual_move(t, actor, at).await?;
         raise_fence(&target, t, epoch).await?;

@@ -2640,13 +2640,13 @@ pub fn external_reads(schema: &Schema) -> Option<ir::ExternalReads> {
             e.name.clone(),
             ir::ExternalRead {
                 schema: src.pg_schema(),
-                peer: src.peer.as_ref().map(|_| src.pg_schema()),
                 table: src.table.clone(),
                 key_column: src.key_column.clone(),
                 key_ty: src.key_ty,
                 prefix: e.key.clone(),
                 columns,
-                door: src.peer.as_ref().filter(|p| p.door).map(|p| p.name.clone()),
+                door: src.peer.as_ref().map(|p| p.name.clone()),
+                door_op: src.peer.as_ref().map(|p| p.op.clone()).unwrap_or_default(),
                 served: None,
             },
         );
@@ -2654,10 +2654,10 @@ pub fn external_reads(schema: &Schema) -> Option<ir::ExternalReads> {
     Some(std::sync::Arc::new(out))
 }
 
-/// The peer's Postgres schema when `entity` is an external from a peer.
+/// The peer's nickname when `entity` is an external from a peer.
 fn peer_of(schema: &Schema, entity: &str) -> Option<String> {
     let src = schema.entity(entity)?.external.as_ref()?;
-    src.peer.as_ref().map(|_| src.pg_schema())
+    src.peer.as_ref().map(|p| p.name.clone())
 }
 
 /// The entity a bound alias reads, found in the scope or the query's joins.
@@ -2722,8 +2722,8 @@ impl<'a> Binder<'a> {
             _ => Err(err(
                 "peer_caller_compare",
                 span,
-                "rule: on a table of a peer, `$caller` is the peer's member for the same \
-                 person, so it is compared with `==` or `!=` only.\n\
+                "rule: on a table of a peer, the peer decides who `$caller` is, through its \
+                 door, so it is compared with `==` or `!=` only.\n\
                  fix: write `field == $caller`",
             )),
         }

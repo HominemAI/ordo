@@ -398,22 +398,6 @@ async fn verify_on(
     shadow: &str,
     ddl: &str,
 ) -> Result<ShapeReport, ShapeRefusal> {
-    // `$caller` on a peer's table reads this deployment's own sign-in
-    // directory (`$principal`, `$authenticator`) unqualified, beside
-    // `members`. Those are platform tables, not the program's DDL, so the
-    // shadow is given them too, or every op that reads a peer would fail to
-    // describe here and run fine in production.
-    let with_directory;
-    let ddl = if f.schema.peers.is_empty() {
-        ddl
-    } else {
-        let mut all = vec![ddl.to_string()];
-        all.extend(crate::principal_directory::directory_ddl().map(str::to_string));
-        // And the map of shared providers it joins (`ordo_exec::peer::link`).
-        all.push(ordo_exec::peer::LINK_DDL.to_string());
-        with_directory = all.join(";\n");
-        &with_directory
-    };
     pool.build_shadow_in(shadow, ddl)
         .await
         .map_err(|e| ShapeRefusal::Unavailable(format!("the shadow schema did not build: {e}")))?;

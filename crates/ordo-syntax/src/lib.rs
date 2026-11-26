@@ -30,7 +30,7 @@ pub use decl::{
     AggDecl, DomainDecl, EditionDecl, EntityDecl, ExternalDecl, ExternalField, ExternalKeyTy,
     FieldDecl, FieldKind, FunctionDecl, FunctionHost, FunctionLimits, GrantDecl, GrantLine,
     GrantPattern, GuardAtom, GuardClause, GuardExpr, OpBody, OpDecl, OpFlags, ParamDecl, PeerDecl,
-    PeerUse, Pipeline, PrevName, Program, ProjItem, ReaderDecl, ReassignTarget, ReleaseAtom,
+    PeerUse, Pipeline, PrevName, Program, ProjItem, ReassignTarget, ReleaseAtom,
     ReleaseCond, ReleaseDecl, ReleaseEffect, ReleaseMode, RoutineDecl, RoutineNotify,
     RoutineTrigger, ScalarTy, SecretDecl, SortKey, Source, SourceArg, Step, TakeCount, WriteStmt,
     DIVISION_SCALE,

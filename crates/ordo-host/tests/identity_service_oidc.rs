@@ -585,7 +585,7 @@ async fn two_deployments_connected_under_different_names_match_one_person_throug
     // issuer, the same for both names.
     for (pool, name, handle) in [(&a, "identity", "notes"), (&b, "corp", "viewer")] {
         let fp = ids.connection(name, handle).fingerprint();
-        ordo_host::federation::ensure_fingerprint(pool, name, "oidc", &fp, "sub", 0)
+        ordo_host::federation::ensure_fingerprint(pool, name, "oidc", &fp, 0)
             .await
             .expect("recorded");
     }

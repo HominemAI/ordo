@@ -66,7 +66,6 @@ const IMPORTABLE: &[&str] = &[
     "every",
     "external",
     "peer",
-    "reader",
     "grant",
     "grantProvider",
     "f",
@@ -112,7 +111,6 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
     let mut needs_external = false;
     let mut needs_key = false;
     let needs_peer = !program.peers.is_empty();
-    let needs_reader = !program.readers.is_empty();
     let needs_grant = program.grants.iter().any(|g| !g.provider);
     let needs_grant_provider = program.grants.iter().any(|g| g.provider);
 
@@ -129,32 +127,18 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
     for p in &program.peers {
         let bind = e.bind(&p.name.name);
         // A block lists the holder's ops this deployment calls (step G4).
-        let uses = match &p.uses {
-            None => String::new(),
-            Some(uses) => format!(
-                ", [{}]",
-                uses.iter()
-                    .map(|u| ts::str_lit(&u.op))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        };
+        let uses = p
+            .uses
+            .iter()
+            .map(|u| ts::str_lit(&u.op))
+            .collect::<Vec<_>>()
+            .join(", ");
         body.push_str(&format!(
-            "const {bind} = peer({}{uses});\n\n",
+            "const {bind} = peer({}, [{uses}]);\n\n",
             ts::str_lit(&p.name.name)
         ));
         e.peers.insert(p.name.name.clone(), bind.clone());
         synth_args.push(bind);
-    }
-    // A reader line names this program's own tables, by name.
-    for r in &program.readers {
-        let tables = r
-            .tables
-            .iter()
-            .map(|t| ts::str_lit(&t.name))
-            .collect::<Vec<_>>()
-            .join(", ");
-        synth_args.push(format!("reader({}, [{tables}])", ts::str_lit(&r.name.name)));
     }
     // A grant's lines are strings, as written; what they match is the
     // apply's question.
@@ -205,7 +189,7 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
         .iter()
         .copied()
         .filter(|n| {
-            // `key`, `external`, `peer` and `reader` are also option and field words, so a
+            // `key`, `external` and `peer` are also option and field words, so a
             // whole-word mention would import them for nothing, and the
             // package compiles under `noUnusedLocals`. Their uses are calls.
             let mentioned = mentions(&body, n) || synth_args.iter().any(|a| mentions(a, n));
@@ -215,8 +199,6 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
                 needs_external
             } else if *n == "peer" {
                 needs_peer
-            } else if *n == "reader" {
-                needs_reader
             } else if *n == "grant" {
                 needs_grant
             } else if *n == "grantProvider" {

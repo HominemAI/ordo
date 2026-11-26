@@ -718,23 +718,42 @@ impl PeerClient {
     }
 
     /// Tell the holder `peer` which of its ops this deployment's version
-    /// `version` calls: `std.peer.recordUse`, as itself.
+    /// `version` calls, and the Ordo release it runs: `std.peer.recordUse`,
+    /// as itself. Answers the holder's handle, serving version and release.
     pub async fn record_use(
         &self,
         peer: &str,
         version: &str,
         ops: &[String],
-    ) -> Result<(), PeerClientError> {
-        self.call(
-            peer,
-            crate::peer_ops::RECORD_USE,
-            Method::Write,
-            &json!({ "version": version, "ops": serde_json::to_string(ops).unwrap_or_default() }),
-            Acting::AsItself,
-            &[],
-        )
-        .await
-        .map(|_| ())
+    ) -> Result<crate::peer_ops::HolderSeen, PeerClientError> {
+        let v = self
+            .call(
+                peer,
+                crate::peer_ops::RECORD_USE,
+                Method::Write,
+                &json!({
+                    "version": version,
+                    "ops": serde_json::to_string(ops).unwrap_or_default(),
+                    "release": crate::release_check::release(),
+                }),
+                Acting::AsItself,
+                &[],
+            )
+            .await?;
+        let row = v["rows"].as_array().and_then(|r| r.first()).cloned();
+        let field = |k: &str| {
+            row.as_ref()
+                .and_then(|r| r[k].as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        Ok(crate::peer_ops::HolderSeen {
+            peer: peer.to_string(),
+            handle: self.holder(peer)?.handle,
+            version: field("holderVersion"),
+            release: field("release"),
+            recorded_at: (self.now)(),
+        })
     }
 }
 

@@ -1168,7 +1168,7 @@ pub async fn accept(
         }
     }
     let options = evolve::parse_options(&text("options"))?;
-    let rendered = evolve::render(pool, &from, &to, &options, at).await?;
+    let rendered = evolve::render(pool, &from, &to, &options).await?;
     if rendered.digest != text("digest") {
         return Err(RehearsalRefusal::Digest {
             from,

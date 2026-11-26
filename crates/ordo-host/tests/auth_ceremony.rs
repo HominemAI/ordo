@@ -156,7 +156,6 @@ async fn a_connection_keeps_its_endpoints_for_life_under_its_name() {
         "discord",
         "oauth2",
         &conn.fingerprint(),
-        "id",
         NOW,
     )
     .await
@@ -166,7 +165,6 @@ async fn a_connection_keeps_its_endpoints_for_life_under_its_name() {
         "discord",
         "oauth2",
         &conn.fingerprint(),
-        "id",
         NOW,
     )
     .await
@@ -178,7 +176,6 @@ async fn a_connection_keeps_its_endpoints_for_life_under_its_name() {
         "discord",
         "oauth2",
         &moved.fingerprint(),
-        "id",
         NOW,
     )
     .await

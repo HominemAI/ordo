@@ -1,12 +1,13 @@
 //! Peer entities served through the holder's door
 //! (`plan-federation-grants.md` §4, step G5).
 //!
-//! An external entity declared from a peer whose `ORDO_PEER_<NAME>_URL` is
-//! set is never read from the peer's tables. Each read that touches one is
-//! answered in three moves, inside one call:
+//! An external entity declared from a peer is never read from the peer's
+//! tables: the holder's door at `ORDO_PEER_<NAME>_URL` answers it. Each
+//! read that touches one is answered in three moves, inside one call:
 //!
 //! 1. **Ask the holder.** Each alias of a peer entity in the bound query is
-//!    one call to the holder's `std.<entity>.list`, with what the read says
+//!    one call to the holder's `std.<entity>.list`, or to the holder's op
+//!    the `peer` block names like the table, with what the read says
 //!    about it: its conditions as `$refine.where`, its fields as `pick`,
 //!    and, for a read whose rows are the peer's rows, its order and
 //!    `take` as `sort` and `limit`. The holder runs that as its own SQL,
@@ -40,13 +41,14 @@ use serde_json::{json, Map, Value};
 
 use crate::{ExecFail, Pool};
 
-/// One call to a holder: `std.<entity>.list` with a refinement.
+/// One call to a holder: `std.<entity>.list`, or the op the `peer` block
+/// names like the table, with a refinement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fetch {
     /// The `peer` nickname.
     pub peer: String,
-    /// The holder's entity: the call is `std.<entity>.list`.
-    pub entity: String,
+    /// The holder's op: `std.<entity>.list`, or a read op of the holder.
+    pub op: String,
     /// The `$refine.where` conditions, in the door's shape.
     pub conds: Vec<Value>,
     /// The holder's fields this read needs.
@@ -866,7 +868,7 @@ fn base_fetch(s: &Site) -> Fetch {
     }
     Fetch {
         peer: r.door.clone().unwrap_or_default(),
-        entity: r.table.clone(),
+        op: r.door_op.clone(),
         conds,
         pick,
         sort: Vec::new(),
@@ -1155,7 +1157,7 @@ mod tests {
     fn the_refinement_carries_sort_and_limit_only_when_set() {
         let f = Fetch {
             peer: "notes".into(),
-            entity: "notes".into(),
+            op: "std.notes.list".into(),
             conds: vec![json!({ "field": "owner", "op": "caller" })],
             pick: vec!["id".into(), "title".into()],
             sort: vec![("created".into(), true), ("id".into(), false)],

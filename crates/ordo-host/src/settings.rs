@@ -1385,12 +1385,6 @@ pub static REGISTRY: &[Setting] = &[
     ),
     s("ORDO_PG_SCHEMA", "Databases and pools", r#"public"#, r#""#),
     s(
-        "ORDO_PEER_<NAME>_SCHEMA",
-        "Databases and pools",
-        r#"none, required per peer"#,
-        r#""#,
-    ),
-    s(
         "ORDO_PEER_<NAME>_URL",
         "Databases and pools",
         r#"none, required per peer block"#,
@@ -1442,18 +1436,6 @@ pub static REGISTRY: &[Setting] = &[
         "ORDO_EXTERNAL_<NAME>_SCHEMA",
         "Databases and pools",
         r#"as written"#,
-        r#""#,
-    ),
-    s(
-        "ORDO_READER_<NAME>_ROLE",
-        "Databases and pools",
-        r#"none, required per reader"#,
-        r#""#,
-    ),
-    s(
-        "ORDO_PEER_SHARED_ROLE",
-        "Databases and pools",
-        r#"off"#,
         r#""#,
     ),
     s("ORDO_PG_PASSWORD", "Databases and pools", r#"none"#, r#""#),

@@ -284,13 +284,12 @@ pub struct Entity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalSource {
     /// The Postgres schema the foreign table lives in, as the file writes
-    /// it. For a table of a peer this is the peer's nickname, and the real
-    /// schema is [`PeerSource::schema`].
+    /// it. For a table of a peer this is the peer's nickname.
     pub schema: String,
-    /// `Some` when `schema` names a `peer` of the program (owner, 2026-11-17,
-    /// `example-apps-notes-v2-plus-note_viewer` asks 2, 5 and 10): the table
-    /// belongs to another Ordo deployment in the same database, and
-    /// `$caller` on it means that deployment's member for the same person.
+    /// `Some` when `schema` names a `peer` of the program: the table
+    /// belongs to another Ordo deployment and is read through its door
+    /// (`plan-federation-grants.md` §4), and `$caller` on it is decided by
+    /// that deployment for the person the call is made for.
     pub peer: Option<PeerSource>,
     /// For a plain external: the schema the deployment owner swapped in with
     /// `ORDO_EXTERNAL_<SCHEMA>_SCHEMA` (owner, 2026-11-17, ask 12). `None`
@@ -305,19 +304,15 @@ pub struct ExternalSource {
     pub columns: Vec<(String, String)>,
 }
 
-/// The peer an external reads from.
+/// The peer an external reads from, through its door.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerSource {
-    /// The nickname of the `peer` line.
+    /// The nickname of the `peer` block.
     pub name: String,
-    /// The peer's Postgres schema, from `ORDO_PEER_<NAME>_SCHEMA`. `None`
-    /// until the deployment resolves it (`ordo_exec::peer`): a compiled
-    /// program is the same in every environment, and the schema is not.
-    pub schema: Option<String>,
-    /// Set when `ORDO_PEER_<NAME>_URL` is: the peer's tables are read
-    /// through its door, never its schema (`plan-federation-grants.md` §4,
-    /// step G5). `schema` then stays `None`.
-    pub door: bool,
+    /// The holder's op the read calls: the op of the `peer` block named
+    /// like the table (`external published from notes.publicNotes` with
+    /// `publicNotes` in the block), else `std.<table>.list`.
+    pub op: String,
 }
 
 /// A `peer` block: the holder's nickname and the holder's ops this
@@ -329,26 +324,22 @@ pub struct PeerUses {
     pub ops: Vec<String>,
 }
 
-/// The schema an unresolved peer reads, which no deployment can create: a
-/// program that skipped resolution fails on a missing relation and never
-/// reads a plain schema that happens to share the nickname.
-pub fn unresolved_peer_schema(peer: &str) -> String {
-    format!("$unresolved peer {peer}")
+/// The schema a peer's table would be read from, which no deployment can
+/// create: a peer is read through its door, never its tables, and a
+/// statement that was not served its rows fails on a missing relation
+/// naming why.
+pub fn peer_door_schema(peer: &str) -> String {
+    format!("$peer {peer} is read through its door")
 }
 
 impl ExternalSource {
     /// The Postgres schema the table is read from: for a plain external the
-    /// written schema, or the one its setting swapped in; for a peer's table
-    /// the resolved schema.
+    /// written schema, or the one its setting swapped in. A peer's table is
+    /// never read from a schema ([`peer_door_schema`]).
     pub fn pg_schema(&self) -> String {
         match &self.peer {
             None => self.swapped.clone().unwrap_or_else(|| self.schema.clone()),
-            Some(PeerSource {
-                schema: Some(s), ..
-            }) => s.clone(),
-            Some(PeerSource {
-                name, schema: None, ..
-            }) => unresolved_peer_schema(name),
+            Some(p) => peer_door_schema(&p.name),
         }
     }
 
@@ -455,20 +446,11 @@ pub struct Schema {
     /// The program's `auth` block, checked by [`auth::check`]. `None`:
     /// the deployment's settings decide sign-in, as before the block.
     pub auth: Option<ordo_syntax::AuthDecl>,
-    /// The nicknames of the program's `peer` lines that an external reads,
-    /// in the order written: the shared-database path, which resolves each
-    /// through `ORDO_PEER_<NAME>_SCHEMA`.
-    pub peers: Vec<String>,
     /// The program's `peer` blocks (`plan-federation-grants.md` §4, step
     /// G4): each holder this deployment calls through its door, and the
     /// holder's ops it calls. Checked against the holder's grant at apply
     /// (`ordo_host::peer_check`).
     pub peer_uses: Vec<PeerUses>,
-    /// The program's `reader` lines (owner, 2026-11-18,
-    /// `example-apps-notes-v2-plus-note_viewer` ask 17): the deployments that
-    /// may read this one, and the tables each may read. Each table is one of
-    /// this program's own entities.
-    pub readers: Vec<Reader>,
     /// The program's `grant` blocks (`plan-federation-grants.md` §3), as
     /// written. Expanded against the program's ops at apply
     /// (`ordo_host::consumer_grants`); the door checks the expansion from
@@ -502,16 +484,6 @@ fn prev_marks(program: &Program) -> Vec<prev::PrevMark> {
         }
     }
     out
-}
-
-/// One `reader <name> reads <table>, …` line.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Reader {
-    /// The local nickname. Its role comes from `ORDO_READER_<NAME>_ROLE`.
-    pub name: String,
-    /// The tables it may read, as written: entity names, which are the
-    /// table names.
-    pub tables: Vec<String>,
 }
 
 impl Schema {
@@ -983,41 +955,25 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
         }
         by_name.insert(decl.name.name.clone(), entities.len());
         let mut lowered = lower_external(decl, keys)?;
-        if program
+        if let Some(peer) = program
             .peers
             .iter()
-            .any(|p| p.name.name == decl.schema.name)
+            .find(|p| p.name.name == decl.schema.name)
         {
             if let Some(src) = lowered.external.as_mut() {
+                let table = &decl.table.name;
+                let op = if peer.uses.iter().any(|u| &u.op == table) {
+                    table.clone()
+                } else {
+                    format!("std.{table}.list")
+                };
                 src.peer = Some(PeerSource {
                     name: decl.schema.name.clone(),
-                    schema: None,
-                    door: false,
+                    op,
                 });
             }
         }
         entities.push(lowered);
-    }
-    // A `peer` line no external reads is refused: it would still ask the
-    // deployment owner for a setting that changes nothing. A `peer` block
-    // is used by its own ops, through the holder's door (step G4).
-    for peer in &program.peers {
-        if peer.uses.is_none()
-            && !program
-                .externals
-                .iter()
-                .any(|x| x.schema.name == peer.name.name)
-        {
-            return Err(SchemaError {
-                code: "peer_unused",
-                message: format!(
-                    "`peer {0}` is read by no external. Write `external <name> from \
-                     {0}.<table> shared {{ … }}`, or remove the line",
-                    peer.name.name
-                ),
-                span: peer.span,
-            });
-        }
     }
     check_external_refs(&entities, &by_name, program)?;
 
@@ -1180,69 +1136,17 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
         secrets: program.secrets.clone(),
         functions: program.functions.clone(),
         auth: program.auth.clone(),
-        peers: program
-            .peers
-            .iter()
-            .filter(|p| {
-                program
-                    .externals
-                    .iter()
-                    .any(|x| x.schema.name == p.name.name)
-            })
-            .map(|p| p.name.name.clone())
-            .collect(),
         peer_uses: program
             .peers
             .iter()
-            .filter_map(|p| {
-                Some(PeerUses {
-                    name: p.name.name.clone(),
-                    ops: p.uses.as_ref()?.iter().map(|u| u.op.clone()).collect(),
-                })
-            })
-            .collect(),
-        readers: program
-            .readers
-            .iter()
-            .map(|r| Reader {
-                name: r.name.name.clone(),
-                tables: r.tables.iter().map(|t| t.name.clone()).collect(),
+            .map(|p| PeerUses {
+                name: p.name.name.clone(),
+                ops: p.uses.iter().map(|u| u.op.clone()).collect(),
             })
             .collect(),
         grants: program.grants.clone(),
         prev: prev_marks(program),
     };
-    // Every table a `reader` line names is one of this program's own
-    // entities: an external is another system's table, and Ordo grants
-    // nothing on it.
-    for r in &program.readers {
-        for t in &r.tables {
-            let own = schema
-                .entities
-                .iter()
-                .any(|e| e.name == t.name && e.external.is_none());
-            if !own {
-                let external = schema.entity(&t.name).is_some();
-                return Err(SchemaError {
-                    code: "reader_unknown_table",
-                    message: if external {
-                        format!(
-                            "`reader {}` names `{}`, an external. A reader reads this \
-                             deployment's own tables; remove `{}` from the line",
-                            r.name.name, t.name, t.name
-                        )
-                    } else {
-                        format!(
-                            "`reader {}` names `{}`, which is not an entity of this program. \
-                             Name an entity declared here, or remove `{}` from the line",
-                            r.name.name, t.name, t.name
-                        )
-                    },
-                    span: t.span,
-                });
-            }
-        }
-    }
     if let Some(a) = &program.auth {
         auth::check(a)?;
     }
@@ -2400,7 +2304,6 @@ pub fn acl_admin_ops(schema: &Schema) -> Program {
         auth: None,
         externals: Vec::new(),
         peers: Vec::new(),
-        readers: Vec::new(),
         grants: Vec::new(),
     }
 }
@@ -2986,7 +2889,6 @@ pub fn std_ops(schema: &Schema) -> Program {
         auth: None,
         externals: Vec::new(),
         peers: Vec::new(),
-        readers: Vec::new(),
         grants: Vec::new(),
     }
 }

@@ -249,10 +249,6 @@ pub struct SignInRemoval {
     pub kept: Vec<String>,
     /// The people whose every live method is a removed one.
     pub people: u64,
-    /// The peers either version reads (`peer <name>` lines). A peer matches
-    /// people by their sign-in, so a removed method ends the match there
-    /// for those who used it (`plan-evolution-federation.md` §5).
-    pub peers: Vec<String>,
 }
 
 impl SignInRemoval {
@@ -273,7 +269,7 @@ impl SignInRemoval {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        let mut steps = vec![
+        vec![
             format!(
                 "ask those {} person(s) to add a method `{}` keeps ({kept}) before it is active",
                 self.people, self.to
@@ -287,40 +283,13 @@ impl SignInRemoval {
                  The approval is recorded on the deployment's stream",
                 self.from, self.to, self.people
             ),
-        ];
-        steps.extend(self.peer_notes());
-        steps
-    }
-
-    /// One note per peer. Whether the removed method is the only one this
-    /// deployment shares with that peer is the peer's `auth` block, which
-    /// this deployment cannot read, so each note says what follows and asks
-    /// the peer's owner to check.
-    pub fn peer_notes(&self) -> Vec<String> {
-        let removed = self
-            .removed
-            .iter()
-            .map(|m| format!("`{m}`"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        self.peers
-            .iter()
-            .map(|peer| {
-                format!(
-                    "this version removes {removed}. Peer `{peer}` matches people by their \
-                     sign-in, so people who used it stop matching there. They read nothing in \
-                     `{peer}`, and nothing leaks. If it is the only method shared with \
-                     `{peer}`, nobody matches until they sign in another way. Tell `{peer}`'s \
-                     owner"
-                )
-            })
-            .collect()
+        ]
     }
 
     pub fn to_json(&self) -> Value {
         json!({
             "removed": self.removed, "kept": self.kept, "people": self.people,
-            "steps": self.steps(), "peers": self.peers, "peerNotes": self.peer_notes(),
+            "steps": self.steps(),
         })
     }
 }
@@ -424,15 +393,6 @@ pub async fn sign_in_removal(
         removed,
         kept,
         people,
-        peers: x
-            .schema
-            .peers
-            .iter()
-            .chain(&y.schema.peers)
-            .cloned()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect(),
     }))
 }
 

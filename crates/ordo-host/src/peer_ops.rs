@@ -27,7 +27,10 @@
 //! - [`GRANT`] answers the calling consumer its expanded grants for the
 //!   serving version, and each granted op's `op`, `kind` and `params`.
 //! - [`RECORD_USE`] keeps what each consumer calls, one row per consumer in
-//!   [`USES_TABLE`].
+//!   [`USES_TABLE`], with the Ordo release the consumer runs, and answers
+//!   the holder's own. Each side keeps the other's release
+//!   ([`HOLDERS_TABLE`] on the consumer), and the release check reads it
+//!   there: the release a neighbour runs comes through its door.
 //! - At the holder's plan and apply, [`breaks`] names each consumer a
 //!   change would break ("note_viewer calls archiveEntry"). A warning: the
 //!   holder's own apply goes on (owner question, G4 report).
@@ -79,6 +82,22 @@ const DDL: &str = r#"CREATE TABLE IF NOT EXISTS "$peeruses" (
   "recorded_at" bigint NOT NULL
 )"#;
 
+/// The consumer's Ordo release, added after the table.
+const RELEASE_COLUMN: &str =
+    r#"ALTER TABLE "$peeruses" ADD COLUMN IF NOT EXISTS "release" text"#;
+
+/// On the consumer: what each holder answered at the last apply that
+/// recorded a use there, one row per `peer` block.
+pub const HOLDERS_TABLE: &str = "$peerholders";
+
+const HOLDERS_DDL: &str = r#"CREATE TABLE IF NOT EXISTS "$peerholders" (
+  "peer"        text   PRIMARY KEY,
+  "handle"      text   NOT NULL,
+  "version"     text   NOT NULL,
+  "release"     text   NOT NULL,
+  "recorded_at" bigint NOT NULL
+)"#;
+
 /// The apply's refusal class for a `peer` block the holder does not back.
 pub const NOT_GRANTED: &str = "peer_op_not_granted";
 /// The apply's refusal class for a holder that could not be asked.
@@ -117,14 +136,22 @@ pub fn specs() -> Vec<OpSpec> {
             GRANT,
             OpKind::Read,
             vec![],
-            &["consumer", "version", "grants", "ops"],
+            &["consumer", "version", "release", "grants", "ops"],
         ),
         spec(
             RECORD_USE,
             OpKind::Write,
-            // `ops` is a JSON array of op names.
-            vec![text("version", 128), text("ops", 128 * 1024)],
-            &["consumer", "version", "ops"],
+            // `ops` is a JSON array of op names; `release` the consumer's
+            // Ordo release.
+            vec![
+                text("version", 128),
+                text("ops", 128 * 1024),
+                ParamSpec {
+                    required: false,
+                    ..text("release", 64)
+                },
+            ],
+            &["consumer", "version", "ops", "release", "holderVersion"],
         ),
         spec(
             REGISTER_KEY,
@@ -147,27 +174,28 @@ pub struct RecordedUse {
     /// Its version that calls these ops.
     pub version: String,
     pub ops: Vec<String>,
+    /// The Ordo release it ran when it recorded them. `None` for a row from
+    /// a release before it was sent.
+    pub release: Option<String>,
     pub recorded_at: u64,
 }
 
 /// Keep `ops` as what `consumer` calls, replacing what it recorded before.
-pub async fn record(
-    pool: &Pool,
-    consumer: &str,
-    version: &str,
-    ops: &[String],
-    at: u64,
-) -> Result<(), PoolError> {
+pub async fn record(pool: &Pool, used: &RecordedUse) -> Result<(), PoolError> {
     pool.rows(DDL).await?;
-    let text = serde_json::to_string(ops).unwrap_or_else(|_| "[]".into());
+    pool.rows(RELEASE_COLUMN).await?;
+    let text = serde_json::to_string(&used.ops).unwrap_or_else(|_| "[]".into());
     pool.rows(&format!(
-        r#"INSERT INTO "$peeruses" ("consumer", "version", "ops", "recorded_at")
-           VALUES ({c}, {v}, {o}, {at})
+        r#"INSERT INTO "$peeruses" ("consumer", "version", "ops", "release", "recorded_at")
+           VALUES ({c}, {v}, {o}, {r}, {at})
            ON CONFLICT ("consumer") DO UPDATE SET "version" = EXCLUDED."version",
-             "ops" = EXCLUDED."ops", "recorded_at" = EXCLUDED."recorded_at""#,
-        c = sql_lit(consumer),
-        v = sql_lit(version),
+             "ops" = EXCLUDED."ops", "release" = EXCLUDED."release",
+             "recorded_at" = EXCLUDED."recorded_at""#,
+        c = sql_lit(&used.consumer),
+        v = sql_lit(&used.version),
         o = sql_lit(&text),
+        r = used.release.as_deref().map(sql_lit).unwrap_or_else(|| "NULL".into()),
+        at = used.recorded_at,
     ))
     .await
     .map(|_| ())
@@ -175,12 +203,17 @@ pub async fn record(
 
 /// Every consumer's recorded use, by consumer. None before the first.
 pub async fn recorded(pool: &Pool) -> Result<Vec<RecordedUse>, PoolError> {
-    let rows = match pool
-        .rows(r#"SELECT "consumer", "version", "ops", "recorded_at"::text FROM "$peeruses" ORDER BY "consumer""#)
-        .await
-    {
+    let read = |release: &str| {
+        format!(
+            r#"SELECT "consumer", "version", "ops", "recorded_at"::text, {release}
+               FROM "$peeruses" ORDER BY "consumer""#
+        )
+    };
+    let rows = match pool.rows(&read(r#""release""#)).await {
         Ok(rows) => rows,
         Err(e) if e.is_missing_table() => return Ok(Vec::new()),
+        // A table from before the release column.
+        Err(e) if e.is_missing_column() => pool.rows(&read("NULL::text")).await?,
         Err(e) => return Err(e),
     };
     Ok(rows
@@ -191,11 +224,75 @@ pub async fn recorded(pool: &Pool) -> Result<Vec<RecordedUse>, PoolError> {
             let version = it.next()??;
             let ops: Vec<String> = serde_json::from_str(&it.next()??).ok()?;
             let recorded_at = it.next()??.parse().ok()?;
+            let release = it.next().flatten();
             Some(RecordedUse {
                 consumer,
                 version,
                 ops,
+                release,
                 recorded_at,
+            })
+        })
+        .collect())
+}
+
+/// What one holder answered at the consumer's last apply that recorded a
+/// use there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HolderSeen {
+    /// The `peer` block's nickname.
+    pub peer: String,
+    /// The holder's handle at the identity service.
+    pub handle: String,
+    /// The version the holder served.
+    pub version: String,
+    /// The Ordo release the holder ran.
+    pub release: String,
+    pub recorded_at: u64,
+}
+
+/// Keep what `seen` says, on the consumer, replacing the peer's last row.
+pub async fn record_holder(pool: &Pool, seen: &HolderSeen) -> Result<(), PoolError> {
+    pool.rows(HOLDERS_DDL).await?;
+    pool.rows(&format!(
+        r#"INSERT INTO "$peerholders" ("peer", "handle", "version", "release", "recorded_at")
+           VALUES ({p}, {h}, {v}, {r}, {at})
+           ON CONFLICT ("peer") DO UPDATE SET "handle" = EXCLUDED."handle",
+             "version" = EXCLUDED."version", "release" = EXCLUDED."release",
+             "recorded_at" = EXCLUDED."recorded_at""#,
+        p = sql_lit(&seen.peer),
+        h = sql_lit(&seen.handle),
+        v = sql_lit(&seen.version),
+        r = sql_lit(&seen.release),
+        at = seen.recorded_at,
+    ))
+    .await
+    .map(|_| ())
+}
+
+/// Every holder this consumer recorded, by peer. None before the first.
+pub async fn holders(pool: &Pool) -> Result<Vec<HolderSeen>, PoolError> {
+    let rows = match pool
+        .rows(
+            r#"SELECT "peer", "handle", "version", "release", "recorded_at"::text
+               FROM "$peerholders" ORDER BY "peer""#,
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) if e.is_missing_table() => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            let mut it = r.into_iter();
+            Some(HolderSeen {
+                peer: it.next()??,
+                handle: it.next()??,
+                version: it.next()??,
+                release: it.next()??,
+                recorded_at: it.next()??.parse().ok()?,
             })
         })
         .collect())
@@ -276,6 +373,9 @@ pub struct UsesCheck {
     pub refusals: Vec<String>,
     /// What the plan shows: each holder's ops and how each is granted.
     pub notes: Vec<String>,
+    /// What each holder answered when the use was recorded there; the
+    /// apply keeps it ([`record_holder`]).
+    pub holders: Vec<HolderSeen>,
 }
 
 /// Check each `peer` block of a program against its holder, and record the
@@ -355,11 +455,15 @@ pub async fn check_uses(
     if record && out.refusals.is_empty() {
         for u in uses {
             match client.record_use(&u.name, version, &u.ops).await {
-                Ok(()) => out.notes.push(format!(
-                    "peer        {}: told it this version calls {}",
-                    u.name,
-                    u.ops.join(", ")
-                )),
+                Ok(seen) => {
+                    out.notes.push(format!(
+                        "peer        {}: told it this version calls {}; it runs Ordo {}",
+                        u.name,
+                        u.ops.join(", "),
+                        seen.release
+                    ));
+                    out.holders.push(seen);
+                }
                 Err(e) => out.refusals.push(format!(
                     "{UNREACHABLE} in `peer {}`: the use could not be recorded there, so it \
                      could not warn before a change breaks this deployment. {e}",
@@ -464,6 +568,7 @@ impl PeerOps {
         Ok(json!({
             "consumer": consumer,
             "version": version,
+            "release": crate::release_check::release(),
             "grants": grants.iter().map(|g| json!({
                 "name": g.name,
                 "provider": g.provider,
@@ -502,10 +607,25 @@ impl PeerOps {
                 "`ops` holds at most 1000 op names, each at most 128 characters with no space",
             ));
         }
-        record(&self.pool, consumer, &version, &ops, (self.now)())
+        let release = Some(text("release")).filter(|r| !r.is_empty());
+        let used = RecordedUse {
+            consumer: consumer.to_string(),
+            version: version.clone(),
+            ops: ops.clone(),
+            release: release.clone(),
+            recorded_at: (self.now)(),
+        };
+        record(&self.pool, &used)
             .await
             .map_err(|e| ExecError::new(ErrorCode::ServerBusy, e.to_string()))?;
-        Ok(json!({ "consumer": consumer, "version": version, "ops": ops }))
+        let serving = crate::schema_apply::deployed_artifact(&self.pool)
+            .await
+            .map(|a| a.version)
+            .unwrap_or_default();
+        Ok(json!({
+            "consumer": consumer, "version": version, "ops": ops,
+            "release": crate::release_check::release(), "holderVersion": serving,
+        }))
     }
 
     async fn register_key(&self, bound: &BoundParams) -> Result<Value, ExecError> {
@@ -552,6 +672,7 @@ mod tests {
             consumer: "viewer".into(),
             version: "1.0.0".into(),
             ops: vec!["std.notes.list".into(), "archiveNote".into()],
+            release: None,
             recorded_at: 0,
         }];
         let serving = [grant(

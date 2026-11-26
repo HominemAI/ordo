@@ -187,7 +187,7 @@ impl PeerFetch for DoorReads {
             .token(&holder.handle, acting, chain)
             .await
             .map_err(fail)?;
-        let op = format!("std.{}.list", f.entity);
+        let op = f.op.clone();
         let max = self.number(MAX_ROWS_ENV, DEFAULT_MAX_ROWS);
         let mut params = json!({ "$refine": f.refine().to_string() });
         let mut rows: Vec<Map<String, Value>> = Vec::new();

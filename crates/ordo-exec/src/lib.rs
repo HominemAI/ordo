@@ -70,7 +70,6 @@ pub mod route;
 pub mod sealed;
 pub mod secevent;
 pub mod shape;
-pub mod sign_in_contract;
 pub mod spacedb;
 pub mod triggers;
 pub mod undo;
@@ -154,8 +153,8 @@ pub fn schema_from_env() -> String {
 
 /// A setting that names a Postgres schema, as this process was given it:
 /// trimmed, and `None` when unset or blank. The one reader of every schema
-/// setting: the deployment's own ([`SCHEMA_ENV`]) and each peer's
-/// ([`peer::schema_env`]). A later kind of schema setting reads here too.
+/// setting: the deployment's own ([`SCHEMA_ENV`]), each peer's door,
+/// and each plain external's swap ([`peer::external_schema_env`]).
 pub fn schema_setting(var: &str) -> Option<String> {
     match std::env::var(var) {
         Ok(v) if !v.trim().is_empty() => Some(v.trim().to_string()),

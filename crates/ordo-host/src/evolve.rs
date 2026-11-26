@@ -1223,9 +1223,13 @@ async fn reverse_errors(
         .collect())
 }
 
-/// A seal (increment 13) of a field a reader app reads. A reader holds a
-/// grant on the whole table, so it would read ciphertext where it read
-/// text. Refused until the reader can read the sealed field (7b).
+/// A seal (increment 13) of a field a reader app reads through the shared
+/// database. A reader holds a grant on the whole table, so it would read
+/// ciphertext where it read text, and it is never handed a seal key (owner,
+/// 2026-11-25). Refused while a `reader` line names the table. A consumer
+/// reading through this deployment's door under a `grant` is not: the
+/// door opens the field in its own answers, under its own rules, and no
+/// key leaves it (`plan-federation-grants.md` §6, step G7).
 fn sealed_under_readers(
     x: &Program,
     y: &Program,
@@ -1246,10 +1250,11 @@ fn sealed_under_readers(
                         r.name, bf.entity, bf.field
                     ),
                     fix: format!(
-                        "move `{}` to a version that reads the sealed `{}.{}` \
-                         (plan-evolution-federation.md, increment 7b, not built yet), or take \
-                         `{}` off the `reader {}` line in a version before this one, then seal",
-                        r.name, bf.entity, bf.field, bf.entity, r.name
+                        "move `{}` to this deployment's door, which opens `{}.{}` in its own \
+                         answers: a `grant` here opening `std.{}.list` to it, and \
+                         ORDO_PEER_<NAME>_URL there. Then take `{}` off the `reader {}` line in \
+                         a version before this one, and seal",
+                        r.name, bf.entity, bf.field, bf.entity, bf.entity, r.name
                     ),
                 });
             }

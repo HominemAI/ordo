@@ -391,6 +391,13 @@ pub fn check(
         };
         let e = &x.grant;
         seen.insert(e.key());
+        // A provider grant is labelled as such: `grant ids` and `grant
+        // provider ids` are 2 grants.
+        let label = if e.provider {
+            format!("provider {}", e.name)
+        } else {
+            e.name.clone()
+        };
         let who = if e.provider {
             "every deployment registered at this identity service, on behalf of a person"
         } else if e.as_itself {
@@ -399,13 +406,12 @@ pub fn check(
             "on behalf of a person"
         };
         r.notes.push(format!(
-            "grant       {}: {} op(s), {who}: {}",
-            e.name,
+            "grant       {label}: {} op(s), {who}: {}",
             e.ops.len(),
             e.ops.join(", ")
         ));
         match before.get(&e.key()) {
-            None => r.notes.push(format!("grant       {}: new", e.name)),
+            None => r.notes.push(format!("grant       {label}: new")),
             Some(b) => {
                 let old: BTreeSet<&String> = b.ops.iter().collect();
                 let new: BTreeSet<&String> = e.ops.iter().collect();
@@ -417,15 +423,14 @@ pub fn check(
                         format!("matches {line}")
                     };
                     r.notes
-                        .push(format!("grant       {} gains {op}, {how}", e.name));
+                        .push(format!("grant       {label} gains {op}, {how}"));
                 }
                 for op in old.difference(&new) {
-                    r.notes.push(format!("grant       {} loses {op}", e.name));
+                    r.notes.push(format!("grant       {label} loses {op}"));
                 }
                 if b.as_itself != e.as_itself {
                     r.notes.push(format!(
-                        "grant       {}: {}",
-                        e.name,
+                        "grant       {label}: {}",
                         if e.as_itself {
                             "now allows calls as itself"
                         } else {
@@ -449,6 +454,16 @@ pub fn check(
                     e.name
                 )),
             }
+        } else if let Some(issuer) = var(&format!("{}ISSUER", crate::federation::prefix(&e.name)))
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        {
+            // Who it reaches: any deployment that service vouches for, and
+            // only with a person (step G6).
+            r.notes.push(format!(
+                "grant       {label}: any deployment registered at {issuer}, on behalf of a \
+                 person; a call as itself needs a grant of its own"
+            ));
         }
         r.expanded.push(x.grant);
     }

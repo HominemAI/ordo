@@ -261,7 +261,7 @@ the deployment owner sets `ORDO_READER_NOTE_VIEWER_ROLE`. `synth` refuses a
 table that is not an entity of the file (`reader_unknown_table`) and a reader
 passed twice (`reader_line`).
 
-**Covered: grants** (built at G1, not enforced on the door until G3).
+**Covered: grants** (built at G1, checked on the door since G3).
 `grant('note_viewer', ['std.notes.get', '/add.*/', '!addAdmin'])` prints a
 `grant note_viewer { … }` block, one line each. `{ asItself: true }` adds
 `as itself`, and `grantProvider('hominem', [...])` prints

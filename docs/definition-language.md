@@ -2536,6 +2536,9 @@ decides. `ORDO_PEER_<NAME>_SCHEMA` is then not read.
 - Nothing the holder answered outlives the read.
 - **Consistency.** There is no transaction across deployments. 2 reads of
   the holder in one op are 2 calls, not one snapshot.
+- A tenant kept in a database of its own reaches the peer as the
+  deployment's own space does. Its people's sign-in links are read from
+  the deployment's database.
 - A holder that does not answer in `ORDO_PEER_TIMEOUT_SECS` (10 seconds)
   refuses the op `peer_unavailable`. A read the holder refuses is
   `peer_refused`, with its words. A read that would take more than
@@ -2637,8 +2640,10 @@ again only when that list changes.
 **Known gap.** A peer row matches the person's member in any of the peer's
 spaces. The reader's own space plays no part.
 
-The peer is in the same database. A deployment that keeps a tenant in a
-database of its own does not reach a peer from there.
+The peer is in the same database. A tenant kept in a database of its own
+does not reach a peer this way: its op is refused `peer_refused`, line
+`peer_tenant_database`, naming the peer and `ORDO_PEER_<NAME>_URL`. Read
+the peer through its door to reach it from every database.
 
 ### `reader`: who may read this deployment's tables [ruled 2026-11-18, built]
 
@@ -2711,11 +2716,11 @@ its own role:
   unless `ORDO_PEER_SHARED_ROLE=on`. `ordo dev` turns that on, since it runs
   every app as one role.
 
-### `grant`: what another deployment may call through this one's door [ruled 2026-11-26, built at G1, not enforced until G3]
+### `grant`: what another deployment may call through this one's door [ruled 2026-11-26, built G1 to G7]
 
 `plan-federation-grants.md` §3. A grant replaces `reader` once the door
-path works (step G8). Until step G3 the door does not check it: the apply
-expands it, stores it and shows it, and nothing more.
+path works (step G8). The apply expands it, stores it and shows it; the
+door checks every call from another deployment against it (step G3).
 
 ```
 grant note_viewer {
@@ -2743,7 +2748,11 @@ grant provider hominem {
   it, calls carrying no person are allowed too.
 - `grant provider <name>` covers every deployment registered at that
   identity service, on behalf of a person only. `as itself` is refused on
-  it (`grant_block`).
+  it (`grant_block`). It needs no `ORDO_CONSUMER_<NAME>_CLIENT`: a
+  deployment no grant names reads it at its apply (`std.peer.grant`) and
+  calls under it for a person. Its call as itself is refused, naming
+  `ORDO_CONSUMER_<NAME>_CLIENT=<its id>`. The plan shows it as
+  `grant provider <name>` and names the service's issuer.
 - The block holds op lines only, one per line. A line is an exact op name,
   a `/regex/` that must match the whole name (Rust `regex`, linear time;
   `\/` is a slash), or `*` for every op.
@@ -2760,6 +2769,14 @@ list and every change to it against the serving version:
 `grant note_viewer gains addReaction, matches /add.*/`. A later op that a
 pattern matches is granted and shown this way. The lines as written are in
 the version's artifact, so a changed grant is a new version.
+
+**Sealed fields.** The door opens a sealed field in its own answers, under
+this deployment's rules, and no key leaves it. A derived `std.<entity>.get`
+or `.list` carries sealed fields only when the entity says `std sealed`
+(§3), so a consumer reads them through a grant only then. Without it the
+consumer's read is refused naming the field. A seal of a field a grant
+opens is not refused; one a `reader` line reads still is
+(`seal_read_by_reader`, until G8).
 
 **The consumer's id** is never in the file. The deployment owner sets
 `ORDO_CONSUMER_NOTE_VIEWER_CLIENT`, the name upper-cased, to the consumer's

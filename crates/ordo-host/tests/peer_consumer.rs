@@ -350,6 +350,19 @@ impl Ids {
         v["id_token"].as_str().unwrap().to_string()
     }
 
+    /// The person signed in at `cookie` joins `deployment`.
+    async fn join(&self, cookie: &str, deployment: &str) {
+        let (s, _, v, _) = self
+            .browser(
+                "POST",
+                "/sign-up/join",
+                Some(cookie),
+                Some(json!({ "deployment": deployment })),
+            )
+            .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+    }
+
     /// A token for an admin of `deployment`, touched a moment ago: what
     /// the deployment's own admin holds.
     async fn admin_token(&self, deployment: &str) -> String {
@@ -405,7 +418,12 @@ impl Holder {
     /// `notes`'s door on a loopback socket, over its own database, with
     /// `ada` (the service's person id) a member of its own space.
     async fn start(name: &str, ids: &Ids, ada: &str) -> Holder {
-        let source = format!("{FIXTURE}\n{HOLDER}");
+        Holder::start_with(name, ids, ada, HOLDER).await
+    }
+
+    /// [`Holder::start`], with `holder` as its program after the fixture.
+    async fn start_with(name: &str, ids: &Ids, ada: &str, holder: &str) -> Holder {
+        let source = format!("{FIXTURE}\n{holder}");
         let f = Arc::new(Fixture::from_source(&source, SEED).expect("the holder compiles"));
         let pg = Pg::scoped(&format!("ordo_peerc_holder_{name}"));
         f.reset(&pg).expect("seeded");
@@ -889,5 +907,144 @@ async fn a_call_through_the_client_runs_as_itself_and_on_behalf_of_a_person() {
         e.to_string()
             .contains("already passed through `notes` (chain notes → viewer → notes)"),
         "{e}"
+    );
+}
+
+/// `grant provider ids` (step G6): every deployment the identity service
+/// vouches for, on behalf of a person, and never as itself.
+fn holder_with_provider() -> String {
+    format!("{HOLDER}\ngrant provider ids {{\n  std.journal.list\n}}\n")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_grant_covers_an_unnamed_consumer_for_a_person_and_never_as_itself() {
+    let ids = Ids::start("provider").await;
+    let (cookie, ada) = ids.sign_up("viewer", "Ada", 82).await;
+    ids.join(&cookie, "stranger").await;
+    let source = holder_with_provider();
+    let holder = Holder::start_with("provider", &ids, &ada, &source).await;
+    // `stranger` is registered at the service and named in no grant.
+    let stranger = Consumer::start("provider", "stranger", &ids, &holder).await;
+
+    // Its apply reads the provider grant: an op outside it is refused by
+    // name, and nothing is stored.
+    let e = stranger
+        .apply(&consumer_source("1.0.0", &["std.journal.list", "addEntry"]))
+        .await
+        .expect_err("addEntry is `note_viewer`'s");
+    assert!(
+        e.contains("peer_op_not_granted in `peer notes`: `addEntry` is not granted"),
+        "{e}"
+    );
+    assert!(e.contains("(`stranger`)"), "{e}");
+    assert!(stranger.stored().await.is_empty());
+
+    // What it grants passes, shown as the provider grant, and the holder
+    // records the use.
+    let report = stranger
+        .apply(&consumer_source("1.0.0", &["std.journal.list"]))
+        .await
+        .expect("granted by the provider grant");
+    let notes = report["notes"].to_string();
+    assert!(
+        notes.contains("std.journal.list (read, grant provider ids (on behalf of a person))"),
+        "{notes}"
+    );
+    assert_eq!(stranger.stored().await, ["1.0.0"]);
+    let uses = peer_ops::recorded(&holder.pool).await.unwrap();
+    assert_eq!(uses.len(), 1, "{uses:?}");
+    assert_eq!(uses[0].consumer, "stranger");
+
+    // On behalf of Ada: the read runs under the holder's own rules for her.
+    let c = &stranger.client;
+    let id_token = ids.id_token("stranger", &cookie).await;
+    let got = c
+        .call(
+            "notes",
+            "std.journal.list",
+            Method::Read,
+            &json!({}),
+            Acting::OnBehalf {
+                id_token: &id_token,
+            },
+            &[],
+        )
+        .await
+        .expect("read on behalf of Ada");
+    assert_eq!(got["rows"][0]["title"], "first", "{got}");
+
+    // As itself: refused, naming the setting that would tie a grant.
+    let e = c
+        .call(
+            "notes",
+            "std.journal.list",
+            Method::Read,
+            &json!({}),
+            Acting::AsItself,
+            &[],
+        )
+        .await
+        .expect_err("a provider grant is never as itself");
+    let PeerClientError::HolderRefused {
+        status, message, ..
+    } = &e
+    else {
+        panic!("{e}")
+    };
+    assert_eq!(*status, 403, "{e}");
+    assert!(
+        message.contains("`stranger` is not a consumer of this deployment"),
+        "{message}"
+    );
+    assert!(
+        message.contains("a `grant provider` covers calls on behalf of a person only"),
+        "{message}"
+    );
+    assert!(
+        message.contains("ORDO_CONSUMER_<NAME>_CLIENT=stranger"),
+        "{message}"
+    );
+
+    // The holder's plan shows the provider grant and whom it reaches; one
+    // that drops it names the consumer it breaks, and warns.
+    let vars = holder_vars(&ids);
+    let program = Program::compile(&format!("{FIXTURE}\n{source}")).expect("compiles");
+    let plan = cg::plan_with(&holder.pool, &program.schema, &program.doc, &|k| {
+        vars.get(k).cloned()
+    })
+    .await
+    .expect("planned");
+    assert!(plan.refusals.is_empty(), "{:?}", plan.refusals);
+    assert!(
+        plan.notes.iter().any(
+            |n| n.starts_with("grant       provider ids: 1 op(s), every deployment registered")
+        ),
+        "{:#?}",
+        plan.notes
+    );
+    assert!(
+        plan.notes
+            .iter()
+            .any(|n| n.contains("provider ids: any deployment registered at")
+                && n.contains("a call as itself needs a grant of its own")),
+        "{:#?}",
+        plan.notes
+    );
+    let next = Program::compile(&format!("{FIXTURE}\n{HOLDER}")).expect("compiles");
+    let plan = cg::plan_with(&holder.pool, &next.schema, &next.doc, &|k| {
+        vars.get(k).cloned()
+    })
+    .await
+    .expect("planned");
+    let warned: Vec<&String> = plan
+        .notes
+        .iter()
+        .filter(|n| n.starts_with("warning     breaks"))
+        .collect();
+    assert_eq!(warned.len(), 1, "{:?}", plan.notes);
+    assert!(
+        warned[0].contains("breaks stranger: stranger calls std.journal.list"),
+        "{}",
+        warned[0]
     );
 }

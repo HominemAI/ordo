@@ -55,11 +55,27 @@ pub const DEFAULT_BATCH_KEYS: usize = 200;
 pub struct DoorReads {
     client: Arc<PeerClient>,
     var: Settings,
+    /// The deployment's own database, where the sign-in links
+    /// (`$authenticator`) are. A tenant kept in a database of its own has
+    /// its members there and its people's links here (step G7).
+    directory: Option<Pool>,
 }
 
 impl DoorReads {
     pub fn new(client: Arc<PeerClient>, var: Settings) -> DoorReads {
-        DoorReads { client, var }
+        DoorReads {
+            client,
+            var,
+            directory: None,
+        }
+    }
+
+    /// Read sign-in links from `pool`, the deployment's own database,
+    /// whatever database the read's tenant is in. Without it they are read
+    /// from the tenant's database.
+    pub fn with_directory(mut self, pool: Pool) -> DoorReads {
+        self.directory = Some(pool);
+        self
     }
 
     fn number(&self, var: &str, default: usize) -> usize {
@@ -79,27 +95,44 @@ impl DoorReads {
             ))
         })?;
         let prefix = format!("oidc:{}:", settings.connection);
-        let rows = pool
+        let busy = |e: ordo_exec::PoolError| PeerReadFail {
+            code: if e.is_busy() {
+                "server_busy"
+            } else {
+                PeerReadFail::UNAVAILABLE
+            },
+            message: format!("reading who the caller is at the identity service: {e}"),
+        };
+        // The member, in the tenant's database; their links, in the
+        // deployment's own. 2 reads, since the 2 may be 2 databases.
+        let principal = pool
             .rows(&format!(
-                "SELECT a.\"authenticator\" FROM \"members\" AS m \
-                 JOIN \"$authenticator\" AS a ON a.\"principal\" = m.\"principal\" \
-                 AND a.\"retired_case\" = '' \
-                 WHERE m.\"id\" = {} AND m.\"kind\" = 'principal' \
-                 AND left(a.\"authenticator\", {}) = {} \
-                 ORDER BY a.\"authenticator\" LIMIT 2",
+                "SELECT \"principal\" FROM \"members\" WHERE \"id\" = {} \
+                 AND \"kind\" = 'principal'",
                 ordo_exec::sql_lit(member),
-                prefix.chars().count(),
-                ordo_exec::sql_lit(&prefix),
             ))
             .await
-            .map_err(|e| PeerReadFail {
-                code: if e.is_busy() {
-                    "server_busy"
-                } else {
-                    PeerReadFail::UNAVAILABLE
-                },
-                message: format!("reading who the caller is at the identity service: {e}"),
-            })?;
+            .map_err(busy)?
+            .into_iter()
+            .find_map(|r| r.into_iter().next().flatten());
+        let rows = match &principal {
+            None => Vec::new(),
+            Some(p) => self
+                .directory
+                .as_ref()
+                .unwrap_or(pool)
+                .rows(&format!(
+                    "SELECT \"authenticator\" FROM \"$authenticator\" \
+                     WHERE \"principal\" = {} AND \"retired_case\" = '' \
+                     AND left(\"authenticator\", {}) = {} \
+                     ORDER BY \"authenticator\" LIMIT 2",
+                    ordo_exec::sql_lit(p),
+                    prefix.chars().count(),
+                    ordo_exec::sql_lit(&prefix),
+                ))
+                .await
+                .map_err(busy)?,
+        };
         let subs: Vec<String> = rows
             .into_iter()
             .filter_map(|r| r.into_iter().next().flatten())

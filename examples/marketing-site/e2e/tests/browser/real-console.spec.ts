@@ -1,10 +1,10 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { test, expect } from '@playwright/test';
-import { state } from '../support.js';
+import { state, owner, rows } from '../support.js';
 
 // Real console -> real host -> actual tenant database. No e2e_door fixture.
-test('the real console sets up, links, rotates its key and manages a disposable tenant', async ({ page, context }) => {
+test('the real console sets up, links, rotates its key and manages a disposable tenant', async ({ page, context, request }) => {
   const consoleState = JSON.parse(readFileSync(`${state}/console.json`, 'utf8'));
   const cdp = await context.newCDPSession(page);
   await cdp.send('WebAuthn.enable');
@@ -24,7 +24,7 @@ test('the real console sets up, links, rotates its key and manages a disposable 
     }
   }
   async function open(name: string) {
-    const group = name === 'Health' ? 'System' : 'Deployment';
+    const group = ['Health', 'Runtime'].includes(name) ? 'System' : 'Deployment';
     await page.getByRole('navigation', { name: 'Console', exact: true }).getByRole('link', { name: group, exact: true }).click();
     await page.getByRole('navigation', { name: `${group} pages` }).getByRole('link', { name, exact: true }).click();
   }
@@ -71,6 +71,20 @@ test('the real console sets up, links, rotates its key and manages a disposable 
     await del.getByLabel(/Type the tenant's id/).fill(tenant);
     await del.getByRole('button', { name: 'Delete for good' }).click();
     await expect(page.getByRole('status')).toContainText(`Deleted ${name}.`);
+    // Restart an actual supervised host and verify acknowledged data survives.
+    const appHeaders = await owner(request);
+    const campaign = (await rows(await request.post(`${consoleState.runtimeDoor}/op/createCampaign`, {
+      headers: appHeaders, data: { title: 'Survives runtime restart', brief: 'Persisted before restart', tags: [], budget: '5.00', due: null,
+        created: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z') },
+    })))[0].created;
+    await open('Runtime');
+    await page.getByRole('button', { name: 'Restart', exact: true }).click();
+    await page.getByRole('button', { name: 'Yes, restart' }).click();
+    await expect(page.getByRole('status')).toContainText('Restarted.', { timeout: 150_000 });
+    expect((await rows(await request.get(`${consoleState.runtimeDoor}/op/oneCampaign`, {
+      headers: appHeaders, params: { id: campaign },
+    })))[0]).toMatchObject({ title: 'Survives runtime restart', brief: 'Persisted before restart' });
+    await rows(await request.delete(`${consoleState.runtimeDoor}/op/deleteCampaign`, { headers: appHeaders, params: { id: campaign } }));
     await open('Usage');
     await expect(page.getByRole('heading', { name: 'Usage', exact: true })).toBeVisible();
     await expect(page.getByRole('region', { name: 'Quotas' })).toBeVisible();

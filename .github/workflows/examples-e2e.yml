@@ -164,11 +164,12 @@ jobs:
             echo "ORDO=$bindir/ordo"
             echo "ORDO_HOST_BIN=$bindir/ordo-host"
             echo "ORDO_CONSOLE_BIN=$bindir/ordo-console"
+            echo "ORDO_SUPERVISOR_BIN=$bindir/ordo-supervisor"
           } >> "$GITHUB_ENV"
 
       - name: Build ordo-host and ordo
         if: env.REACHED == 'true'
-        run: cargo build -p ordo-host -p ordo-cli -p ordo-console
+        run: cargo build -p ordo-host -p ordo-cli -p ordo-console -p ordo-supervisor
 
       - name: Install the page and the tests
         if: env.REACHED == 'true'

@@ -79,6 +79,7 @@ const fs = require('node:fs');
 const [door, doorB, page, ordo, psql, program, state] = process.argv.slice(2);
 const pg = Object.fromEntries(['host', 'port', 'user', 'db'].map(key => [key, process.env[`ORDO_PG_${key.toUpperCase()}`]]));
 fs.writeFileSync(`${state}/stack.json`, JSON.stringify({ door, doorB, page, ordo, psql, program, pg }));
+fs.writeFileSync(`${state}/host-env.json`, JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith('ORDO_')))), { mode: 0o600 });
 JS
 (cd "$web" && exec node node_modules/vite/bin/vite.js preview --outDir "$state/web" --host localhost --port "$page_port" --strictPort) >"$state/page.log" 2>&1 &
 last=$!

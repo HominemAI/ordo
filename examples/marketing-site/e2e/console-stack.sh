@@ -12,6 +12,7 @@ mkdir -p "$state/console-data"
 node - "$state" "$port" <<'JS'
 const fs = require('node:fs');
 const [state, port] = process.argv.slice(2);
+const runtimePort = process.env.E2E_RUNTIME_PORT || "5393";
 const s = JSON.parse(fs.readFileSync(`${state}/stack.json`, 'utf8'));
 const pg = s.pg;
 const db = `${pg.db}_console`;
@@ -22,7 +23,7 @@ url.hostname = pg.host.startsWith('/') ? 'localhost' : pg.host;
 url.port = pg.port;
 url.pathname = `/${db}`;
 if (pg.host.startsWith('/')) url.searchParams.set('host', pg.host);
-fs.writeFileSync(`${state}/console.json`, JSON.stringify({ url: `http://localhost:${port}`, data: `${state}/console-data`, databaseUrl: url.toString(), db, psql: s.psql, pg, door: s.door }), {mode: 0o600});
+fs.writeFileSync(`${state}/console.json`, JSON.stringify({ url: `http://localhost:${port}`, data: `${state}/console-data`, databaseUrl: url.toString(), runtimeDoor: `http://localhost:${runtimePort}`, db, psql: s.psql, pg, door: s.door }), {mode: 0o600});
 JS
 # Read specific fields; never echo the connection secret.
 value() { node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))[process.argv[2]]))' "$state/console.json" "$1"; }
@@ -34,6 +35,10 @@ console_db=$(value db)
 [[ "$console_db" =~ ^[a-z][a-z0-9_]*$ ]] || exit 1
 PGPASSWORD=${ORDO_PG_PASSWORD:-} "$psql" -h "$pg_host" -p "$pg_port" -U "$pg_user" -d postgres -qc "create database \"$console_db\""
 (cd "$repo/clients/ordo-console-web" && npm run build -- --outDir "$state/console-page") >"$state/console-build.log" 2>&1
+# Restore exactly the fixture host settings, without printing secrets.
+while IFS= read -r -d '' assignment; do export "$assignment"; done < <(
+  node -e 'for (const [k,v] of Object.entries(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")))) process.stdout.write(`${k}=${v}\0`)' "$state/host-env.json"
+)
 export ORDO_CONSOLE_DATABASE_URL="$(value databaseUrl)"
 export ORDO_CONSOLE_ORIGIN="$(value url)"
 export ORDO_CONSOLE_LISTEN="127.0.0.1:$port"
@@ -43,4 +48,15 @@ export ORDO_CONSOLE_DEPLOYMENT=main
 export ORDO_CONSOLE_DOOR_URL="$(value door)"
 export ORDO_CONSOLE_DOOR_SPACE=system
 unset ORDO_CONSOLE_SUPERVISOR_SOCKET ORDO_IDENTITY_URL
-exec "$console_bin"
+# A third real host is owned by the real supervisor. Restart tests affect
+# this process only; the public-site replicas continue serving their journeys.
+export ORDO_HOST_ADDR="127.0.0.1:${E2E_RUNTIME_PORT:-5393}" ORDO_REPLICA_ID=marketing-console
+export ORDO_SUPERVISOR_HOST_BIN="${ORDO_HOST_BIN:-$repo/target/debug/ordo-host}"
+export ORDO_SUPERVISOR_CONSOLE_BIN="$console_bin"
+export ORDO_SUPERVISOR_STATE_DIR="$state/supervisor" ORDO_SUPERVISOR_RUN_DIR="$state/run"
+export ORDO_SUPERVISOR_LISTEN="127.0.0.1:${E2E_SUPERVISOR_PORT:-5394}"
+export ORDO_SUPERVISOR_GRACE_SECS=10 ORDO_SUPERVISOR_READY_SECS=120
+# No identity database is configured in this profile: the supervisor's
+# supported local-console mode leaves that service off, without a fake child.
+unset ORDO_IDENTITY_DATABASE_URL
+exec "${ORDO_SUPERVISOR_BIN:-$repo/target/debug/ordo-supervisor}"

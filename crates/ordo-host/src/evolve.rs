@@ -70,10 +70,11 @@
 //!
 //! # Readers (`plan-evolution-federation.md` F1)
 //!
-//! A step that retypes or removes a field of a table on a `reader` line
-//! lists every reader of that table, with the earliest date its grant on the
-//! old column can end. A warning: it refuses nothing. The date is outside
-//! the digest, because it is a fact of the day it was rendered.
+//! A step that retypes, renames, seals or removes a field of a table another
+//! deployment reads through this one's door lists each `grant` that opens
+//! the table (`consumer_grants::tables_read`). A warning: it refuses
+//! nothing. Outside the digest: who reads is a fact of the grants, not of
+//! the step.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -583,34 +584,31 @@ pub fn typed_options_with(
 
 // ── the render ──────────────────────────────────────────────────────────
 
-/// One reader of a table a step changes (F1).
+/// One grant that opens a table a step changes to another deployment (F1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReaderNotice {
-    /// The reader's nickname, from the `reader` line.
-    pub reader: String,
+    /// The grant's header: `grant note_viewer`, `grant provider hominem`.
+    pub grant: String,
     pub table: String,
     /// The field, or `None` when the whole entity goes.
     pub field: Option<String>,
     /// The change in words.
     pub change: String,
-    /// The earliest the reader's grant on the old column can end: the
-    /// render's time plus `soak.length` as stored, unix seconds.
-    pub grant_ends_not_before: u64,
 }
 
 impl ReaderNotice {
     pub fn line(&self) -> String {
         format!(
-            "reader `{}` reads `{}`{}: {}. Its grant on the old column ends no earlier than \
-             {} (the soak's close; soaks on a read table close together).",
-            self.reader,
+            "`{}` opens `{}` to another deployment{}: {}. A read through this door that \
+             names the old shape is refused once this version serves it; the consumer \
+             changes its `external` first.",
+            self.grant,
             self.table,
             self.field
                 .as_deref()
                 .map(|f| format!(", field `{f}`"))
                 .unwrap_or_default(),
             self.change,
-            crate::versions::utc_minute(self.grant_ends_not_before)
         )
     }
 }
@@ -666,7 +664,6 @@ pub async fn render(
     from: &str,
     to: &str,
     options: &Choices,
-    at: u64,
 ) -> Result<Rendered, EvolveRefusal> {
     let v = Versions::on(pool);
     let from = v.resolve(from).await?;
@@ -677,7 +674,7 @@ pub async fn render(
     let (Some(a), Some(b)) = (v.get(&from).await?, v.get(&to).await?) else {
         return Err(VersionRefusal::UnknownVersion(from).into());
     };
-    render_stored(pool, &a, &b, options, at).await
+    render_stored(pool, &a, &b, options).await
 }
 
 pub(crate) fn compiled(a: &Artifact) -> Result<Program, EvolveRefusal> {
@@ -693,7 +690,6 @@ pub async fn render_stored(
     a: &Artifact,
     b: &Artifact,
     options: &Choices,
-    at: u64,
 ) -> Result<Rendered, EvolveRefusal> {
     let x = compiled(a)?;
     let y = compiled(b)?;
@@ -870,7 +866,6 @@ pub async fn render_stored(
 
     let mut errors = mapping_errors(pool, &a.ddl, &triaged.backfills).await?;
     errors.extend(reverse_errors(pool, &a.ddl, &triaged.backfills, &triaged.maps).await?);
-    errors.extend(sealed_under_readers(&x, &y, &triaged.backfills));
     let mut functions = Vec::new();
     for bf in &triaged.backfills {
         match function_of(bf, &y, b) {
@@ -1048,8 +1043,7 @@ pub async fn render_stored(
         receipt["entityMoves"] = Value::Array(moves);
     }
     let digest = digest_of(&receipt);
-    let soak = crate::dual_writes::stored_soak_secs(pool).await?;
-    let readers = reader_notices(&x, &y, &changes, at, soak);
+    let readers = reader_notices(&x, &y, &changes);
     Ok(Rendered {
         from: a.version.clone(),
         to: b.version.clone(),
@@ -1221,46 +1215,6 @@ async fn reverse_errors(
             ),
         })
         .collect())
-}
-
-/// A seal (increment 13) of a field a reader app reads through the shared
-/// database. A reader holds a grant on the whole table, so it would read
-/// ciphertext where it read text, and it is never handed a seal key (owner,
-/// 2026-11-25). Refused while a `reader` line names the table. A consumer
-/// reading through this deployment's door under a `grant` is not: the
-/// door opens the field in its own answers, under its own rules, and no
-/// key leaves it (`plan-federation-grants.md` §6, step G7).
-fn sealed_under_readers(
-    x: &Program,
-    y: &Program,
-    backfills: &[sa::BackfillStep],
-) -> Vec<PlanError> {
-    let mut out = Vec::new();
-    for bf in backfills.iter().filter(|b| b.sealing_from.is_some()) {
-        let mut names = BTreeSet::new();
-        for r in x.schema.readers.iter().chain(y.schema.readers.iter()) {
-            if r.tables.contains(&bf.entity) && names.insert(r.name.clone()) {
-                out.push(PlanError {
-                    code: bf.code.into(),
-                    change: format!("`{}.{}` becomes sealed", bf.entity, bf.field),
-                    class: "seal_read_by_reader".into(),
-                    why: format!(
-                        "reader `{}` reads `{}`, so it would read `{}` as ciphertext once it is \
-                         sealed",
-                        r.name, bf.entity, bf.field
-                    ),
-                    fix: format!(
-                        "move `{}` to this deployment's door, which opens `{}.{}` in its own \
-                         answers: a `grant` here opening `std.{}.list` to it, and \
-                         ORDO_PEER_<NAME>_URL there. Then take `{}` off the `reader {}` line in \
-                         a version before this one, and seal",
-                        r.name, bf.entity, bf.field, bf.entity, bf.entity, r.name
-                    ),
-                });
-            }
-        }
-    }
-    out
 }
 
 /// A backfill function as the plan names it (D16, Q14).
@@ -1696,17 +1650,15 @@ fn reverse_of(c: &Change, x: &Program, y: &Program) -> (Vec<String>, Option<Stri
     }
 }
 
-/// F1: each reader of a table the step retypes or removes a field of, or
-/// removes whole. The read app cannot see the reader's file, so every
-/// reader of the table is listed, whether or not it maps the field.
-fn reader_notices(
-    x: &Program,
-    y: &Program,
-    changes: &[Change],
-    at: u64,
-    soak: u64,
-) -> Vec<ReaderNotice> {
-    let ends = at + soak;
+/// F1: each grant that opens a table the step retypes, renames, seals or
+/// removes a field of, or removes whole. The holder cannot see the
+/// consumer's file, so every grant that opens the table is listed, whether
+/// or not its consumer maps the field.
+fn reader_notices(x: &Program, y: &Program, changes: &[Change]) -> Vec<ReaderNotice> {
+    let mut read = crate::consumer_grants::tables_read(&x.schema);
+    for (g, t) in crate::consumer_grants::tables_read(&y.schema) {
+        read.entry(g).or_default().extend(t);
+    }
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     for c in changes {
@@ -1758,19 +1710,18 @@ fn reader_notices(
             ),
             _ => continue,
         };
-        for r in x.schema.readers.iter().chain(y.schema.readers.iter()) {
-            if !r.tables.iter().any(|t| t == table) {
+        for (grant, tables) in &read {
+            if !tables.contains(table) {
                 continue;
             }
-            if !seen.insert((r.name.clone(), table.clone(), field.clone())) {
+            if !seen.insert((grant.clone(), table.clone(), field.clone())) {
                 continue;
             }
             out.push(ReaderNotice {
-                reader: r.name.clone(),
+                grant: grant.clone(),
                 table: table.clone(),
                 field: field.clone(),
                 change: c.to_string(),
-                grant_ends_not_before: ends,
             });
         }
     }
@@ -1964,8 +1915,8 @@ impl Evolved {
             "options": self.rendered.options,
             "receipt": self.rendered.receipt,
             "readers": self.rendered.readers.iter().map(|r| json!({
-                "reader": r.reader, "table": r.table, "field": r.field,
-                "change": r.change, "grantEndsNotBefore": r.grant_ends_not_before,
+                "grant": r.grant, "table": r.table, "field": r.field,
+                "change": r.change,
                 "line": r.line(),
             })).collect::<Vec<_>>(),
             "warnings": self.rendered.warnings,
@@ -2005,7 +1956,7 @@ pub async fn evolve_approved(
     actor: &str,
     at: u64,
 ) -> Result<Evolved, EvolveRefusal> {
-    let rendered = render(pool, from, to, options, at).await?;
+    let rendered = render(pool, from, to, options).await?;
     if let Some(expected) = expect.map(str::trim).filter(|e| !e.is_empty()) {
         if expected != rendered.digest {
             return Err(EvolveRefusal::DigestMismatch {
@@ -2246,14 +2197,7 @@ pub(crate) async fn expand_step(
     // renders it.
     options.renames_backfill = true;
     // The stored digest against this release's rendering (D3).
-    let again = Box::pin(render_stored(
-        registry,
-        &a,
-        &b,
-        &options,
-        crate::runtime::now_secs(),
-    ))
-    .await?;
+    let again = Box::pin(render_stored(registry, &a, &b, &options)).await?;
     if again.digest != plan.digest {
         return Err(EvolveRefusal::DigestMismatch {
             from: plan.from.clone(),

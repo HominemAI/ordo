@@ -878,13 +878,10 @@ async fn health_ready(State(state): State<PlatformState>, headers: HeaderMap) ->
                 .iter()
                 .map(|(space, note)| json!({ "space": space, "note": note }))
                 .collect::<Vec<_>>(),
-            // What the external watcher found on its last pass. `changing`:
-            // a peer column its read app renamed, still written, with the
-            // new name and the fix; nothing is held for it yet. `held`: each
-            // external entity whose ops answer `external_changed` now. Not
-            // checks: a held entity refuses its own ops and nothing else.
+            // What the external watcher found on its last pass. `held`:
+            // each external entity whose ops answer `external_changed` now.
+            // Not checks: a held entity refuses its own ops and nothing else.
             "external": state.external.as_ref().map(|g| json!({
-                "changing": g.changing(),
                 "held": g.down(),
             })),
         }),
@@ -1000,6 +997,7 @@ async fn health_deep(State(state): State<PlatformState>, headers: HeaderMap) -> 
                 "summary": r.summary(),
                 "verified": r.verified,
                 "no_result_shape": r.no_result_shape,
+                "peer_reads": r.peer_reads,
                 "undescribable": r.undescribable.iter().map(|u| json!({
                     "op": u.op, "reason": u.reason,
                 })).collect::<Vec<_>>(),

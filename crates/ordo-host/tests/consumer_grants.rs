@@ -324,18 +324,21 @@ async fn the_plan_shows_each_list_and_the_consumer_setting() {
     );
 }
 
-/// notes v2's own file with a grant to note_viewer added: it compiles, and
-/// the block expands against the ops notes v2 really has.
+/// notes v2's own file, which grants note_viewer, with a second grant added:
+/// it compiles, and each block expands against the ops notes v2 really has.
 #[test]
 fn notes_v2_with_a_grant_to_note_viewer_compiles_and_expands() {
     let src = format!(
-        "{}\ngrant note_viewer {{\n  std.notes.get\n  std.notes.list\n  /std\\.notesAccess\\.(get|list)/\n  /.*Note/\n  !deleteNote\n}}\n",
+        "{}\ngrant other_viewer {{\n  std.notes.get\n  std.notes.list\n  /std\\.notesAccess\\.(get|list)/\n  /.*Note/\n  !deleteNote\n}}\n",
         include_str!("../../../examples/notes-v2/notes.ordo")
     );
     let program = Program::compile(&src).expect("notes v2 with a grant compiles");
-    assert_eq!(program.schema.grants.len(), 1);
+    assert_eq!(program.schema.grants.len(), 2, "note_viewer's and this one");
     let ops = cg::program_ops(&program.doc);
-    let x = cg::expand(&program.schema.grants[0], &ops).expect("expands");
+    let own = cg::expand(&program.schema.grants[0], &ops).expect("expands");
+    assert_eq!(own.grant.ops, ["myNotes", "publicNotes"]);
+    assert!(own.grant.as_itself);
+    let x = cg::expand(&program.schema.grants[1], &ops).expect("expands");
     let granted = &x.grant.ops;
     for want in [
         "std.notes.get",
@@ -355,5 +358,5 @@ fn notes_v2_with_a_grant_to_note_viewer_compiles_and_expands() {
     );
     // The artifact carries the block as written, so a changed grant is a new
     // version.
-    assert_eq!(program.doc["grants"][0]["name"], "note_viewer");
+    assert_eq!(program.doc["grants"][1]["name"], "other_viewer");
 }

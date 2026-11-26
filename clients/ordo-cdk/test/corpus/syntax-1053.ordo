@@ -1,13 +1,16 @@
-peer journal                                 # a nickname for another Ordo deployment
+peer journal {                               # a nickname for another Ordo deployment
+  std.notes.list                             # the holder's ops this one calls
+  addComment
+}
 
-external entries from journal.notes shared { # the peer's own `notes` table
+external entries from journal.notes shared { # read through journal's door
   id: text <- "id"
   title: text <- "title"
   owner: text <- "owner"
-  access read owner == $caller               # the peer's member for this person
+  access read owner == $caller               # journal decides who $caller is
 }
 
-external customers from crm.customers shared { # no peer line: a plain schema
+external customers from crm.customers shared { # no peer: a plain schema
   id <- "customer_id"
   name: text <- "full_name"
 }
@@ -16,10 +19,10 @@ op myEntries =
   entries[title]
   sort title
   take 50
-# `peer journal` names no schema. The deployment owner sets it with
-# ORDO_PEER_JOURNAL_SCHEMA, the schema the other deployment's ORDO_PG_SCHEMA
-# names. Unset, or a schema with no Ordo deployment in it, refuses the boot.
-# On `entries`, `$caller` is the person's member in the peer, found through
-# the sign-in subject both deployments hold. A person with no member there
-# reads no rows. ORDO_EXTERNAL_CRM_SCHEMA=crm_dev reads `crm_dev.customers`
-# instead of `crm.customers`; unset, the schema is as written.
+# `peer journal` names no address. The deployment owner sets it with
+# ORDO_PEER_JOURNAL_URL, journal's door. Unset refuses the boot. Each read of
+# `entries` is one call to journal's `std.notes.list`, for the person signed
+# in here, and journal's own rules decide what they see. The apply checks
+# each op of the block against journal's grant to this deployment.
+# ORDO_EXTERNAL_CRM_SCHEMA=crm_dev reads `crm_dev.customers` instead of
+# `crm.customers`; unset, the schema is as written.

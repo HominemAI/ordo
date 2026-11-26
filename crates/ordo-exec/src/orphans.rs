@@ -12,9 +12,6 @@
 //!   row.
 //! - **Export** writes every orphaned column and table beside the declared
 //!   entities, under `orphans/` ([`crate::export`]).
-//! - **Readers** lose an orphaned column from their grant
-//!   ([`crate::peer::grant_readers`]): a reader reads only columns the read
-//!   app still writes (owner ruling 2026-11-23, Q1).
 //! - **Pruning** drops the column or table, once the deployment owner asks
 //!   twice. The row stays as a **tombstone**: `pruned_at` and `pruned_by`
 //!   say when and by whom. A tombstone is not an orphan any more.

@@ -4,8 +4,9 @@ name: Federation end-to-end
 # 2026-11-16 to 2026-11-18, `example-apps-notes-v2-plus-note_viewer`): notes
 # v2 and note_viewer, each with its own database role and schema in one
 # Postgres, both signing people in through the identity service with open
-# sign-up. note_viewer reads notes v2's tables through `peer notes`, and notes
-# v2 grants that read with `reader note_viewer`. The stack is
+# sign-up. note_viewer reads notes v2 only through notes v2's door (`peer
+# notes { … }`), and notes v2 opens those ops with `grant note_viewer`
+# (plan-federation-grants.md, G8). The stack is
 # examples/note-viewer/e2e/stack.sh; docs/howto-e2e.md says how to run it.
 #
 # Its own workflow, so the Notes end-to-end run stays short and a federation
@@ -95,8 +96,8 @@ jobs:
           --health-retries 10
 
     # The admin connection. stack.sh makes the two app roles, `notes_app` and
-    # `viewer_app`, and each door signs in as its own. ORDO_PEER_SHARED_ROLE
-    # stays unset: the two roles are what this proves.
+    # `viewer_app`, and each door signs in as its own; neither is granted
+    # anything in the other's schema.
     env:
       REACHED: ${{ needs.changes.outputs.reached }}
       CI: '1'

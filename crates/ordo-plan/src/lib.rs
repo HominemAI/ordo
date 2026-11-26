@@ -1698,9 +1698,6 @@ struct Planner {
     /// Every alias in the statement that reads an external entity, so an
     /// `id` on it compares, joins and sorts by the raw key.
     ext_alias: std::collections::HashMap<String, ExternalRead>,
-    /// How many peer member lookups this statement has rendered, so each
-    /// takes aliases of its own ([`Planner::peer_caller`]).
-    peer_n: usize,
 }
 
 impl Planner {
@@ -1725,7 +1722,6 @@ impl Planner {
             legacy_eq: !PROVEN_EQUALITY,
             externals: None,
             ext_alias: std::collections::HashMap::new(),
-            peer_n: 0,
         }
     }
 
@@ -1811,100 +1807,19 @@ impl Planner {
         }))
     }
 
-    /// The space value as SQL — a literal when the door bound one, the
-    /// reserved `$1` slot otherwise.
-    /// `expr` is a member id the person behind `caller` holds in the peer
-    /// deployment whose schema is `peer` (owner, 2026-11-16,
-    /// `example-apps-notes-v2-plus-note_viewer` ask 2).
-    ///
-    /// The join, from the caller out:
-    ///
-    /// 1. `members` here: the caller's row in this space gives the person's
-    ///    principal.
-    /// 2. `$authenticator` here: the sign-in subjects linked to it.
-    /// 3. `$peerlink` here: the map from this deployment's connections to
-    ///    the peer's with the same provider fingerprint (owner ruling
-    ///    2026-11-18), kept by `ordo_exec::peer::link`. A subject
-    ///    `oidc:<here>:<sub>` becomes `oidc:<there>:<sub>`. Only a mapped
-    ///    connection counts: a password name, a passkey, SAML, a tenant's own
-    ///    provider and a connection with no shared provider match nothing.
-    ///    The connection name plays no part.
-    /// 4. `$authenticator` in the peer: that subject, and its principal
-    ///    there. A retired link on either side does not count.
-    /// 5. `$principal` in the peer: an account that is not deleted.
-    /// 6. Exactly one such principal. A person whose links reach two or more
-    ///    accounts in the peer matches nothing.
-    /// 7. `members` in the peer: that principal's active members, in any
-    ///    space. The external has no `$space`, so a row in any of the peer's
-    ///    spaces is matched by the person's member of that space.
-    ///
-    /// Never null: a null `expr`, or no member in the peer, is false, so a
-    /// guard denies and `not` of it admits, as two-valued logic requires.
-    /// There is no fallback to the local member.
-    fn peer_caller(
-        &mut self,
-        expr: &BExpr,
-        caller: &BExpr,
-        peer: &str,
-    ) -> Result<String, PlanError> {
-        let x = self.expr(expr)?;
-        let who = self.expr(caller)?;
-        let space = self.space_sql();
-        let n = self.peer_n;
-        self.peer_n += 1;
-        let a = |s: &str| format!("$peer{n}_{s}");
-        let (lm, la, lk, pa, pp, pm) = (a("lm"), a("la"), a("lk"), a("pa"), a("pp"), a("pm"));
-        self.sources.physical(&lm);
-        for e in [&la, &lk, &pa, &pp, &pm] {
-            self.sources.external(e);
-        }
-        let p = q(peer);
-        let peer_lit = format!("'{}'", peer.replace('\'', "''"));
-        let c = |alias: &str, col: &str| format!("{}.{}", q(alias), q(col));
-        Ok(format!(
-            "({x} IS NOT NULL AND {x} IN (SELECT {pm_id} FROM {p}.{members} AS {pm_q} \
-             WHERE {pm_kind} = 'principal' AND {pm_status} = 'active' \
-             AND {pm_prin} = (SELECT min({pa_prin}) FROM {members} AS {lm_q} \
-             JOIN {auth} AS {la_q} ON {la_prin} = {lm_prin} AND {la_ret} = '' \
-             JOIN {link} AS {lk_q} ON {lk_peer} = {peer_lit} \
-             AND left({la_auth}, length({lk_local})) = {lk_local} \
-             JOIN {p}.{auth} AS {pa_q} ON {pa_auth} = {lk_remote} || \
-             substr({la_auth}, length({lk_local}) + 1) AND {pa_ret} = '' \
-             JOIN {p}.{prin} AS {pp_q} ON {pp_id} = {pa_prin} AND {pp_del} = 0 \
-             WHERE {lm_space} = {space} AND {lm_id} = {who} AND {lm_kind} = 'principal' \
-             HAVING count(DISTINCT {pa_prin}) = 1)))",
-            members = q("members"),
-            prin = q("$principal"),
-            auth = q("$authenticator"),
-            link = q("$peerlink"),
-            pm_q = q(&pm),
-            pp_q = q(&pp),
-            pa_q = q(&pa),
-            la_q = q(&la),
-            lk_q = q(&lk),
-            lm_q = q(&lm),
-            pm_id = c(&pm, "id"),
-            pm_prin = c(&pm, "principal"),
-            pm_kind = c(&pm, "kind"),
-            pm_status = c(&pm, "status"),
-            pp_id = c(&pp, "id"),
-            pp_del = c(&pp, "deleted_at"),
-            pa_prin = c(&pa, "principal"),
-            pa_auth = c(&pa, "authenticator"),
-            pa_ret = c(&pa, "retired_case"),
-            la_auth = c(&la, "authenticator"),
-            la_ret = c(&la, "retired_case"),
-            la_prin = c(&la, "principal"),
-            lk_peer = c(&lk, "peer"),
-            lk_local = c(&lk, "local"),
-            lk_remote = c(&lk, "remote"),
-            lm_prin = c(&lm, "principal"),
-            lm_space = c(&lm, SPACE_COLUMN),
-            lm_id = c(&lm, "id"),
-            lm_kind = c(&lm, "kind"),
-        ))
+    /// `field == $caller` on a peer's table. The holder decides it: the
+    /// executor sends it as a `caller` condition, and every row the holder
+    /// answers already meets it, so here it reads "the holder found one",
+    /// `field IS NOT NULL`, as the executor's own rewrite does
+    /// (`ordo_exec::peer_reads`). A statement nobody served reads no table:
+    /// its peer's source names a relation that cannot exist, and the read
+    /// paths refuse it by name before it runs.
+    fn peer_caller(&mut self, expr: &BExpr) -> Result<String, PlanError> {
+        Ok(format!("({} IS NOT NULL)", self.expr(expr)?))
     }
 
+    /// The space value as SQL — a literal when the door bound one, the
+    /// reserved `$1` slot otherwise.
     fn space_sql(&mut self) -> String {
         match self.space.clone() {
             Space::Bound(s) => format!("'{}'", s.replace('\'', "''")),
@@ -3010,7 +2925,7 @@ impl Planner {
                     if *negated { "NOT " } else { "" }
                 )
             }
-            BCond::PeerCaller { expr, caller, peer } => self.peer_caller(expr, caller, peer)?,
+            BCond::PeerCaller { expr, .. } => self.peer_caller(expr)?,
             BCond::TreeWalk {
                 expr,
                 tree,

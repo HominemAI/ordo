@@ -16,12 +16,10 @@
 //!
 //! - an app completes sign-in for an openly signed-up member, and the
 //!   person becomes `oidc:<connection>:<sub>`, `sub` their id at the
-//!   service;
-//! - two deployments connected to the same service under different
-//!   connection names, one a reader of the other through `peer`: the same
-//!   person signs in to both, and the reader's `$caller` guard on the
-//!   peer's table matches them; a second person does not see the first's
-//!   rows.
+//!   service.
+//!
+//! The same person read across 2 deployments is `peer_reads.rs`: one
+//! deployment reads another through its door, for the person signed in.
 //!
 //! A regression looks like a sign-in that fails against the service, a
 //! subject that differs between two apps, or one person's rows shown to
@@ -32,7 +30,6 @@
 
 mod oauth2_support;
 mod oidc_support;
-mod refine_support;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,16 +38,11 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use oauth2_support::{redeem, send};
 use oidc_support::{param, CA, PUBLIC, RETURN};
-use ordo_conformance::{Fixture, Pg, FIXTURE, SEED};
 use ordo_egress::{DenyList, TlsRoots};
-use ordo_exec::peer::{self, Pass};
-use ordo_exec::{Pool, PoolConfig};
+use ordo_exec::PoolConfig;
 use ordo_host::auth::AuthState;
 use ordo_host::federation::MemoryIdentityAttrs;
 use ordo_host::oidc::EgressFactory;
-use ordo_host::principal_directory::PgDirectoryStore;
-use ordo_host::schema_apply::{self as sa, Program};
-use ordo_host::DEFAULT_SPACE;
 use ordo_identity::clock::Clock;
 use ordo_identity::directory::{Directory, DirectoryStore, Provisioning};
 use ordo_identity::jose::Alg;
@@ -65,7 +57,6 @@ use ordo_identity_service::config::{DATABASE_URL_ENV, DATA_DIR_ENV, ORIGIN_ENV};
 use ordo_identity_service::deployments::{Registration, SignUp};
 use ordo_identity_service::people::Actor;
 use ordo_identity_service::{BootOptions, IdentityConfig, Service};
-use refine_support::{call_as, door_over};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tower::ServiceExt;
@@ -279,19 +270,6 @@ impl Ids {
         (cookie, done["person"].as_str().unwrap().to_string())
     }
 
-    /// The signed-in person joins another open deployment.
-    async fn join(&self, cookie: &str, deployment: &str) {
-        let (s, _, v, _) = self
-            .browser(
-                "POST",
-                "/sign-up/join",
-                Some(cookie),
-                Some(json!({ "deployment": deployment })),
-            )
-            .await;
-        assert_eq!(s, StatusCode::OK, "{v}");
-    }
-
     /// The app's connection to this service, by discovery, as
     /// `ORDO_AUTH_<NAME>_KIND=oidc`, `_ISSUER`, `_CLIENT_ID=<handle>`,
     /// `_CLIENT_AUTH=none` build it.
@@ -447,189 +425,4 @@ async fn an_app_signs_in_an_openly_signed_up_member_through_the_identity_service
         .unwrap()
         .unwrap();
     assert_eq!(p.display, "Dana", "the name from the ID token");
-}
-
-// ─────────────────────── two deployments, one person ───────────────────────
-
-/// A: notes, each readable by its owner only.
-const ALPHA: &str = r#"
-entity notes {
-  title: text
-  owner -> members?
-  access read owner == $caller
-  access write owner == $caller
-}
-"#;
-
-/// B: A's notes through a peer.
-const BETA: &str = r#"
-peer journal
-
-external entries from journal.notes shared {
-  id: text <- id
-  title: text <- title
-  owner: text <- owner
-  access read owner == $caller
-}
-"#;
-
-fn beta_fixture() -> Fixture {
-    let mut f = Fixture::from_source(&format!("{FIXTURE}\n{BETA}"), SEED).expect("B compiles");
-    peer::resolve_with(&mut f.schema, "public", |v| {
-        (v == "ORDO_PEER_JOURNAL_SCHEMA").then(|| "alpha".to_string())
-    })
-    .expect("the peer resolves");
-    f
-}
-
-fn cfg(db: &str, schema: &str) -> PoolConfig {
-    PoolConfig {
-        db: db.into(),
-        size: 3,
-        schema: schema.into(),
-        ..PoolConfig::from_env()
-    }
-}
-
-/// The principal an app linked `authenticator` to, read from its table.
-async fn linked(pool: &Pool, authenticator: &str) -> String {
-    let rows = pool
-        .rows(&format!(
-            "SELECT principal FROM \"$authenticator\" WHERE authenticator = {}",
-            ordo_exec::sql_lit(authenticator)
-        ))
-        .await
-        .expect("read");
-    rows.first()
-        .and_then(|r| r.first().cloned().flatten())
-        .unwrap_or_else(|| panic!("no link for {authenticator}"))
-}
-
-async fn titles(state: &ordo_api::ApiState, member: &str) -> Vec<String> {
-    let (status, body) = call_as(
-        state,
-        Some(&format!("member:{member}")),
-        "GET",
-        "/op/std.entries.list",
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{member}: {body}");
-    let mut out: Vec<String> = body["rows"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .map(|r| r["title"].as_str().unwrap_or("").to_string())
-        .collect();
-    out.sort();
-    out
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn two_deployments_connected_under_different_names_match_one_person_through_peer() {
-    let db = "ordo_idsvc_peer";
-    // B in `public`, the door; A in `alpha`.
-    let (state, _, b) = door_over(
-        Arc::new(beta_fixture()),
-        db,
-        50,
-        PoolConfig::from_env(),
-        |k| k,
-    )
-    .await;
-    let pg = Pg::named(db);
-    pg.exec(
-        "DROP SCHEMA IF EXISTS alpha CASCADE; \
-         DROP TABLE IF EXISTS public.\"$peerlink\", public.\"$authconnection\";",
-    )
-    .expect("reset");
-    let a = Pool::connect(cfg(&pg.db, "alpha")).await.expect("A boots");
-    let (plan, outcome) = sa::apply(
-        &a,
-        &Program::compile(ALPHA).expect("A compiles"),
-        "test",
-        "test",
-    )
-    .await;
-    assert!(plan.expect("plans").refusals.is_empty());
-    assert!(outcome.is_ok(), "{outcome:?}");
-    for pool in [&a, &b] {
-        ordo_host::principal_directory::ensure_table(pool)
-            .await
-            .expect("a directory");
-    }
-
-    // One identity service. A is client `notes` under connection
-    // `identity`; B is client `viewer` under connection `corp`.
-    let ids = Ids::start("peer", &[("notes", "identity"), ("viewer", "corp")]).await;
-    // Each app's directory on its own connection, in its own schema.
-    let open = |schema: &str| -> Arc<dyn DirectoryStore> {
-        Arc::new(PgDirectoryStore::open(cfg(&pg.db, schema)).expect("directory store"))
-    };
-    let app_a = app(
-        &ids,
-        "identity",
-        "notes",
-        open("alpha"),
-        b"identity-service-oidc-a",
-    );
-    let app_b = app(
-        &ids,
-        "corp",
-        "viewer",
-        open("public"),
-        b"identity-service-oidc-b",
-    );
-    // Each records its connection as a start does: the fingerprint of the
-    // issuer, the same for both names.
-    for (pool, name, handle) in [(&a, "identity", "notes"), (&b, "corp", "viewer")] {
-        let fp = ids.connection(name, handle).fingerprint();
-        ordo_host::federation::ensure_fingerprint(pool, name, "oidc", &fp, "sub", 0)
-            .await
-            .expect("recorded");
-    }
-
-    // Ada and Bo each make one account, a member of both apps, and sign in
-    // to both through the service.
-    let mut people = Vec::new();
-    for (name, seed) in [("Ada", 61u8), ("Bo", 62u8)] {
-        let (cookie, sub) = ids.sign_up("notes", name, seed).await;
-        ids.join(&cookie, "viewer").await;
-        let (s, in_a) = sign_in(&app_a, &ids, Some(&cookie)).await;
-        assert_eq!(s, StatusCode::OK, "{in_a}");
-        let (s, in_b) = sign_in(&app_b, &ids, Some(&cookie)).await;
-        assert_eq!(s, StatusCode::OK, "{in_b}");
-        // What the sign-ins wrote: one subject, under each app's own name.
-        let pa = linked(&a, &format!("oidc:identity:{sub}")).await;
-        let pb = linked(&b, &format!("oidc:corp:{sub}")).await;
-        assert_eq!(pa, principal_of(&app_a, &in_a));
-        assert_eq!(pb, principal_of(&app_b, &in_b));
-        people.push((name.to_lowercase(), pa, pb));
-    }
-
-    // Each is a member of A's space and of B's, and owns one note in A.
-    let mut sql = String::new();
-    for (who, pa, pb) in &people {
-        for (schema, space, principal) in [("alpha", "sa1", pa), ("public", DEFAULT_SPACE, pb)] {
-            let tag = if schema == "alpha" { "a" } else { "b" };
-            sql += &format!(
-                "INSERT INTO {schema}.members (\"$space\", id, principal, \"displayName\", kind, \
-                 \"memberCount\", role, status, joined) VALUES ('{space}', 'mem_{tag}_{who}', \
-                 '{principal}', '{who}', 'principal', 1, 'editor', 'active', '2026-11-19');"
-            );
-        }
-        sql += &format!(
-            "INSERT INTO alpha.notes (\"$space\", id, title, owner) VALUES \
-             ('sa1', 'note_{who}', '{who} note', 'mem_a_{who}');"
-        );
-    }
-    pg.exec(&sql).expect("seed");
-    ordo_host::deploy::link_peers(&b, &beta_fixture(), Pass::Start)
-        .await
-        .expect("B starts with its peer");
-
-    // B's `$caller` guard on A's notes matches each person to their own.
-    assert_eq!(titles(&state, "mem_b_ada").await, ["ada note"]);
-    assert_eq!(titles(&state, "mem_b_bo").await, ["bo note"]);
 }

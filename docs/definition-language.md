@@ -2062,8 +2062,8 @@ entity customers (key: cust, prev: clients) {
   into the old table is checked at commit until the rename lands.
 - An entity rename lands at a move's soak close, or when a version drops
   the mark. Then every reference moves to the new table, the old table is
-  an orphan (§2.7 of `plan-versions.md`), and a reader app loses it. Until
-  then a reader of the new table reads the old one too.
+  an orphan (§2.7 of `plan-versions.md`). Another deployment reads either
+  only through this one's door, under its grant.
 - Ids keep the key they were minted with. A row the new name writes takes
   the new name's key.
 - An entity rename keeps its fields in the step that renames it
@@ -2360,8 +2360,8 @@ entity orders {
   where the file says `crm.customers`. Unset, the schema is as written. A bad
   value refuses the boot naming the variable. A schema written in quotes that
   is not lowercase letters, digits and underscores (`"Legacy"`) has no
-  variable and is never swapped. A name that is also a `peer` is read by the
-  peer's own setting (below).
+  variable and is never swapped. A name that is also a `peer` is that peer,
+  read through its door (below).
 
 How it reads:
 
@@ -2478,7 +2478,7 @@ Refusals, each naming the fix:
 | `external_no_key` | `ordo introspect --external`: no single-column unique, not null key |
 | `external_unsupported` | `unique`, `index`, `check`, `std sealed`, `tree`, `normalize`, `prev`, a default or a `blob` on an external; `public*` (an external owns nothing, write `public`); `public` on the `id` line; or `whole` anchored on one |
 
-### `peer { … }`: the ops this deployment calls on another [ruled 2026-11-26, built in G4]
+### `peer { … }`: another Ordo deployment, through its door [ruled 2026-11-26, built G4 to G8]
 
 A `peer` block lists the holder's ops this deployment calls through the
 holder's door (`plan-federation-grants.md` §4):
@@ -2504,20 +2504,27 @@ peer notes {
   a change would break: "note_viewer calls archiveNote". A warning; the
   holder's apply goes on.
 - `ordo plan` (`std.deployment.plan`) checks the same, recording nothing.
-- A block needs no external. The one-line form below keeps working until the
-  shared-database path is removed (G8).
+- A block needs no external.
+- **Removed in G8: the one-line `peer notes`.** It read another deployment's
+  tables in a shared database. A file that still writes it is refused
+  (`peer_name`), naming the block to write and `ORDO_PEER_<NAME>_URL` in
+  place of `ORDO_PEER_<NAME>_SCHEMA` (owner, board
+  `federation-ordo-deployments-share-data-through`, ask 2: "Remove").
 - This deployment registers its consumer key at the identity service once,
   with a token for its own admin: `std.peer.registerKey($token)`. Until then
   the apply is refused naming that op.
 
 #### A peer's entities through its door [built in G5]
 
-With `ORDO_PEER_<NAME>_URL` set, an `external … from <name>.<table>` is read
-through that deployment's door, never its tables
-(`plan-federation-grants.md` §4). The file does not change; the setting
-decides. `ORDO_PEER_<NAME>_SCHEMA` is then not read.
+An `external … from <name>.<table>` is read through that deployment's door
+at `ORDO_PEER_<NAME>_URL`, never its tables (`plan-federation-grants.md`
+§4). The setting is required: unset refuses the boot, naming it.
 
-- Each read of the entity is one call to the holder's `std.<table>.list`.
+- Each read of the entity is one call to the holder's `std.<table>.list`,
+  or, when the `peer` block lists an op named like the table, to that op:
+  `external published from notes.publicNotes` with `publicNotes` in the
+  block reads `publicNotes`. An op is the holder's own read, under its own
+  conditions, and keeps its output names across the holder's renames.
   Its conditions on the entity's own fields (`==`, `!=`, `<`, `<=`, `>`,
   `>=`, `in`, `is null`, on text, ids, ints, bools, dates and datetimes),
   its fields, and, for a read whose rows are the peer's, its sort and its
@@ -2526,13 +2533,17 @@ decides. `ORDO_PEER_<NAME>_SCHEMA` is then not read.
 - A native entity's ref to it (`note.title`, a guard that walks into it)
   is one call with the refs of the rows read, never one call per row.
 - `field == $caller` on it is the holder's `$caller`: the holder decides it
-  for the person the call is made for. Under `or` or `not` it is refused
-  (`peer_refused`). With nobody signed in it matches nothing, and the holder
+  for the person the call is made for. Only `==` and `!=` compare a peer's
+  field with `$caller` (`peer_caller_compare`, at compile). Under `or` or
+  `not` it is refused (`peer_refused`). With nobody signed in it matches nothing, and the holder
   is not asked.
 - Each call is made for the person signed in here, under the holder's rules
   for them, or as this deployment itself when nobody is. The holder's grant
-  must open `std.<table>.list` to this deployment; the apply checks it as if
-  a `peer` block listed it.
+  must open the op to this deployment; the apply checks it as if the
+  `peer` block listed it.
+- A path with no client to another deployment's door (`ordo_exec::
+  Executor::read_as`) refuses a read of a peer by name (`peer_refused`),
+  never runs it.
 - Nothing the holder answered outlives the read.
 - **Consistency.** There is no transaction across deployments. 2 reads of
   the holder in one op are 2 calls, not one snapshot.
@@ -2545,176 +2556,28 @@ decides. `ORDO_PEER_<NAME>_SCHEMA` is then not read.
   `ORDO_PEER_READ_MAX_ROWS` rows from the holder with nothing to bound them
   there is `peer_refused`, naming the setting.
 
-### `peer`: another Ordo deployment's tables [ruled 2026-11-17, built]
+### `peer` alone and `reader`: the shared-database path [ruled 2026-11-17 and 2026-11-18, removed in G8]
 
-Two Ordo deployments can share one database, each in its own schema
-(`ORDO_PG_SCHEMA`). A `peer` line lets one read the other's tables.
+Two deployments in one database once read each other's tables: `peer
+journal` named the other's schema (`ORDO_PEER_JOURNAL_SCHEMA`), and the
+deployment being read consented with `reader note_viewer reads notes`,
+which granted a database role (`ORDO_READER_NOTE_VIEWER_ROLE`). The owner
+ruled it removed once the door path worked (board
+`federation-ordo-deployments-share-data-through`, asks 1 and 2). Both
+lines are refused by name, with what to write instead:
 
-```
-peer journal
+| Written | Refused | Write instead |
+|---|---|---|
+| `peer journal` | `peer_name` | `peer journal { std.notes.list }`, and `ORDO_PEER_JOURNAL_URL` |
+| `reader note_viewer reads notes, notesAccess` | `reader_line` | `grant note_viewer { std.notes.list  std.notesAccess.list }`, and `ORDO_CONSUMER_NOTE_VIEWER_CLIENT` |
 
-external entries from journal.notes shared {
-  id: text <- "id"
-  title: text <- "title"
-  owner: text <- "owner"
-  access read owner == $caller
-}
-```
-
-- `peer journal` declares a local nickname for another Ordo deployment. It
-  does not name or change that deployment.
-- In `from journal.notes`, `journal` is the nickname and `notes` is the real
-  table in the peer. Without a `peer journal` line, `journal` is a plain
-  schema, as for any external.
-- The file never holds the peer's schema. The deployment owner sets
-  `ORDO_PEER_JOURNAL_SCHEMA`, the nickname upper-cased, to the schema the other
-  deployment's `ORDO_PG_SCHEMA` names (`public` when it sets none).
-- The boot is refused, naming the variable, when it is unset, is not a schema
-  name, names this deployment's own schema, or names a schema with no Ordo
-  deployment in it. `ordo plan` and the apply say the last as
-  `peer_not_ordo`.
-- A peer name is lowercase letters and digits, starting with a letter
-  (`peer_name`), so no two names share a variable. It is declared once, and a
-  `peer` line no external reads is refused (`peer_unused`).
-- Everything else is as for an external: read-only, `shared`, no DDL.
-
-**`$caller` on a peer's table** is the peer's member for the same person.
-The guard is written exactly as on a native entity.
-
-**The matching rule** (owner, 2026-11-18). Two sign-ins are the same person
-when the provider and the subject match. The provider is the fingerprint
-each deployment records for a connection in `$authconnection`: the issuer
-for OIDC, the three endpoints and the subject claim for OAuth2. The
-connection name plays no part. One deployment may call the provider
-`corp` and the other `identity`, and their people still match.
-
-1. The caller's member here gives their principal.
-2. The principal's sign-in links here (`$authenticator`) give its subjects.
-3. Each subject's connection is mapped to the peer's connections with the
-   same fingerprint. `oidc:corp:<sub>` here is `oidc:identity:<sub>` there.
-4. The peer's links with that subject give the peer's principal. A retired
-   link, or a deleted account, does not count.
-5. Exactly one such principal. A person whose sign-ins reach two or more
-   accounts in the peer matches nothing.
-6. That principal's active members in the peer, in any of its spaces.
-
-`field == $caller` holds when the field is one of those member ids, and
-`field != $caller` when it is not. A person with no member in the peer reads
-no guarded rows. It never errors and never falls back to the local member.
-The same holds for `$caller` in an op's filter on the peer's table. Any other
-comparison of such a field with `$caller` is refused (`peer_caller_compare`).
-On a plain external, `$caller` is the local member, as before.
-
-The map of shared providers is built when the deployment starts and read
-again every minute. A connection added to the peer is matched on the next
-read, with no restart. Until then it matches nothing. Ordo never falls back
-to matching by name.
-
-**What never matches.** These connections link nobody, and each start lists
-them with the reason:
-
-- A connection with no connection in the peer for the same provider.
-- A connection whose subject claim can change hands: `email`, `login`,
-  `username`, `name`, `preferred_username`, `global_name`. This holds even
-  when the deployment owner acknowledged the claim for sign-in. The GitHub
-  and Discord presets use the numeric `id` and do link.
-- A tenant's own sign-in providers (`$tenantconnection`).
-- SAML, a password name and a passkey. Each is local to one deployment.
-
-A person whose sign-ins reach more than one account in the peer reads
-nothing there. The deployment owner sees one log line naming them, and
-again only when that list changes.
-
-**Start refusals.** The deployment does not start when:
-
-- The peer has no `$authconnection` table: "Start journal first, then this
-  deployment." A deployment writes it when it starts with sign-in on.
-- `$caller` is used on a peer's table and the two deployments share no
-  provider. Give both a connection to the same provider, or remove `$caller`
-  from those guards and filters. Without `$caller` the start goes on and
-  lists the connections that do not match.
-- One connection name means one provider here and another in the peer. Give
-  one of the two connections a new name. Found on a later read, the
-  connection is dropped from the map and logged, and serving goes on.
-
-**Known gap.** A peer row matches the person's member in any of the peer's
-spaces. The reader's own space plays no part.
-
-The peer is in the same database. A tenant kept in a database of its own
-does not reach a peer this way: its op is refused `peer_refused`, line
-`peer_tenant_database`, naming the peer and `ORDO_PEER_<NAME>_URL`. Read
-the peer through its door to reach it from every database.
-
-### `reader`: who may read this deployment's tables [ruled 2026-11-18, built]
-
-Peers read with their database role. Give each deployment its own role. The
-reader line and its grants decide which tables another deployment can read.
-Guards decide which rows that deployment's users see. The deployment itself
-can read every row of a table it is granted.
-
-The app being read writes one line per reader:
-
-```
-reader note_viewer reads notes, notesAccess
-```
-
-- `note_viewer` is a local nickname for the reader. It does not name or
-  change that deployment. It is lowercase letters, digits and underscores,
-  starting with a letter, and is declared once (`reader_line`).
-- The list is this program's own entities. A name that is not one, or that
-  is an external, is refused at check time naming it
-  (`reader_unknown_table`).
-- The file never holds the role. The deployment owner sets
-  `ORDO_READER_NOTE_VIEWER_ROLE`, the nickname upper-cased, to the role in
-  the reader's `ORDO_PG_USER`.
-
-**What is granted.** At every apply and every start, the grants that role
-holds in this deployment's schema are made equal to the line:
-
-- `USAGE` on the schema.
-- `SELECT` on each table named.
-- `SELECT` on the sign-in columns the reader's `$caller` guard reads, and
-  no other columns: `members` (`id`, `principal`, `kind`, `status`),
-  `$principal` (`id`, `deleted_at`), `$authenticator` (`authenticator`,
-  `principal`, `retired_case`) and `$authconnection` (`name`, `kind`,
-  `fingerprint`, `subject_claim`). Naming `members` on the line grants the
-  whole table.
-- These columns are a contract between Ordo releases (owner, 2026-11-23).
-  A release that changes one keeps it granted for `editions.load_window`
-  (12 months), so a reader on an older release keeps matching `$caller`.
-- `SELECT` on `$ordorelease` (`release`): the Ordo release this deployment
-  last started under. `ordo release-check` on the reader names it.
-
-A table taken off the line is revoked at the next apply or start. So is
-everything, when the whole line is removed: `$readergrant` remembers which
-roles were granted. A table a migration creates is granted by the same
-apply. Nothing is sent when the grants already match.
-
-**Refusals in the app being read.** The start, and the apply, are refused
-when:
-
-- `ORDO_READER_<NAME>_ROLE` is unset, or names a role the database server
-  does not have.
-- It names this deployment's own role, or a role that is a member of it.
-  Grants then decide nothing. For local work, `ORDO_PEER_SHARED_ROLE=on`
-  allows it and makes no grants.
-- The grants do not take: this deployment's role must own its schema and
-  its tables.
-
-**Refusals in the reader.** Before it reads a peer, a deployment checks
-its own role:
-
-- It must hold `SELECT` on every peer table an external reads, and on the
-  sign-in columns when it uses `$caller` on that peer. If not, the start is
-  refused with the line to add to the peer's file, for example
-  `reader <name> reads notes`, and the setting to set there,
-  `ORDO_READER_<NAME>_ROLE=<this role>`. The reader cannot know the
-  nickname the peer gives it, so `<name>` is the peer's choice.
-- It must not read the peer without a grant: the same role as the peer, the
-  owner of the peer's schema or tables, a member of that owner, a
-  superuser, or a member of `pg_read_all_data`. Such a start is refused
-  unless `ORDO_PEER_SHARED_ROLE=on`. `ordo dev` turns that on, since it runs
-  every app as one role.
+Gone with them: `ORDO_PEER_<NAME>_SCHEMA` for an Ordo peer,
+`ORDO_READER_<NAME>_ROLE`, `ORDO_PEER_SHARED_ROLE`, the Postgres grants
+(`$readergrant`), `$caller` resolved through the peer's sign-in tables
+(`$peerlink`), the release column granted to readers (`$ordorelease`), and
+the refusals `seal_read_by_reader` and `peer_tenant_database`. A plain
+external of a system that is not Ordo keeps its schema and
+`ORDO_EXTERNAL_<SCHEMA>_SCHEMA`.
 
 ### `grant`: what another deployment may call through this one's door [ruled 2026-11-26, built G1 to G7]
 
@@ -2775,8 +2638,7 @@ this deployment's rules, and no key leaves it. A derived `std.<entity>.get`
 or `.list` carries sealed fields only when the entity says `std sealed`
 (§3), so a consumer reads them through a grant only then. Without it the
 consumer's read is refused naming the field. A seal of a field a grant
-opens is not refused; one a `reader` line reads still is
-(`seal_read_by_reader`, until G8).
+opens is not refused; the plan names the grant as a warning.
 
 **The consumer's id** is never in the file. The deployment owner sets
 `ORDO_CONSUMER_NOTE_VIEWER_CLIENT`, the name upper-cased, to the consumer's

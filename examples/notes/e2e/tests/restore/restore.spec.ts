@@ -1,12 +1,12 @@
 /**
  * Restore across versions (plan-versions.md increment 17, §2.9).
  *
- * Ada's tenant has a database of its own. It starts on notes v2 (0.2.0)
+ * Ada's tenant has a database of its own. It starts on notes v2 (0.2.1)
  * while the stack serves v3 (0.3.0), and she writes 3 notes. A snapshot of
  * her database is taken. Her tenant moves to v3, and she writes a 4th
  * note. Then her database is restored from the snapshot, and
  * `ordo restore --record --tenant` reads the version the restored data is
- * at: her pin follows it to 0.2.0, cause `restore`. Her page shows the 3
+ * at: her pin follows it to 0.2.1, cause `restore`. Her page shows the 3
  * notes and not the 4th, under v2 (v3's `starredNotes` is not hers).
  * Then she moves again, to v3, and `starredNotes` answers.
  *
@@ -160,14 +160,14 @@ test('a snapshot taken on v2 restores beside tenants on v3, serves v2 with its n
   // v3 serves after the `v3` project. Run alone (`--no-deps`), v2 then v3
   // are applied here, so both are stored.
   if (servingVersion() !== '0.3.0') {
-    ensureServing(stack().programV2, '0.2.0');
+    ensureServing(stack().programV2, '0.2.1');
     applyProgram(stack().programV3);
   }
   const d = await developer(browser);
   dev = d;
 
   // Her tenant starts on v2 while the stack serves v3.
-  ok(d.ordo(['versions', 'set', 'new-tenant', '0.2.0', '--reason', 'a tenant on v2 to snapshot', ...door()]));
+  ok(d.ordo(['versions', 'set', 'new-tenant', '0.2.1', '--reason', 'a tenant on v2 to snapshot', ...door()]));
   const ada = await owner(unique('Ada'));
   try {
     ok(d.ordo(['versions', 'set', 'new-tenant', '--clear', '--reason', 'Ada has her tenant', ...door()]));
@@ -210,7 +210,7 @@ test('a snapshot taken on v2 restores beside tenants on v3, serves v2 with its n
       );
       console.log(out);
       expect(out).toContain(`database `);
-      expect(out).toContain('version PINNED 0.3.0 -> 0.2.0 · cause restore');
+      expect(out).toContain('version PINNED 0.3.0 -> 0.2.1 · cause restore');
     });
 
     await test.step('her page shows the 3 notes from the snapshot, under v2', async () => {

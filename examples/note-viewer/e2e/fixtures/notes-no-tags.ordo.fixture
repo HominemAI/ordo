@@ -63,15 +63,13 @@
 
 domain notes @ 0.3.3
 
-# note_viewer (examples/note-viewer) is a second deployment that reads these
-# notes. v3 changes nothing it reads, so it reads through the move. This
-# line is the notes app's consent: its database role, named by
-# ORDO_READER_NOTE_VIEWER_ROLE, gets SELECT on these two tables and the
-# sign-in columns, and nothing else. Postgres refuses it every other table.
-# Which rows a viewer's user sees is the viewer's own guard. It follows this
-# file's acl: a person sees a note they hold a level on. A note tagged
-# `public` is shown to anyone there.
-reader note_viewer reads notes, notesAccess
+# note_viewer (examples/note-viewer) reads these notes through this
+# deployment's door. Without `tags` there is no public list to give it, so
+# only `myNotes` is granted, and a consumer that reads `tags` from it is
+# refused, naming the field.
+grant note_viewer as itself {
+  myNotes
+}
 
 entity notes {
   # 0.3.1: was `title`. The rename landed in 0.3.2.

@@ -63,7 +63,7 @@ test('a rollout moves 3 tenants through a rename under live writes, and a rollba
   testInfo.setTimeout(600_000);
   // After `moves`, production serves 0.3.4. Run alone, v3 is applied.
   if (!['0.3.0', '0.3.4'].includes(servingVersion() ?? '')) {
-    ensureServing(stack().programV2, '0.2.0');
+    ensureServing(stack().programV2, '0.2.1');
     applyProgram(stack().programV3);
   }
   const from = servingVersion() ?? '';

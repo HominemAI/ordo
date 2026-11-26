@@ -180,7 +180,7 @@ async fn a_declared_rename_renders_as_a_rename_and_keeps_every_value() {
     )
     .await;
 
-    let r = evolve::render(&registry, "1.0.0", "1.1.0", &Choices::default(), 1)
+    let r = evolve::render(&registry, "1.0.0", "1.1.0", &Choices::default())
         .await
         .expect("a declared rename renders");
     let changes = r.receipt["changes"].as_array().unwrap();
@@ -229,7 +229,7 @@ async fn a_declared_rename_renders_as_a_rename_and_keeps_every_value() {
 
     // The same edit without `prev` is a new required field and a removed
     // one: refused, since nothing says where the values come from.
-    let without = errors(evolve::render(&registry, "1.0.0", "1.2.0", &Choices::default(), 1).await);
+    let without = errors(evolve::render(&registry, "1.0.0", "1.2.0", &Choices::default()).await);
     assert!(
         without.iter().any(|(c, _, _)| c == "not_class_a"),
         "{without:?}"
@@ -465,7 +465,7 @@ async fn writes_during_the_rename_reach_the_new_column() {
 
     // The reverse removes a trigger a build before 11a made, before it
     // copies back.
-    let r = evolve::render(&registry, "1.0.0", "1.1.0", &Choices::default(), 1)
+    let r = evolve::render(&registry, "1.0.0", "1.1.0", &Choices::default())
         .await
         .expect("renders");
     let lines = evolve::receipt_lines(&r.receipt).join("\n");
@@ -533,7 +533,7 @@ async fn the_plan_checks_refuse_with_the_fix_and_a_landed_mark_warns() {
     ];
     for (v, fields, class) in cases {
         store(&pool, &notes(v, fields)).await;
-        let errs = errors(evolve::render(&pool, "1.0.0", v, &Choices::default(), 1).await);
+        let errs = errors(evolve::render(&pool, "1.0.0", v, &Choices::default()).await);
         let hit = errs.iter().find(|(c, _, _)| c == class);
         let (_, why, fix) = hit.unwrap_or_else(|| panic!("{v}: no {class} in {errs:?}"));
         assert!(!why.is_empty() && !fix.is_empty(), "{v}: {why} / {fix}");
@@ -561,7 +561,7 @@ async fn the_plan_checks_refuse_with_the_fix_and_a_landed_mark_warns() {
         ),
     )
     .await;
-    let r = evolve::render(&pool, "3.0.0", "3.1.0", &Choices::default(), 1).await;
+    let r = evolve::render(&pool, "3.0.0", "3.1.0", &Choices::default()).await;
     // 3.0.0 to 3.1.0 makes `body` required, which is refused on its own;
     // the stale mark is never the reason.
     if let Err(EvolveRefusal::Errors { errors, .. }) = &r {
@@ -578,7 +578,7 @@ async fn the_plan_checks_refuse_with_the_fix_and_a_landed_mark_warns() {
         ),
     )
     .await;
-    let r = evolve::render(&pool, "3.0.0", "3.2.0", &Choices::default(), 1)
+    let r = evolve::render(&pool, "3.0.0", "3.2.0", &Choices::default())
         .await
         .expect("a stale mark renders");
     assert!(
@@ -632,7 +632,7 @@ async fn an_entity_rename_renders_as_one_with_its_reverse() {
     let (_pg, pool) = empty("ordo_prev_entity").await;
     store(&pool, &pinned("1.0.0", "note", false)).await;
     store(&pool, &pinned("1.1.0", "memo", true)).await;
-    let r = evolve::render(&pool, "1.0.0", "1.1.0", &Choices::default(), 1)
+    let r = evolve::render(&pool, "1.0.0", "1.1.0", &Choices::default())
         .await
         .expect("an entity rename renders");
     assert_eq!(
@@ -700,7 +700,7 @@ async fn an_entity_rename_is_refused_when_sealed_reshaped_or_under_acl() {
         let y = format!("1.{i}.1");
         store(&pool, &src(&x, "note", fields, "")).await;
         store(&pool, &src(&y, "memo (prev: note)", fields, extra)).await;
-        let errs = errors(evolve::render(&pool, &x, &y, &Choices::default(), 1).await);
+        let errs = errors(evolve::render(&pool, &x, &y, &Choices::default()).await);
         let (_, why, fix) = errs
             .iter()
             .find(|(c, _, _)| c == class)

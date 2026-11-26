@@ -61,17 +61,13 @@
 //! `edition` check, naming `ordo fix`. One inside the window is a note,
 //! marked `soon` when the window ends within 3 months of this release.
 //!
-//! **Peers and readers** ([`neighbours`], `plan-evolution-federation.md`
-//! §5, owner ruling 2026-11-23, Q16). Each peer a checked version names is
-//! listed with the Ordo release it last started under (its `$ordorelease`,
-//! granted to its readers), and each reader this deployment grants to is
-//! listed by its role and, when it has granted it (owner ruling 2026-11-25,
-//! `ordo_exec::peer::grant_release_to_peers`: the `release` column of its
-//! `$ordorelease`, to the role that owns this deployment's schema), the
-//! Ordo release it runs. Neither fails the check: the sign-in
-//! columns a reader reads are a contract (`ordo_exec::sign_in_contract`),
-//! kept for `editions.load_window` after a release changes one. A column
-//! this release retires is named with the date it stops being granted.
+//! **Peers and consumers** ([`neighbours`], `plan-evolution-federation.md`
+//! §5, owner ruling 2026-11-23, Q16). Each holder a checked version's
+//! `peer` block names is listed with the Ordo release it answered at this
+//! deployment's last apply, and each consumer that recorded a use here with
+//! the release it sent (`peer_ops::HOLDERS_TABLE`, `peer_ops::USES_TABLE`).
+//! Both came through the door; neither fails the check. Deployments on 2
+//! releases talk only through the door, whose ops are the contract.
 //!
 //! Function code is checked as the host loads it, by hash and table; the
 //! JavaScript is compiled by the engine at each call.
@@ -168,23 +164,25 @@ pub struct Report {
     /// A name the set holds with no stored row: a setting or a target that
     /// names a version this deployment does not have.
     pub missing: Vec<(String, String)>,
-    /// Each peer and reader, with the release it runs when that is known.
+    /// Each peer and consumer, with the release it runs when that is known.
     pub neighbours: Vec<Neighbour>,
 }
 
-/// A peer this deployment reads, or a reader that reads it
+/// A holder this deployment calls, or a consumer that calls it
 /// (`plan-evolution-federation.md` §5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Neighbour {
-    /// `peer` or `reader`.
+    /// `peer` or `consumer`.
     pub kind: &'static str,
-    /// The nickname its line gives it.
+    /// A peer's nickname, or the name of the grant tied to a consumer (its
+    /// handle when no grant names it).
     pub name: String,
-    /// A peer's schema, or a reader's database role.
+    /// Its handle at the identity service.
     pub at: String,
-    /// The Ordo release it last started under, when this deployment can
-    /// read it.
+    /// The Ordo release it said it runs, when it has said.
     pub release: Option<String>,
+    /// When it said so, unix seconds; 0 when it has not.
+    pub recorded_at: u64,
     /// Why the release is not known, when it is not.
     pub unknown: String,
 }
@@ -192,10 +190,14 @@ pub struct Neighbour {
 impl Neighbour {
     /// One line for a person.
     pub fn line(&self, this: &str) -> String {
-        let place = if self.kind == "peer" {
-            format!("schema `{}`", self.at)
+        let place = if self.recorded_at > 0 {
+            format!(
+                "`{}`, as of {}",
+                self.at,
+                crate::versions::utc_minute(self.recorded_at)
+            )
         } else {
-            format!("role `{}`", self.at)
+            format!("`{}`", self.at)
         };
         match &self.release {
             Some(r) if r == this => {
@@ -262,6 +264,7 @@ impl Report {
                 "name": n.name,
                 "at": n.at,
                 "release": n.release,
+                "recordedAt": n.recorded_at,
                 "otherRelease": n.release.as_ref().is_some_and(|r| r != &self.release),
                 "unknown": n.unknown,
             })).collect::<Vec<_>>(),
@@ -344,139 +347,83 @@ impl Report {
 
 // ── reading, tolerant of any earlier release's control database ─────────
 
-// ── peers and readers ───────────────────────────────────────────────────
+// ── peers and consumers ─────────────────────────────────────────────────
 
-/// The peers and readers section: each one, then what the contract keeps.
-/// Empty when there are none.
+/// The peers and consumers section. Empty when there are none.
 pub fn neighbour_lines(neighbours: &[Neighbour], this: &str) -> Vec<String> {
-    use ordo_exec::sign_in_contract as c;
-    let retired = c::retired_by(this);
-    if neighbours.is_empty() && retired.is_empty() {
+    if neighbours.is_empty() {
         return Vec::new();
     }
-    let mut out = vec![format!(
-        "peers and readers: the sign-in columns a reader reads stay readable for {} months \
-         after a release changes one (`editions.load_window`)",
-        ordo_plan::edition::LOAD_WINDOW_MONTHS
-    )];
+    let mut out = vec![
+        "peers and consumers: each reaches this deployment only through its door, so a \
+         neighbour on another release changes nothing here"
+            .to_string(),
+    ];
     for n in neighbours {
         out.push(format!("  {}", n.line(this)));
-    }
-    for col in retired {
-        let r = col.retired.expect("retired");
-        let now = r
-            .replaced_by
-            .map(|n| format!(" (now `{n}`)"))
-            .unwrap_or_default();
-        let until = c::kept_until(&r)
-            .map(|d| d.to_string())
-            .unwrap_or_else(|| "the window's end".into());
-        out.push(format!(
-            "  this release retires `{}.{}`{now}; every reader is still granted it until \
-             Ordo releases dated {until}",
-            col.table, col.column
-        ));
     }
     out
 }
 
-/// **Each peer and each reader** of this deployment, and the release each
-/// runs when it can be read (`plan-evolution-federation.md` §5, Q16).
+/// **Each holder and each consumer** of this deployment, and the release
+/// each said it runs (`plan-evolution-federation.md` §5, Q16).
 ///
-/// Peers come from `schemas`, the checked versions' compiled programs: a
-/// peer's schema is its `ORDO_PEER_<NAME>_SCHEMA`, read through `lookup`,
-/// and its release from its `$ordorelease`, which it grants to its
-/// readers. Readers come from `$readergrant`, the roles this deployment
-/// grants to.
+/// Holders come from `schemas`, the checked versions' compiled programs:
+/// each `peer` block, with what its holder answered at this deployment's
+/// last apply. Consumers come from the uses recorded here.
 pub async fn neighbours(
     pool: &Pool,
     schemas: &[ordo_schema::Schema],
-    lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<Vec<Neighbour>, PoolError> {
-    use ordo_exec::sign_in_contract::{release_of, PeerRelease};
     let mut out = Vec::new();
-    let peers: BTreeSet<&String> = schemas.iter().flat_map(|s| s.peers.iter()).collect();
+    let peers: BTreeSet<&String> = schemas
+        .iter()
+        .flat_map(|s| s.peer_uses.iter().map(|p| &p.name))
+        .collect();
+    let seen = crate::peer_ops::holders(pool).await?;
     for name in peers {
-        let var = ordo_exec::peer::schema_env(name);
-        let Some(pg) = lookup(&var).filter(|v| !v.trim().is_empty()) else {
-            out.push(Neighbour {
+        out.push(match seen.iter().find(|h| &h.peer == name) {
+            Some(h) => Neighbour {
                 kind: "peer",
                 name: name.clone(),
-                at: "?".into(),
+                at: h.handle.clone(),
+                release: Some(h.release.clone()).filter(|r| !r.is_empty()),
+                recorded_at: h.recorded_at,
+                unknown: "it named no release".into(),
+            },
+            None => Neighbour {
+                kind: "peer",
+                name: name.clone(),
+                at: name.clone(),
                 release: None,
-                unknown: format!(
-                    "`{var}` is not set where the check runs, so its release is not read; run \
-                     the check with the deployment's own settings"
-                ),
-            });
-            continue;
-        };
-        let (release, unknown) = match release_of(pool, pg.trim()).await? {
-            PeerRelease::Known(r) => (Some(r), String::new()),
-            PeerRelease::Unrecorded => (
-                None,
-                format!("an Ordo release before {}, which records none", release()),
-            ),
-            PeerRelease::NotGranted => (
-                None,
-                "its release is not granted to this deployment yet; the peer grants it at \
-                 its next start"
-                    .to_string(),
-            ),
-        };
-        out.push(Neighbour {
-            kind: "peer",
-            name: name.clone(),
-            at: pg.trim().to_string(),
-            release,
-            unknown,
+                recorded_at: 0,
+                unknown: "no apply has recorded a use there yet; it says its release when \
+                          the next `ordo apply` does"
+                    .into(),
+            },
         });
     }
-    for r in rows_or_none(
-        pool,
-        r#"SELECT "reader", "role" FROM "$readergrant" ORDER BY 1, 2"#,
-    )
-    .await?
-    {
-        let (Some(name), Some(role)) = (col(&r, 0), col(&r, 1)) else {
-            continue;
-        };
-        // The reader grants its release column to the role that owns this
-        // deployment's schema (owner ruling 2026-11-25), so its schema is
-        // the one its role owns a `$ordorelease` in.
-        let own = pool.schema().to_string();
-        let schemas: Vec<String> = ordo_exec::sign_in_contract::schemas_owned_by(pool, &role)
-            .await?
-            .into_iter()
-            .filter(|s| *s != own)
-            .collect();
-        let (found, unknown) = match schemas.first() {
-            None => (
-                None,
-                "it records no release this deployment can find; it records one at its \
-                 next start"
-                    .to_string(),
-            ),
-            Some(pg) => match release_of(pool, pg).await? {
-                PeerRelease::Known(r) => (Some(r), String::new()),
-                PeerRelease::Unrecorded => (
-                    None,
-                    format!("an Ordo release before {}, which records none", release()),
-                ),
-                PeerRelease::NotGranted => (
-                    None,
-                    "it has not granted its release to this deployment yet; it grants it \
-                     at its next start"
-                        .to_string(),
-                ),
-            },
-        };
+    // The grant tied to each consumer names it, as the holder's plan does.
+    let tied: BTreeMap<String, String> = schemas
+        .iter()
+        .flat_map(|s| s.grants.iter())
+        .filter(|g| !g.provider)
+        .filter_map(|g| {
+            let id = std::env::var(crate::consumer_grants::client_env(&g.name.name)).ok()?;
+            Some((id.trim().to_string(), g.name.name.clone()))
+        })
+        .collect();
+    for u in crate::peer_ops::recorded(pool).await? {
         out.push(Neighbour {
-            kind: "reader",
-            name,
-            at: role,
-            release: found,
-            unknown,
+            kind: "consumer",
+            name: tied
+                .get(&u.consumer)
+                .cloned()
+                .unwrap_or_else(|| u.consumer.clone()),
+            at: u.consumer.clone(),
+            release: u.release.clone(),
+            recorded_at: u.recorded_at,
+            unknown: "it recorded its use under an Ordo release that did not send its own".into(),
         });
     }
     Ok(out)
@@ -845,7 +792,7 @@ pub async fn check_version(
 
     // 5. The shape gate over an empty shadow of the stored DDL.
     let mut gated = compiled;
-    match ordo_exec::peer::resolve(&mut gated.schema, pool.schema()) {
+    match ordo_exec::peer::resolve(&mut gated.schema) {
         Ok(()) => {
             if let Err(e) = crate::shape::verify_registry(&gated, cfg, &stored.ddl).await {
                 failures.push(fail("shape", e.to_string()));
@@ -947,7 +894,7 @@ pub async fn run(pool: &Pool, cfg: &PoolConfig) -> Result<Report, PoolError> {
         }
         let why = match crate::evolve::parse_options(&options) {
             Err(e) => Some(format!("its options do not read: {e}")),
-            Ok(choices) => match crate::evolve::render_stored(pool, a, b, &choices, 0).await {
+            Ok(choices) => match crate::evolve::render_stored(pool, a, b, &choices).await {
                 Ok(r) if r.digest == digest => None,
                 Ok(r) => Some(format!(
                     "the stored plan from `{from}` to `{to}` renders to {} under Ordo {}, not \
@@ -967,14 +914,14 @@ pub async fn run(pool: &Pool, cfg: &PoolConfig) -> Result<Report, PoolError> {
             }
         }
     }
-    // The peers every checked version that compiles names, and the
-    // readers this deployment grants to.
+    // The holders every checked version that compiles calls, and the
+    // consumers that call this deployment.
     let schemas: Vec<ordo_schema::Schema> = artifacts
         .values()
         .filter_map(|a| compile_stored(a).ok())
         .map(|f| f.schema)
         .collect();
-    report.neighbours = neighbours(pool, &schemas, ordo_exec::schema_setting).await?;
+    report.neighbours = neighbours(pool, &schemas).await?;
     Ok(report)
 }
 
@@ -1203,16 +1150,18 @@ mod tests {
                 Neighbour {
                     kind: "peer",
                     name: "journal".into(),
-                    at: "journal_db".into(),
+                    at: "journal".into(),
                     release: Some("9.8.0".into()),
+                    recorded_at: 1_800_000_000,
                     unknown: String::new(),
                 },
                 Neighbour {
-                    kind: "reader",
-                    name: "viewer".into(),
-                    at: "viewer_app".into(),
+                    kind: "consumer",
+                    name: "note_viewer".into(),
+                    at: "viewer".into(),
                     release: None,
-                    unknown: "not visible".into(),
+                    recorded_at: 1_800_000_000,
+                    unknown: "not sent".into(),
                 },
             ],
         };
@@ -1222,16 +1171,18 @@ mod tests {
         assert!(text.contains("spc_a (Acme)"), "{text}");
         assert!(text.contains("--override --reason"), "{text}");
         assert!(text.contains("ok    0.2.0"), "{text}");
-        // Peers and readers are named, and never fail the check.
+        // Peers and consumers are named, and never fail the check.
         assert!(
-            text.contains("peer journal (schema `journal_db`): Ordo 9.8.0, ANOTHER RELEASE"),
+            text.contains(
+                "peer journal (`journal`, as of 2027-01-15 08:00 UTC): Ordo 9.8.0, ANOTHER RELEASE"
+            ),
             "{text}"
         );
         assert!(
-            text.contains("reader viewer (role `viewer_app`): not visible"),
+            text.contains("consumer note_viewer (`viewer`, as of 2027-01-15 08:00 UTC): not sent"),
             "{text}"
         );
-        assert!(text.contains("`editions.load_window`"), "{text}");
+        assert!(text.contains("only through its door"), "{text}");
         assert_eq!(r.to_json()["result"], "fail");
         assert_eq!(r.to_json()["neighbours"][0]["otherRelease"], true);
     }

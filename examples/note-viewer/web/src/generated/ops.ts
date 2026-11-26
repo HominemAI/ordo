@@ -17,9 +17,6 @@ import {
   spec_std$entries$count,
   spec_std$entries$get,
   spec_std$entries$list,
-  spec_std$entryAccess$count,
-  spec_std$entryAccess$get,
-  spec_std$entryAccess$list,
   spec_std$published$count,
   spec_std$published$get,
   spec_std$published$list,
@@ -275,141 +272,6 @@ export function std$entries$list(client: OrdoClient): ReadCall<StdEntriesListRow
 }
 
 /**
- * One row of `std.entryAccess.count`.
- */
-export interface StdEntryAccessCountRow {
-  /** `int` */
-  readonly n: number;
-}
-
-/** `std.entryAccess.count` takes no parameters. */
-export type StdEntryAccessCountParams = Record<never, never>;
-
-/**
- * The fields a `.where` on `std.entryAccess.count` may test.
- *
- * One per output in `refine.fields`, typed as the row types it. An open field takes all 8 operators; a sealed one takes `eq` and `in`, because a sealed condition rides the blind index. An output that is not here is not refinable, and naming it does not compile.
- */
-export type StdEntryAccessCountFields = Record<never, never>;
-
-/**
- * The refusals `std.entryAccess.count` declares.
- *
- * The op's own set, not the whole table. The door has refusals that precede any op (`missing_space`, `caller_supplied`, `delegation_required`), so a caught refusal outside this union is not a bug — it is the door speaking before the op did, and `Refusal.declared` says which happened.
- */
-export type StdEntryAccessCountRefusal = Extract<RefusalClass, 'access_denied' | 'invalid_cursor' | 'invalid_refinement' | 'method_mismatch' | 'refinement_unbounded' | 'unknown_param' | 'version_skew'>;
-
-/**
- * `std.entryAccess.count` — read.
- * Cost class `sql`, rows: <= 1.
- * Terminates in `.fetch()` / `.live()`.
- * `.live()` is **not generated**: the descriptor carries no log position on the read path, so a subscription cannot be ordered against its own first frame. See the package README.
- * Narrow it with `.where(v => …)` and `.pick(…)` before the verb.
- */
-export function std$entryAccess$count(client: OrdoClient): SingleReadCall<StdEntryAccessCountRow, StdEntryAccessCountRefusal, StdEntryAccessCountFields> {
-  return new SingleReadCall(client, spec_std$entryAccess$count, {});
-}
-
-/**
- * One row of `std.entryAccess.get`.
- *
- * Row identity: `entryAccess`. `synthetic_rows` is false.
- */
-export interface StdEntryAccessGetRow {
-  /** `id` */
-  readonly id: Ids.EntryAccessId;
-  /** `id` */
-  readonly entry: Ids.EntriesId;
-  /** `text` */
-  readonly member: string;
-}
-
-/**
- * The parameters of `std.entryAccess.get`.
- *
- * A type alias rather than an `interface`, deliberately: only an object type alias carries an implicit index signature, and the client's `request` takes the parameters as a record. An `interface` here would need a cast at every generated call site — a hole in exactly the code nobody reviews.
- */
-export type StdEntryAccessGetParams = {
-  /** `id` */
-  readonly id: Ids.EntryAccessId;
-};
-
-/**
- * The fields a `.where` on `std.entryAccess.get` may test.
- *
- * One per output in `refine.fields`, typed as the row types it. An open field takes all 8 operators; a sealed one takes `eq` and `in`, because a sealed condition rides the blind index. An output that is not here is not refinable, and naming it does not compile.
- */
-export interface StdEntryAccessGetFields {
-  readonly id: OpenField<'id', Ids.EntryAccessId>;
-  readonly entry: OpenField<'entry', Ids.EntriesId>;
-  readonly member: OpenField<'member', string>;
-}
-
-/**
- * The refusals `std.entryAccess.get` declares.
- *
- * The op's own set, not the whole table. The door has refusals that precede any op (`missing_space`, `caller_supplied`, `delegation_required`), so a caught refusal outside this union is not a bug — it is the door speaking before the op did, and `Refusal.declared` says which happened.
- */
-export type StdEntryAccessGetRefusal = Extract<RefusalClass, 'access_denied' | 'invalid_cursor' | 'invalid_param' | 'invalid_refinement' | 'method_mismatch' | 'missing_param' | 'refinement_unbounded' | 'unknown_param' | 'version_skew'>;
-
-/**
- * `std.entryAccess.get` — read.
- * Cost class `sql`, rows: <= 1.
- * Terminates in `.fetch()` / `.live()` / `.pages()`.
- * `.live()` is **not generated**: the descriptor carries no log position on the read path, so a subscription cannot be ordered against its own first frame. See the package README.
- * Narrow it with `.where(v => …)` and `.pick(…)` before the verb.
- */
-export function std$entryAccess$get(client: OrdoClient, params: StdEntryAccessGetParams): ReadCall<StdEntryAccessGetRow, StdEntryAccessGetRefusal, StdEntryAccessGetFields> {
-  return new ReadCall(client, spec_std$entryAccess$get, params);
-}
-
-/**
- * One row of `std.entryAccess.list`.
- *
- * Row identity: `entryAccess`. `synthetic_rows` is false.
- */
-export interface StdEntryAccessListRow {
-  /** `id` */
-  readonly id: Ids.EntryAccessId;
-  /** `id` */
-  readonly entry: Ids.EntriesId;
-  /** `text` */
-  readonly member: string;
-}
-
-/** `std.entryAccess.list` takes no parameters. */
-export type StdEntryAccessListParams = Record<never, never>;
-
-/**
- * The fields a `.where` on `std.entryAccess.list` may test.
- *
- * One per output in `refine.fields`, typed as the row types it. An open field takes all 8 operators; a sealed one takes `eq` and `in`, because a sealed condition rides the blind index. An output that is not here is not refinable, and naming it does not compile.
- */
-export interface StdEntryAccessListFields {
-  readonly id: OpenField<'id', Ids.EntryAccessId>;
-  readonly entry: OpenField<'entry', Ids.EntriesId>;
-  readonly member: OpenField<'member', string>;
-}
-
-/**
- * The refusals `std.entryAccess.list` declares.
- *
- * The op's own set, not the whole table. The door has refusals that precede any op (`missing_space`, `caller_supplied`, `delegation_required`), so a caught refusal outside this union is not a bug — it is the door speaking before the op did, and `Refusal.declared` says which happened.
- */
-export type StdEntryAccessListRefusal = Extract<RefusalClass, 'access_denied' | 'invalid_cursor' | 'invalid_refinement' | 'method_mismatch' | 'refinement_unbounded' | 'unknown_param' | 'version_skew'>;
-
-/**
- * `std.entryAccess.list` — read.
- * Cost class `sql`, rows: unbounded (pageable).
- * Terminates in `.fetch()` / `.live()` / `.pages()`.
- * `.live()` is **not generated**: the descriptor carries no log position on the read path, so a subscription cannot be ordered against its own first frame. See the package README.
- * Narrow it with `.where(v => …)` and `.pick(…)` before the verb.
- */
-export function std$entryAccess$list(client: OrdoClient): ReadCall<StdEntryAccessListRow, StdEntryAccessListRefusal, StdEntryAccessListFields> {
-  return new ReadCall(client, spec_std$entryAccess$list, {});
-}
-
-/**
  * One row of `std.published.count`.
  */
 export interface StdPublishedCountRow {
@@ -457,8 +319,6 @@ export interface StdPublishedGetRow {
   readonly title: string;
   /** `text` */
   readonly body: string;
-  /** `json` */
-  readonly tags: JsonValue;
   /** `datetime` */
   readonly created: string;
 }
@@ -515,8 +375,6 @@ export interface StdPublishedListRow {
   readonly title: string;
   /** `text` */
   readonly body: string;
-  /** `json` */
-  readonly tags: JsonValue;
   /** `datetime` */
   readonly created: string;
 }
@@ -565,9 +423,6 @@ export const ops = {
   'std.entries.count': std$entries$count,
   'std.entries.get': std$entries$get,
   'std.entries.list': std$entries$list,
-  'std.entryAccess.count': std$entryAccess$count,
-  'std.entryAccess.get': std$entryAccess$get,
-  'std.entryAccess.list': std$entryAccess$list,
   'std.published.count': std$published$count,
   'std.published.get': std$published$get,
   'std.published.list': std$published$list,

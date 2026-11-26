@@ -60,11 +60,6 @@ fi
    INSERT INTO \"\$environments\" (\"name\", \"pos\", \"own\", \"actor\", \"reason\", \"at\") \
      SELECT 'dev', 1, true, 'notes-dev', 'this deployment is dev', extract(epoch from now())::bigint \
      WHERE NOT EXISTS (SELECT 1 FROM \"\$environments\")"
-# Notes v2's `reader note_viewer` line names a role to grant two tables to.
-# It only has to exist here (examples/note-viewer/README.md runs the pair).
-"$pgbin/psql" -h "$socket" -p "$pgport" -U ordo -d notes -qc \
-  "DO \$\$ BEGIN CREATE ROLE note_viewer NOLOGIN; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END \$\$"
-export ORDO_READER_NOTE_VIEWER_ROLE=note_viewer
 
 # ── The settings ───────────────────────────────────────────────────────────
 export ORDO_PG_HOST="$socket" ORDO_PG_PORT="$pgport" ORDO_PG_USER=ordo ORDO_PG_DB=notes

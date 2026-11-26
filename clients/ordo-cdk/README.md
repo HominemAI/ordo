@@ -230,13 +230,15 @@ is `sealed` or `indexed` (`external_sealed`), `owned` (`external_owned`),
 (`external_unsupported`). `synth` refuses a ref from an external to an
 entity, or to a name no external in the call declares (`external_ref_to_native`).
 
-**Covered: peers.** `peer('journal')` names another Ordo deployment in the
-same database. An external reads one of its tables with `{ peer: journal,
-table: 'notes', shared: true }` in place of `schema`. Pass the peer to `synth`
-before the externals that read it:
+**Covered: peers.** `peer('journal', ['std.notes.list'])` names another Ordo
+deployment and the ops of it this one calls, through its door. An external
+reads one of its tables with `{ peer: journal, table: 'notes', shared: true }`
+in place of `schema`: each read calls `std.notes.list`, or the op of the list
+named like the table. Pass the peer to `synth` before the externals that read
+it:
 
 ```ts
-const journal = peer('journal');
+const journal = peer('journal', ['std.notes.list']);
 const entries = external('entries', {
   id: key.text('id'),
   title: t.text().column('title'),
@@ -246,20 +248,14 @@ const entries = external('entries', {
 synth(journal, entries);
 ```
 
-This prints `peer journal` and `external entries from journal.notes shared
-{ … }`. The schema is never in the file: the deployment owner sets
-`ORDO_PEER_JOURNAL_SCHEMA`. `synth` refuses an external whose peer it was not
-handed first (`peer_undeclared`), a peer no external reads (`peer_unused`) and
-a peer passed twice (`peer_name`). `peer()` refuses a name that is not
-lowercase letters and digits (`peer_name`).
-
-**Covered: readers.** The app being read names who may read it, and which
-tables, with `reader('note_viewer', [notes, 'notesAccess'])`. Each table is an
-entity passed to `synth`, or `members`. This prints
-`reader note_viewer reads notes, notesAccess`. The role is never in the file:
-the deployment owner sets `ORDO_READER_NOTE_VIEWER_ROLE`. `synth` refuses a
-table that is not an entity of the file (`reader_unknown_table`) and a reader
-passed twice (`reader_line`).
+This prints `peer journal { std.notes.list }` and `external entries from
+journal.notes shared { … }`. The door's address is never in the file: the
+deployment owner sets `ORDO_PEER_JOURNAL_URL`. `synth` refuses an external
+whose peer it was not handed first (`peer_undeclared`) and a peer passed twice
+(`peer_name`). `peer()` refuses a name that is not lowercase letters and
+digits (`peer_name`), and no ops, an op twice or a pattern (`peer_block`).
+The one-line `peer('journal')` and `reader()` were the shared-database path,
+removed in G8 (`plan-federation-grants.md` §8).
 
 **Covered: grants** (built at G1, checked on the door since G3).
 `grant('note_viewer', ['std.notes.get', '/add.*/', '!addAdmin'])` prints a

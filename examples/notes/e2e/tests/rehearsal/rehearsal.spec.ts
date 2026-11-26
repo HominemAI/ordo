@@ -7,10 +7,10 @@
  * `ordo` command in to each. Every command goes through a door.
  *
  * The step starts from the version production serves. After `seal` that is
- * 0.3.4 (notes.body sealed, notes off the reader line), and the step goes to
+ * 0.3.4 (notes.body sealed, notes off the grant to note_viewer), and the step goes to
  * 0.3.5, which adds an optional `mood`. Run alone (`--no-deps`), v3 is
- * applied and the step is 0.3.0 to 0.3.3, which takes notes off the reader
- * line. Version numbers only rise, so it runs after `seal`, last.
+ * applied and the step is 0.3.0 to 0.3.3, which takes notes off the grant to
+ * note_viewer. Version numbers only rise, so it runs after `seal`, last.
  *
  * 1. Production stores the new version, not activated, before staging
  *    joins its chain.
@@ -43,7 +43,7 @@ import { join } from 'node:path';
 import { expect, test } from '@playwright/test';
 import { developerOfTwo, type TwoDeployments } from '../developer.js';
 import { owner } from '../people.js';
-import { addNote, applyProgram, ensureServing, servingVersion, stack, unique } from '../support.js';
+import { addNote, applyProgram, ensureServing, servingVersion, stack, unique, OFF_THE_GRANT } from '../support.js';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -69,10 +69,10 @@ function okOrAlready(r: { code: number; out: string; err: string }): void {
 
 /**
  * Notes v3 at `version`, beside its `fn` code, written as `seal`'s `v3As`
- * writes it: `sealed` seals notes.body, `noReader` takes notes off the
- * reader line. `mood` adds an optional field.
+ * writes it: `sealed` seals notes.body, `offGrant` takes notes off the
+ * grant to note_viewer. `mood` adds an optional field.
  */
-function v3As(version: string, sealed: boolean, noReader: boolean, mood: boolean): string {
+function v3As(version: string, sealed: boolean, offGrant: boolean, mood: boolean): string {
   let src = readFileSync(join(stack().programV3, 'notes.ordo'), 'utf8');
   const swap = (from: string, to: string) => {
     expect(src, `notes v3 still holds ${from}`).toContain(from);
@@ -80,7 +80,7 @@ function v3As(version: string, sealed: boolean, noReader: boolean, mood: boolean
   };
   swap('domain notes @ 0.3.0', `domain notes @ ${version}`);
   if (sealed) swap('  body:  text = ""\n', '  body:  text sealed\n');
-  if (noReader) swap('reader note_viewer reads notes, notesAccess', 'reader note_viewer reads notesAccess');
+  if (offGrant) for (const [from, to] of OFF_THE_GRANT) swap(from, to);
   if (mood) {
     const body = sealed ? '  body:  text sealed\n' : '  body:  text = ""\n';
     swap(body, `${body}  mood:  text?\n`);
@@ -104,7 +104,7 @@ test('production refuses a plan digest staging did not sign, and accepts the one
   testInfo.setTimeout(300_000);
   // After `seal`, production serves 0.3.4. Run alone, v3 is applied here.
   if (!['0.3.0', '0.3.4'].includes(servingVersion() ?? '')) {
-    ensureServing(stack().programV2, '0.2.0');
+    ensureServing(stack().programV2, '0.2.1');
     applyProgram(stack().programV3);
   }
   const from = servingVersion() ?? '';
@@ -175,7 +175,7 @@ test('production refuses a plan digest staging did not sign, and accepts the one
     const out = ok(
       d.other([
         'rehearsals', 'rehearse', '--from', from, '--to', to, '--clone', space,
-        '--reason', 'the reader line on a real shape', ...staging(),
+        '--reason', 'the grant to note_viewer on a real shape', ...staging(),
       ]),
     );
     expect(out).toContain(`rehearsed   ${from} to ${to} on 1 clone(s), green`);

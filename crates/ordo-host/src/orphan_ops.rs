@@ -9,8 +9,9 @@
 //! cannot be undone. So (owner, 2026-10-03, `syntax-additions` ask 11):
 //!
 //! 1. `--prune <name>` alone prunes nothing. It answers what would go: the
-//!    databases holding it, how many rows hold a value, the readers of its
-//!    table, and the confirmation to type.
+//!    databases holding it, how many rows hold a value, the consumers whose
+//!    grant opens its table (`consumer_grants::readers_of`), and the
+//!    confirmation to type.
 //! 2. `--prune <name> --confirm <name>` prunes. In production the
 //!    deployment's name is typed too, `--confirm-deployment <domain>`.
 //!
@@ -411,13 +412,7 @@ pub async fn prune(
     let active = crate::schema_apply::active_schema(pool).await;
     let readers: Vec<String> = active
         .as_ref()
-        .map(|s| {
-            s.readers
-                .iter()
-                .filter(|r| r.tables.contains(&first.entity))
-                .map(|r| r.name.clone())
-                .collect()
-        })
+        .map(|s| crate::consumer_grants::readers_of(s, &first.entity))
         .unwrap_or_default();
     let deployment = active
         .as_ref()
@@ -483,12 +478,6 @@ pub async fn prune(
         let sql = orphans::drop_sql(p.schema(), o);
         orphans::prune(p, o, &sql, caller, at).await?;
         pruned.push(d.label.clone());
-    }
-    // The reader grants follow: a pruned column is gone from every grant.
-    if let Some(schema) = &active {
-        if let Err(e) = ordo_exec::peer::grant_readers(pool, schema).await {
-            eprintln!("prune: the reader grants were not refreshed: {e}");
-        }
     }
     drop(lock);
     ops.record(

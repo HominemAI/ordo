@@ -2212,11 +2212,10 @@ async fn apply_once(flags: &Flags) -> Outcome {
         Ok(d) => d,
         Err(e) => return Outcome::failed(format!("ddl: {e}\n")),
     };
-    // Each external's schema from its setting, after the artifact and the
-    // DDL are taken, as `Program::compile` does for the door's apply. Without
-    // it a `peer` line reads `$unresolved peer <name>` and every external
-    // from it is refused as missing (reported fix, federation e2e).
-    if let Err(e) = ordo_exec::peer::resolve(&mut schema, &ordo_exec::schema_from_env()) {
+    // Each external's setting, after the artifact and the DDL are taken, as
+    // `Program::compile` does for the door's apply: a peer's door, a plain
+    // external's schema swap (reported fix, federation e2e).
+    if let Err(e) = ordo_exec::peer::resolve(&mut schema) {
         return Outcome::failed(format!("REFUSED  {e}\n"));
     }
     let program =

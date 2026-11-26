@@ -134,12 +134,11 @@ impl Program {
         let doc = ordo_plan::artifact::program_artifact(&fixture.schema, &fixture.registry)
             .map_err(|e| format!("artifact: {e}"))?;
         let ddl = ordo_schema::ddl_for(&fixture.schema).map_err(|e| format!("ddl: {e}"))?;
-        // Each external's schema from its setting, after the artifact is
-        // taken: the artifact and its identity carry what the file wrote,
-        // the same in every environment. The check and the apply then read
-        // the schema this environment names.
-        ordo_exec::peer::resolve(&mut fixture.schema, &ordo_exec::schema_from_env())
-            .map_err(|e| e.to_string())?;
+        // Each external's setting, after the artifact is taken: the
+        // artifact and its identity carry what the file wrote, the same in
+        // every environment. The check and the apply then read the schema
+        // and the doors this environment names.
+        ordo_exec::peer::resolve(&mut fixture.schema).map_err(|e| e.to_string())?;
         Ok(Program::assemble(
             fixture.schema,
             doc,
@@ -7606,26 +7605,7 @@ pub async fn apply_safe(
     }
 }
 
-/// [`apply_planned_tables`], then the grants of the program's `reader`
-/// lines (owner ruling 2026-11-18, `ordo_exec::peer::grant_readers`): a
-/// table this apply creates is granted in the same apply, and a table taken
-/// off a line is revoked.
 pub async fn apply_planned(
-    pool: &Pool,
-    plan: &Plan,
-    actor: &str,
-    op: &str,
-) -> Result<Applied, ApplyRefusal> {
-    let applied = apply_planned_tables(pool, plan, actor, op).await?;
-    if let Err(e) = ordo_exec::peer::grant_readers(pool, &plan.program.schema).await {
-        return Err(ApplyRefusal::Internal(format!(
-            "the change was applied, and the reader grants were not: {e}"
-        )));
-    }
-    Ok(applied)
-}
-
-async fn apply_planned_tables(
     pool: &Pool,
     plan: &Plan,
     actor: &str,

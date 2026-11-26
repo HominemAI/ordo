@@ -1,5 +1,5 @@
 {
-  "digest": "893323dbcf89c4e1",
+  "digest": "8a406fd08d6492bd",
   "domain": "noteviewer",
   "entities": [
     {
@@ -42,24 +42,6 @@
           "text_max": null,
           "tree": false,
           "type": "text",
-          "unique": false
-        },
-        {
-          "align": "left",
-          "default": null,
-          "enum_values": null,
-          "indexed": false,
-          "name": "tags",
-          "normalize": null,
-          "optional": false,
-          "owned": false,
-          "places": null,
-          "ref": null,
-          "refinable": true,
-          "sealed": false,
-          "text_max": null,
-          "tree": false,
-          "type": "json",
           "unique": false
         },
         {
@@ -166,63 +148,8 @@
           "unique": false
         }
       ],
-      "guarded": true,
+      "guarded": false,
       "key": "entr",
-      "referenced_by": [
-        {
-          "entity": "entryAccess",
-          "field": "entry",
-          "owned": false
-        }
-      ],
-      "tree": false,
-      "unique_keys": []
-    },
-    {
-      "acl_levels": null,
-      "checks": [],
-      "entity": "entryAccess",
-      "external": true,
-      "fields": [
-        {
-          "align": "left",
-          "default": null,
-          "enum_values": null,
-          "indexed": false,
-          "name": "entry",
-          "normalize": null,
-          "optional": false,
-          "owned": false,
-          "places": null,
-          "ref": "entries",
-          "refinable": true,
-          "sealed": false,
-          "text_max": null,
-          "tree": false,
-          "type": "id",
-          "unique": false
-        },
-        {
-          "align": "left",
-          "default": null,
-          "enum_values": null,
-          "indexed": false,
-          "name": "member",
-          "normalize": null,
-          "optional": false,
-          "owned": false,
-          "places": null,
-          "ref": null,
-          "refinable": true,
-          "sealed": false,
-          "text_max": null,
-          "tree": false,
-          "type": "text",
-          "unique": false
-        }
-      ],
-      "guarded": true,
-      "key": "entr-acce",
       "referenced_by": [],
       "tree": false,
       "unique_keys": []
@@ -257,34 +184,6 @@
         },
         {
           "op": "std.entries.list",
-          "param": null,
-          "single_row": false
-        }
-      ]
-    },
-    {
-      "actions": [],
-      "detail": [
-        {
-          "kind": "read",
-          "mode": null,
-          "op": "std.entryAccess.get",
-          "param": "id",
-          "required": true
-        }
-      ],
-      "entity": "entryAccess",
-      "get": [
-        {
-          "op": "std.entryAccess.get",
-          "param": "id",
-          "single_row": false
-        }
-      ],
-      "key": "entr-acce",
-      "list": [
-        {
-          "op": "std.entryAccess.list",
           "param": null,
           "single_row": false
         }
@@ -344,20 +243,7 @@
       },
       "disclosures": {
         "bypassed_guards": [],
-        "guards": [
-          {
-            "entity": "entries",
-            "read": "entryAccess(member == $caller)",
-            "source": "own",
-            "write": "entryAccess(member == $caller)"
-          },
-          {
-            "entity": "entryAccess",
-            "read": "member == $caller",
-            "source": "own",
-            "write": "member == $caller"
-          }
-        ],
+        "guards": [],
         "key_release": null,
         "unbounded": false,
         "unguarded": false
@@ -464,7 +350,7 @@
         "synthetic_rows": false
       },
       "statements": [],
-      "version": "e378212ae36588dd"
+      "version": "efa969075977823d"
     },
     {
       "call": {
@@ -578,7 +464,7 @@
         "synthetic_rows": false
       },
       "statements": [],
-      "version": "256df79f92babaee"
+      "version": "341fdfbe30b4b28b"
     },
     {
       "call": {
@@ -598,20 +484,7 @@
       },
       "disclosures": {
         "bypassed_guards": [],
-        "guards": [
-          {
-            "entity": "entries",
-            "read": "entryAccess(member == $caller)",
-            "source": "own",
-            "write": "entryAccess(member == $caller)"
-          },
-          {
-            "entity": "entryAccess",
-            "read": "member == $caller",
-            "source": "own",
-            "write": "member == $caller"
-          }
-        ],
+        "guards": [],
         "key_release": null,
         "unbounded": false,
         "unguarded": false
@@ -675,7 +548,7 @@
         "synthetic_rows": true
       },
       "statements": [],
-      "version": "60b61aef3a569c45"
+      "version": "caca0f6ae187619b"
     },
     {
       "call": {
@@ -696,20 +569,7 @@
       },
       "disclosures": {
         "bypassed_guards": [],
-        "guards": [
-          {
-            "entity": "entries",
-            "read": "entryAccess(member == $caller)",
-            "source": "own",
-            "write": "entryAccess(member == $caller)"
-          },
-          {
-            "entity": "entryAccess",
-            "read": "member == $caller",
-            "source": "own",
-            "write": "member == $caller"
-          }
-        ],
+        "guards": [],
         "key_release": null,
         "unbounded": false,
         "unguarded": false
@@ -827,7 +687,7 @@
         "synthetic_rows": false
       },
       "statements": [],
-      "version": "714f491b9f4b9489"
+      "version": "3879dc8c6fdb1964"
     },
     {
       "call": {
@@ -848,20 +708,7 @@
       },
       "disclosures": {
         "bypassed_guards": [],
-        "guards": [
-          {
-            "entity": "entries",
-            "read": "entryAccess(member == $caller)",
-            "source": "own",
-            "write": "entryAccess(member == $caller)"
-          },
-          {
-            "entity": "entryAccess",
-            "read": "member == $caller",
-            "source": "own",
-            "write": "member == $caller"
-          }
-        ],
+        "guards": [],
         "key_release": null,
         "unbounded": false,
         "unguarded": false
@@ -964,336 +811,7 @@
         "synthetic_rows": false
       },
       "statements": [],
-      "version": "97a25094f8eceb99"
-    },
-    {
-      "call": {
-        "cas": false,
-        "live": true,
-        "method": "GET",
-        "paged": false,
-        "refinable": true,
-        "terminal": [
-          "fetch",
-          "live"
-        ]
-      },
-      "cost": {
-        "class": "sql",
-        "rows": "<= 1"
-      },
-      "disclosures": {
-        "bypassed_guards": [],
-        "guards": [
-          {
-            "entity": "entryAccess",
-            "read": "member == $caller",
-            "source": "own",
-            "write": "member == $caller"
-          }
-        ],
-        "key_release": null,
-        "unbounded": false,
-        "unguarded": false
-      },
-      "error": null,
-      "kind": "read",
-      "mode": null,
-      "op": "std.entryAccess.count",
-      "params": [],
-      "platform": false,
-      "refine": {
-        "fields": [
-          "id",
-          "entry",
-          "member"
-        ],
-        "limits": {
-          "conditions": 16,
-          "in_values": 200
-        },
-        "tier": "basic"
-      },
-      "refusals": [
-        "access_denied",
-        "invalid_cursor",
-        "invalid_refinement",
-        "method_mismatch",
-        "refinement_unbounded",
-        "unknown_param",
-        "version_skew"
-      ],
-      "result": {
-        "order": {
-          "keys": [
-            {
-              "desc": false,
-              "path": "id"
-            }
-          ],
-          "stated": false
-        },
-        "outputs": [
-          {
-            "align": "right",
-            "id_entity": null,
-            "name": "n",
-            "places": null,
-            "refinable": true,
-            "sealed": false,
-            "type": "int"
-          }
-        ],
-        "row_identity": null,
-        "shape": "rows",
-        "single_row": true,
-        "sync": {
-          "reason": "measure",
-          "syncable": false
-        },
-        "synthetic_rows": true
-      },
-      "statements": [],
-      "version": "a985027120d1e5d1"
-    },
-    {
-      "call": {
-        "cas": false,
-        "live": true,
-        "method": "GET",
-        "paged": true,
-        "refinable": true,
-        "terminal": [
-          "fetch",
-          "live",
-          "pages"
-        ]
-      },
-      "cost": {
-        "class": "sql",
-        "rows": "<= 1"
-      },
-      "disclosures": {
-        "bypassed_guards": [],
-        "guards": [
-          {
-            "entity": "entryAccess",
-            "read": "member == $caller",
-            "source": "own",
-            "write": "member == $caller"
-          }
-        ],
-        "key_release": null,
-        "unbounded": false,
-        "unguarded": false
-      },
-      "error": null,
-      "kind": "read",
-      "mode": null,
-      "op": "std.entryAccess.get",
-      "params": [
-        {
-          "enum_values": null,
-          "field_ref": null,
-          "filled": false,
-          "id_entity": "entryAccess",
-          "max": null,
-          "min": null,
-          "name": "id",
-          "places": null,
-          "required": true,
-          "type": "id"
-        }
-      ],
-      "platform": false,
-      "refine": {
-        "fields": [
-          "id",
-          "entry",
-          "member"
-        ],
-        "limits": {
-          "conditions": 16,
-          "in_values": 200
-        },
-        "tier": "basic"
-      },
-      "refusals": [
-        "access_denied",
-        "invalid_cursor",
-        "invalid_param",
-        "invalid_refinement",
-        "method_mismatch",
-        "missing_param",
-        "refinement_unbounded",
-        "unknown_param",
-        "version_skew"
-      ],
-      "result": {
-        "order": {
-          "keys": [
-            {
-              "desc": false,
-              "path": "id"
-            }
-          ],
-          "stated": true
-        },
-        "outputs": [
-          {
-            "align": "left",
-            "id_entity": "entryAccess",
-            "name": "id",
-            "places": null,
-            "refinable": true,
-            "sealed": false,
-            "type": "id"
-          },
-          {
-            "align": "left",
-            "id_entity": "entries",
-            "name": "entry",
-            "places": null,
-            "refinable": true,
-            "sealed": false,
-            "type": "id"
-          },
-          {
-            "align": "left",
-            "id_entity": null,
-            "name": "member",
-            "places": null,
-            "refinable": true,
-            "sealed": false,
-            "type": "text"
-          }
-        ],
-        "row_identity": {
-          "entity": "entryAccess",
-          "key": "entr-acce"
-        },
-        "shape": "rows",
-        "single_row": false,
-        "sync": {
-          "id": "id",
-          "syncable": true
-        },
-        "synthetic_rows": false
-      },
-      "statements": [],
-      "version": "42c7aea4752c5cda"
-    },
-    {
-      "call": {
-        "cas": false,
-        "live": true,
-        "method": "GET",
-        "paged": true,
-        "refinable": true,
-        "terminal": [
-          "fetch",
-          "live",
-          "pages"
-        ]
-      },
-      "cost": {
-        "class": "sql",
-        "rows": "unbounded (pageable)"
-      },
-      "disclosures": {
-        "bypassed_guards": [],
-        "guards": [
-          {
-            "entity": "entryAccess",
-            "read": "member == $caller",
-            "source": "own",
-            "write": "member == $caller"
-          }
-        ],
-        "key_release": null,
-        "unbounded": false,
-        "unguarded": false
-      },
-      "error": null,
-      "kind": "read",
-      "mode": null,
-      "op": "std.entryAccess.list",
-      "params": [],
-      "platform": false,
-      "refine": {
-        "fields": [
-          "id",
-          "entry",
-          "member"
-        ],
-        "limits": {
-          "conditions": 16,
-          "in_values": 200
-        },
-        "tier": "basic"
-      },
-      "refusals": [
-        "access_denied",
-        "invalid_cursor",
-        "invalid_refinement",
-        "method_mismatch",
-        "refinement_unbounded",
-        "unknown_param",
-        "version_skew"
-      ],
-      "result": {
-        "order": {
-          "keys": [
-            {
-              "desc": true,
-              "path": "id"
-            }
-          ],
-          "stated": true
-        },
-        "outputs": [
-          {
-            "align": "left",
-            "id_entity": "entryAccess",
-            "name": "id",
-            "places": null,
-            "refinable": true,
-            "sealed": false,
-            "type": "id"
-          },
-          {
-            "align": "left",
-            "id_entity": "entries",
-            "name": "entry",
-            "places": null,
-            "refinable": true,
-            "sealed": false,
-            "type": "id"
-          },
-          {
-            "align": "left",
-            "id_entity": null,
-            "name": "member",
-            "places": null,
-            "refinable": true,
-            "sealed": false,
-            "type": "text"
-          }
-        ],
-        "row_identity": {
-          "entity": "entryAccess",
-          "key": "entr-acce"
-        },
-        "shape": "rows",
-        "single_row": false,
-        "sync": {
-          "id": "id",
-          "syncable": true
-        },
-        "synthetic_rows": false
-      },
-      "statements": [],
-      "version": "596685d72c11472f"
+      "version": "cf4098a35889443d"
     },
     {
       "call": {
@@ -1377,7 +895,7 @@
         "synthetic_rows": true
       },
       "statements": [],
-      "version": "a93d543d26868491"
+      "version": "bdc68d1a76c97d6d"
     },
     {
       "call": {
@@ -1485,15 +1003,6 @@
             "type": "text"
           },
           {
-            "align": "left",
-            "id_entity": null,
-            "name": "tags",
-            "places": null,
-            "refinable": false,
-            "sealed": false,
-            "type": "json"
-          },
-          {
             "align": "tabular",
             "id_entity": null,
             "name": "created",
@@ -1516,7 +1025,7 @@
         "synthetic_rows": false
       },
       "statements": [],
-      "version": "66d5c19055269e1f"
+      "version": "cf7da7eee07fe00e"
     },
     {
       "call": {
@@ -1609,15 +1118,6 @@
             "type": "text"
           },
           {
-            "align": "left",
-            "id_entity": null,
-            "name": "tags",
-            "places": null,
-            "refinable": false,
-            "sealed": false,
-            "type": "json"
-          },
-          {
             "align": "tabular",
             "id_entity": null,
             "name": "created",
@@ -1640,7 +1140,7 @@
         "synthetic_rows": false
       },
       "statements": [],
-      "version": "67d17e55f822abea"
+      "version": "f758d57d89d97aa2"
     }
   ],
   "schema_version": "ordo.interface/2"

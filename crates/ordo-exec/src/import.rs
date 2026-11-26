@@ -1181,7 +1181,6 @@ fn import_ops(schema: &Schema) -> ordo_syntax::decl::Program {
         auth: None,
         externals: Vec::new(),
         peers: Vec::new(),
-        readers: Vec::new(),
         grants: Vec::new(),
     }
 }

@@ -28,7 +28,7 @@ import { join } from 'node:path';
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 import { developer, door, type Developer } from '../developer.js';
 import { owner } from '../people.js';
-import { addNote, applyProgram, ensureServing, noteInList, servingVersion, stack, unique } from '../support.js';
+import { addNote, applyProgram, ensureServing, noteInList, servingVersion, stack, unique, OFF_THE_GRANT } from '../support.js';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -47,7 +47,7 @@ function ok(r: { code: number; out: string; err: string }): string {
 /**
  * Notes as the stack serves it (`from`), renamed to `version`, with one more
  * read op named `op`. After `seal` and `rehearsal` that is 0.3.4: notes.body
- * sealed and notes off the reader line. Run alone, it is plain v3.
+ * sealed and notes off the grant to note_viewer. Run alone, it is plain v3.
  */
 function servedPlus(from: string, version: string, op: string): string {
   let src = readFileSync(join(stack().programV3, 'notes.ordo'), 'utf8');
@@ -58,7 +58,7 @@ function servedPlus(from: string, version: string, op: string): string {
   swap('domain notes @ 0.3.0', `domain notes @ ${version}`);
   if (from === '0.3.4') {
     swap('  body:  text = ""\n', '  body:  text sealed\n');
-    swap('reader note_viewer reads notes, notesAccess', 'reader note_viewer reads notesAccess');
+    for (const [from, to] of OFF_THE_GRANT) swap(from, to);
   }
   src += `\n# Only this version has it (the tenant-build test).\nop ${op} unbounded =\n  notes[id, title]\n  sort -title\n`;
   const dir = mkdtempSync(join(tmpdir(), `notes-${version}-`));
@@ -106,7 +106,7 @@ test('a beta tenant serves the branch while the rest serve main', async ({ brows
   testInfo.setTimeout(420_000);
   // After `rehearsal`, production serves 0.3.4. Run alone, v3 is applied here.
   if (!['0.3.0', '0.3.4'].includes(servingVersion() ?? '')) {
-    ensureServing(stack().programV2, '0.2.0');
+    ensureServing(stack().programV2, '0.2.1');
     applyProgram(stack().programV3);
   }
   const from = servingVersion() ?? '';

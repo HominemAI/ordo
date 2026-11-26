@@ -15,7 +15,7 @@
  */
 
 import { expect, test } from '@playwright/test';
-import { addNote, joinNotes, list, makeAccount, person, shows, stack, unique } from '../support.js';
+import { addNote, joinNotes, list, makeAccount, person, refusal, shows, stack, unique } from '../support.js';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -84,6 +84,10 @@ test('another person sees their own notes and the public ones, never the first p
   await bo.context.close();
 });
 
+// Cy is no member of notes v2's space: notes v2's door refuses her list by
+// name, and the page shows that in the list's place. Admitting her there
+// under notes v2's own admission rules is not built for a call through the
+// door (plan-federation-grants.md §5, item 5; G8 report).
 test('a person who signs up at note_viewer first and holds nothing in notes v2 sees no private notes', async ({
   browser,
 }) => {
@@ -93,7 +97,10 @@ test('a person who signs up at note_viewer first and holds nothing in notes v2 s
   await page.getByRole('button', { name: 'Sign in' }).click();
   await makeAccount(page, 'Cy');
   await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByText('You have no notes in notes v2 yet.')).toBeVisible();
+  const said = refusal(page, 'Your notes');
+  await expect(said).toBeVisible();
+  await expect(said).toContainText('peer_refused');
+  await expect(said).toContainText('myNotes');
   await expect(page.getByText(closed)).toHaveCount(0);
   await cy.context.close();
 });

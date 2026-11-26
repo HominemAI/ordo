@@ -32,7 +32,6 @@
 //! [`Duplicate::value`] is `None` for it, which is how the report knows to
 //! say the surprising thing in the words §5's C1 note asks for.
 
-use std::collections::BTreeMap;
 use std::time::Instant;
 
 use ordo_schema::ddl::q;
@@ -202,69 +201,6 @@ pub async fn access_to(
             select: b(2),
         }
     }))
-}
-
-/// Of `columns`, the ones the current role may not `SELECT` in
-/// `schema.table`. Asked of the catalog, so a column granted by column and
-/// a table granted whole both read as granted.
-pub async fn columns_not_granted(
-    pool: &Pool,
-    schema: &str,
-    table: &str,
-    columns: &[&str],
-) -> Result<Vec<String>, PoolError> {
-    let mut out = Vec::new();
-    for c in columns {
-        let rows = pool
-            .rows(&format!(
-                "SELECT has_column_privilege(current_user, t.oid, {}, 'SELECT') \
-                 FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace \
-                 JOIN pg_attribute a ON a.attrelid = t.oid AND a.attname = {} \
-                   AND NOT a.attisdropped \
-                 WHERE n.nspname = {} AND t.relname = {}",
-                crate::sql_lit(c),
-                crate::sql_lit(c),
-                crate::sql_lit(schema),
-                crate::sql_lit(table)
-            ))
-            .await?;
-        let granted = rows
-            .first()
-            .and_then(|r| r.first().cloned().flatten())
-            .as_deref()
-            == Some("t");
-        // A column that is not there is the shape check's to report.
-        if !rows.is_empty() && !granted {
-            out.push(c.to_string());
-        }
-    }
-    Ok(out)
-}
-
-/// Each column of `schema.table` that carries a comment, with its comment.
-/// `pg_description` is readable by every role, so a reader reads the
-/// comments its peer wrote on a table it is granted
-/// ([`crate::peer::Renamed`]).
-pub async fn column_comments(
-    pool: &Pool,
-    schema: &str,
-    table: &str,
-) -> Result<BTreeMap<String, String>, PoolError> {
-    let rows = pool
-        .rows(&format!(
-            "SELECT a.attname::text, col_description(t.oid, a.attnum) \
-             FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace \
-             JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum > 0 AND NOT a.attisdropped \
-             WHERE n.nspname = {} AND t.relname = {} \
-               AND col_description(t.oid, a.attnum) IS NOT NULL",
-            crate::sql_lit(schema),
-            crate::sql_lit(table)
-        ))
-        .await?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|r| Some((r.first().cloned()??, r.get(1).cloned()??)))
-        .collect())
 }
 
 /// Is this relation a table (ordinary or partitioned), as opposed to a view,

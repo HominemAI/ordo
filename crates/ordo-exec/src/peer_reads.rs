@@ -1,12 +1,13 @@
 //! Peer entities served through the holder's door
 //! (`plan-federation-grants.md` §4, step G5).
 //!
-//! An external entity declared from a peer whose `ORDO_PEER_<NAME>_URL` is
-//! set is never read from the peer's tables. Each read that touches one is
-//! answered in three moves, inside one call:
+//! An external entity declared from a peer is never read from the peer's
+//! tables: the holder's door at `ORDO_PEER_<NAME>_URL` answers it. Each
+//! read that touches one is answered in three moves, inside one call:
 //!
 //! 1. **Ask the holder.** Each alias of a peer entity in the bound query is
-//!    one call to the holder's `std.<entity>.list`, with what the read says
+//!    one call to the holder's `std.<entity>.list`, or to the holder's op
+//!    the `peer` block names like the table, with what the read says
 //!    about it: its conditions as `$refine.where`, its fields as `pick`,
 //!    and, for a read whose rows are the peer's rows, its order and
 //!    `take` as `sort` and `limit`. The holder runs that as its own SQL,
@@ -40,13 +41,14 @@ use serde_json::{json, Map, Value};
 
 use crate::{ExecFail, Pool};
 
-/// One call to a holder: `std.<entity>.list` with a refinement.
+/// One call to a holder: `std.<entity>.list`, or the op the `peer` block
+/// names like the table, with a refinement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fetch {
     /// The `peer` nickname.
     pub peer: String,
-    /// The holder's entity: the call is `std.<entity>.list`.
-    pub entity: String,
+    /// The holder's op: `std.<entity>.list`, or a read op of the holder.
+    pub op: String,
     /// The `$refine.where` conditions, in the door's shape.
     pub conds: Vec<Value>,
     /// The holder's fields this read needs.
@@ -348,15 +350,43 @@ where
 /// Does `q` read a peer through its door? What [`serve`] would ask a
 /// holder for; `false` costs nothing to the many reads that do not.
 pub fn reads_a_door(q: &Query) -> bool {
+    !doors_read(q).is_empty()
+}
+
+/// The peers `q` reads through their doors, by nickname, sorted.
+pub fn doors_read(q: &Query) -> Vec<String> {
     let Some(externals) = externals_of(q) else {
-        return false;
+        return Vec::new();
     };
     if !externals.values().any(|r| r.door.is_some()) {
-        return false;
+        return Vec::new();
     }
     let mut sites = Vec::new();
     collect(q, &externals, true, &mut sites);
-    !sites.is_empty()
+    let names: BTreeSet<String> = sites.iter().filter_map(|s| s.read.door.clone()).collect();
+    names.into_iter().collect()
+}
+
+/// Refuse, by name, a read of a peer that a path with no client to other
+/// deployments' doors was asked to run (`None` from [`doors_read`]'s
+/// caller): without the holder's rows the statement cannot run, and it
+/// would fail on the database as an internal error.
+pub fn refuse_unserved(q: &Query, what: &str) -> Result<(), PeerReadFail> {
+    let doors = doors_read(q);
+    if doors.is_empty() {
+        return Ok(());
+    }
+    let names = doors
+        .iter()
+        .map(|d| format!("`{d}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(PeerReadFail::refused(format!(
+        "{what} reads peer {names} through its door, and this path has no client to another \
+         deployment's door. Fix: call it through this deployment's door, with \
+         ORDO_IDENTITY_URL and ORDO_IDENTITY_ORIGIN set so the door can ask the identity \
+         service for a token"
+    )))
 }
 
 /// The member id an anonymous call carries (`ordo_api::ANONYMOUS`).
@@ -866,7 +896,7 @@ fn base_fetch(s: &Site) -> Fetch {
     }
     Fetch {
         peer: r.door.clone().unwrap_or_default(),
-        entity: r.table.clone(),
+        op: r.door_op.clone(),
         conds,
         pick,
         sort: Vec::new(),
@@ -1155,7 +1185,7 @@ mod tests {
     fn the_refinement_carries_sort_and_limit_only_when_set() {
         let f = Fetch {
             peer: "notes".into(),
-            entity: "notes".into(),
+            op: "std.notes.list".into(),
             conds: vec![json!({ "field": "owner", "op": "caller" })],
             pick: vec!["id".into(), "title".into()],
             sort: vec![("created".into(), true), ("id".into(), false)],

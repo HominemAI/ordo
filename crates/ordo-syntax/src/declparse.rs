@@ -102,7 +102,7 @@ fn parse_program_noting(src: &str) -> Result<(Program, Vec<crate::Span>), ParseE
                         parser::PEER_NAME,
                         peer.span,
                         format!(
-                            "`peer {}` is declared twice. Keep one line; every external \
+                            "`peer {}` is declared twice. Keep one block; every external \
                              `from {}.<table>` uses it",
                             peer.name.name, peer.name.name
                         ),
@@ -110,23 +110,10 @@ fn parse_program_noting(src: &str) -> Result<(Program, Vec<crate::Span>), ParseE
                 }
                 prog.peers.push(peer);
             }
-            // `reader` is contextual the same way (owner, 2026-11-18,
-            // `example-apps-notes-v2-plus-note_viewer` ask 17).
-            TokenKind::Ident(w) if w == "reader" => {
-                let reader = reader_decl(&mut p)?;
-                if prog.readers.iter().any(|q| q.name.name == reader.name.name) {
-                    return Err(p.err_class_at(
-                        parser::READER_LINE,
-                        reader.span,
-                        format!(
-                            "`reader {}` is declared twice. Keep one line and list every \
-                             table it reads there",
-                            reader.name.name
-                        ),
-                    ));
-                }
-                prog.readers.push(reader);
-            }
+            // `reader` was the shared-database path's consent line, removed
+            // in G8 (`plan-federation-grants.md` §8). It is still read, so
+            // its refusal can write the `grant` block that replaces it.
+            TokenKind::Ident(w) if w == "reader" => return Err(reader_removed(&mut p)),
             // `grant` is contextual the same way (`plan-federation-grants.md`
             // §3): a declaration head only at the start of a top-level line.
             TokenKind::Ident(w) if w == "grant" => {
@@ -1500,12 +1487,14 @@ fn spell_foreign(name: &str) -> String {
     }
 }
 
-/// `peer <name>` (owner, 2026-11-17, `example-apps-notes-v2-plus-note_viewer`
-/// asks 5 and 10): a local nickname for another Ordo deployment.
+/// `peer <name> { op … }` (`plan-federation-grants.md` §4): a local nickname
+/// for another Ordo deployment and the ops this one calls on it.
 ///
 /// The name is lowercase letters and digits, so the setting that names the
-/// peer's schema, `ORDO_PEER_<NAME>_SCHEMA`, is the name upper-cased with no
-/// two names sharing one variable.
+/// holder's door, `ORDO_PEER_<NAME>_URL`, is the name upper-cased with no
+/// two names sharing one variable. The one-line form, `peer notes`, was
+/// the shared-database path, removed in G8: it is refused, naming the
+/// block to write.
 fn peer_decl(p: &mut Parser) -> Result<PeerDecl, ParseError> {
     let start = p.bump().span; // `peer`
     let name = ident(p, "a peer name")?;
@@ -1526,7 +1515,7 @@ fn peer_decl(p: &mut Parser) -> Result<PeerDecl, ParseError> {
             format!(
                 "`peer {}`: a peer name is lowercase letters and digits, starting with a \
                  letter, such as `peer journal`. It is upper-cased into the setting \
-                 `ORDO_PEER_<NAME>_SCHEMA`, so two names must never meet there",
+                 `ORDO_PEER_<NAME>_URL`, so two names must never meet there",
                 name.name
             ),
         ));
@@ -1534,22 +1523,27 @@ fn peer_decl(p: &mut Parser) -> Result<PeerDecl, ParseError> {
     if matches!(p.peek(), TokenKind::LBrace) {
         return peer_block(p, name, start);
     }
-    if !matches!(p.peek(), TokenKind::Newline | TokenKind::Eof) {
-        return Err(p.err_here(format!(
-            "`peer {}` is the whole line, or a block of the ops it calls: `peer {} {{ \
-             std.notes.list }}`. The peer's address is set by `ORDO_PEER_{}_URL` and its \
-             schema by `ORDO_PEER_{}_SCHEMA`, never in the file",
-            name.name,
-            name.name,
-            name.name.to_ascii_uppercase(),
-            name.name.to_ascii_uppercase()
-        )));
+    let upper = name.name.to_ascii_uppercase();
+    if matches!(p.peek(), TokenKind::Newline | TokenKind::Eof) {
+        return Err(p.err_class_at(
+            parser::PEER_NAME,
+            span,
+            format!(
+                "`peer {n}` alone read another deployment's tables in a shared database, and \
+                 that path was removed: one Ordo deployment reaches another only through its \
+                 door. Fix: list the holder's ops this deployment calls, one per line, such \
+                 as `peer {n} {{ std.notes.list }}` (an external `from {n}.notes` reads \
+                 `std.notes.list`), and set ORDO_PEER_{upper}_URL to the holder's door in \
+                 place of ORDO_PEER_{upper}_SCHEMA",
+                n = name.name
+            ),
+        ));
     }
-    Ok(PeerDecl {
-        name,
-        uses: None,
-        span,
-    })
+    Err(p.err_here(format!(
+        "`peer {}` is followed by a block of the ops it calls: `peer {} {{ std.notes.list }}`. \
+         The peer's address is set by `ORDO_PEER_{upper}_URL`, never in the file",
+        name.name, name.name
+    )))
 }
 
 /// `peer <name> { op  op … }` (`plan-federation-grants.md` §4, step G4): the
@@ -1623,7 +1617,7 @@ fn peer_block(p: &mut Parser, name: Ident, start: Span) -> Result<PeerDecl, Pars
             start.to(end),
             format!(
                 "`{header} {{ }}` names no op. List the holder's ops this deployment calls, \
-                 one per line, or write `{header}` alone"
+                 one per line"
             ),
         ));
     }
@@ -1635,113 +1629,47 @@ fn peer_block(p: &mut Parser, name: Ident, start: Span) -> Result<PeerDecl, Pars
     }
     Ok(PeerDecl {
         name,
-        uses: Some(uses),
+        uses,
         span: start.to(end),
     })
 }
 
-/// `reader <name> reads <table>, <table>` (owner, 2026-11-18,
-/// `example-apps-notes-v2-plus-note_viewer` ask 17): another deployment that
-/// may read these tables of this one.
-///
-/// The name is lowercase letters, digits and underscores, starting with a
-/// letter, so the setting `ORDO_READER_<NAME>_ROLE` is the name upper-cased
-/// with no two names sharing one variable. The list is the whole rest of
-/// the line.
-fn reader_decl(p: &mut Parser) -> Result<ReaderDecl, ParseError> {
+/// `reader <name> reads <table>, …`: the shared-database path's consent
+/// line, removed in G8 (`plan-federation-grants.md` §8). Refused, with the
+/// `grant` block that opens the same tables through this deployment's
+/// door written out: `std.<table>.list` for each table the line names.
+fn reader_removed(p: &mut Parser) -> ParseError {
     let start = p.bump().span; // `reader`
-    let name = ident(p, "a reader name")?;
-    let ok = name
-        .name
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_lowercase())
-        && name
-            .name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
-    if !ok {
-        return Err(p.err_class_at(
-            parser::READER_LINE,
-            name.span,
-            format!(
-                "`reader {}`: a reader name is lowercase letters, digits and underscores, \
-                 starting with a letter, such as `reader note_viewer`. It is upper-cased \
-                 into the setting `ORDO_READER_<NAME>_ROLE`",
-                name.name
-            ),
-        ));
+    let mut words: Vec<String> = Vec::new();
+    let mut end = start;
+    while !matches!(p.peek(), TokenKind::Newline | TokenKind::Eof) {
+        if let TokenKind::Ident(w) = p.peek().clone() {
+            words.push(w);
+        }
+        end = p.bump().span;
     }
-    let shape =
-        |n: &str| format!("write the tables after `reads`: `reader {n} reads notes, notesAccess`");
-    match p.peek().clone() {
-        TokenKind::Ident(w) if w == "reads" => {
-            p.bump();
-        }
-        TokenKind::Newline | TokenKind::Eof => {
-            return Err(p.err_class_at(
-                parser::READER_LINE,
-                start.to(name.span),
-                format!(
-                    "`reader {}` names no table; {}",
-                    name.name,
-                    shape(&name.name)
-                ),
-            ));
-        }
-        other => {
-            return Err(p.err_here(format!(
-                "expected `reads` after `reader {}`, found {}; {}",
-                name.name,
-                describe(&other),
-                shape(&name.name)
-            )))
-        }
-    }
-    let mut tables: Vec<Ident> = Vec::new();
-    loop {
-        if matches!(p.peek(), TokenKind::Newline | TokenKind::Eof) {
-            return Err(p.err_class_at(
-                parser::READER_LINE,
-                start.to(name.span),
-                format!(
-                    "`reader {}` names no table; {}",
-                    name.name,
-                    shape(&name.name)
-                ),
-            ));
-        }
-        let t = ident(p, "a table name")?;
-        if tables.iter().any(|x| x.name == t.name) {
-            return Err(p.err_class_at(
-                parser::READER_LINE,
-                t.span,
-                format!(
-                    "`reader {}` names `{}` twice. Name each table once",
-                    name.name, t.name
-                ),
-            ));
-        }
-        tables.push(t);
-        match p.peek() {
-            TokenKind::Comma => {
-                p.bump();
-            }
-            TokenKind::Newline | TokenKind::Eof => break,
-            other => {
-                let other = other.clone();
-                return Err(p.err_here(format!(
-                    "expected `,` or the end of the line after a table of `reader {}`, \
-                     found {}. The role is set by `ORDO_READER_{}_ROLE`, never in the file",
-                    name.name,
-                    describe(&other),
-                    name.name.to_ascii_uppercase()
-                )));
-            }
-        }
-    }
-    let span = start.to(tables.last().map(|t| t.span).unwrap_or(name.span));
-    Ok(ReaderDecl { name, tables, span })
+    let name = words.first().cloned().unwrap_or_else(|| "<name>".into());
+    let tables: Vec<&String> = words.iter().skip(1).skip_while(|w| *w == "reads").collect();
+    let lines = if tables.is_empty() {
+        "  std.<table>.list\n".to_string()
+    } else {
+        tables
+            .iter()
+            .map(|t| format!("  std.{t}.list\n"))
+            .collect::<String>()
+    };
+    let upper = name.to_ascii_uppercase();
+    p.err_class_at(
+        parser::READER_LINE,
+        start.to(end),
+        format!(
+            "`reader` let another deployment read this one's tables in a shared database, and \
+             that path was removed: one Ordo deployment reaches another only through its \
+             door. Fix: write\ngrant {name} {{\n{lines}}}\nand set \
+             ORDO_CONSUMER_{upper}_CLIENT to {name}'s id at the identity service in place of \
+             ORDO_READER_{upper}_ROLE"
+        ),
+    )
 }
 
 /// `grant <name> [as itself] { … }` or `grant provider <name> { … }`

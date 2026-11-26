@@ -97,6 +97,15 @@ export interface TwoDeployments {
   readonly close: () => Promise<void>;
 }
 
+/** A developer signed in to several deployments, one session each. */
+export interface ManyDeployments {
+  /** `ordo <args>` with a token for `handle`. */
+  readonly ordo: (handle: string, args: readonly string[]) => CliRun;
+  /** Their token for `handle`, as `ordo login` keeps it. */
+  readonly token: (handle: string) => string;
+  readonly close: () => Promise<void>;
+}
+
 /** What the kit gives a suite. */
 export interface DeveloperKit<Browser> {
   /**
@@ -118,6 +127,13 @@ export interface DeveloperKit<Browser> {
    * registered (`deployment add`).
    */
   readonly developerOfTwo: (browser: Browser, name: string, handle: string) => Promise<TwoDeployments>;
+  /**
+   * **A developer who is a member of each of `handles`**, signed in to each
+   * with `ordo login --deployment`, a session folder per deployment. Made
+   * once per `name` in a stack, and found again after: the first invite
+   * is never used, so it does not compete with `developer`.
+   */
+  readonly developerOf: (browser: Browser, name: string, handles: readonly string[]) => Promise<ManyDeployments>;
   /** The identity service's host command, run with the service's own settings. */
   readonly identityCommand: (args: readonly string[]) => string;
 }
@@ -271,5 +287,32 @@ export function developerKit<Browser>(
     };
   }
 
-  return { developer, freshDeveloper, developerOfTwo, identityCommand };
+  async function developerOf(browser: Browser, name: string, handles: readonly string[]): Promise<ManyDeployments> {
+    const dirOf = (handle: string) => `${stack().logs}/cli-config-${name}-${handle}`;
+    const signedIn = (close: () => Promise<void>): ManyDeployments => ({
+      ordo: (handle, args) => run(args, dirOf(handle)),
+      token: (handle) => tokenIn(dirOf(handle)),
+      close,
+    });
+    if (handles.every((h) => existsSync(`${dirOf(h)}/sessions.json`) && run(['whoami'], dirOf(h)).code === 0)) {
+      return signedIn(async () => undefined);
+    }
+    const { context, page } = await person(browser);
+    const link = /https?:\/\/\S+/.exec(identityCommand(['invite', '--label', name]))?.[0] ?? '';
+    assert.ok(link, 'an invite link');
+    await join(page, link, name);
+    const mainDir = `${stack().logs}/cli-config-${name}`;
+    mkdirSync(mainDir, { recursive: true });
+    await login(page, mainDir);
+    const id = /^who +(\S+)$/m.exec(run(['whoami'], mainDir).out)?.[1] ?? '';
+    assert.match(id, /^p_/, 'the developer has an account id');
+    for (const handle of handles) {
+      identityCommand(['member', 'add', handle, id]);
+      mkdirSync(dirOf(handle), { recursive: true });
+      await login(page, dirOf(handle), handle);
+    }
+    return signedIn(() => context.close());
+  }
+
+  return { developer, freshDeveloper, developerOfTwo, developerOf, identityCommand };
 }

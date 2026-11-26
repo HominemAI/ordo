@@ -9,7 +9,7 @@
  *
  * Ada has notes v2 open with 3 notes. The developer stores v3 beside v2
  * (`ordo apply --no-activate`), renders and stores the step (`ordo evolve
- * --from 0.2.0 --to 0.3.0`), which prints the plan, its digest and the
+ * --from 0.2.1 --to 0.3.0`), which prints the plan, its digest and the
  * pre-checks of every database, then runs it (`--run`). The page is never
  * reloaded and shows every note, with no error.
  *
@@ -45,7 +45,7 @@ test('ordo evolve from v2 to v3 through the door, with the page open: the plan, 
   // v2 serves after the `v2` project. Run alone (`--no-deps`), it is
   // applied here. Never applied again over v3's schema, which `evolve`
   // leaves in place: v3 renames a column v2 requires, so that is refused.
-  ensureServing(stack().programV2, '0.2.0');
+  ensureServing(stack().programV2, '0.2.1');
   const ada = await owner('Ada');
   const dev = await developer(browser);
   try {
@@ -74,9 +74,9 @@ test('ordo evolve from v2 to v3 through the door, with the page open: the plan, 
 
     let digest = '';
     await test.step('the step is rendered and stored: the plan, its digest, the pre-checks', () => {
-      const plan = dev.ordo(['evolve', '--from', '0.2.0', '--to', '0.3.0', ...door()]);
+      const plan = dev.ordo(['evolve', '--from', '0.2.1', '--to', '0.3.0', ...door()]);
       expect(plan.code, `${plan.out}\n${plan.err}`).toBe(0);
-      expect(plan.out).toContain('plan       0.2.0 to 0.3.0');
+      expect(plan.out).toContain('plan       0.2.1 to 0.3.0');
       digest = /^digest +(sha256:[0-9a-f]+)$/m.exec(plan.out)?.[1] ?? '';
       expect(digest, plan.out).not.toBe('');
       // What v3 adds, in the receipt.
@@ -88,7 +88,7 @@ test('ordo evolve from v2 to v3 through the door, with the page open: the plan, 
     });
 
     await test.step('the stored plan runs, with the digest it was stored under', () => {
-      const ran = dev.ordo(['evolve', '--from', '0.2.0', '--to', '0.3.0', '--digest', digest, '--run', ...door()]);
+      const ran = dev.ordo(['evolve', '--from', '0.2.1', '--to', '0.3.0', '--digest', digest, '--run', ...door()]);
       expect(ran.code, `${ran.out}\n${ran.err}`).toBe(0);
       expect(ran.out).toContain(`digest     ${digest}`);
       expect(ran.out).toMatch(/^ran +/m);

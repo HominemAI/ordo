@@ -197,17 +197,16 @@ pub enum BCond {
         query: Box<Query>,
         negated: bool,
     },
-    /// `expr` is a member id the person behind `caller` holds in a peer
-    /// deployment (owner, 2026-11-16, `example-apps-notes-v2-plus-note_viewer`
-    /// ask 2). What `field == $caller` binds to when the field belongs to an
-    /// external from a peer: the planner finds the peer's members for the
-    /// same person through the sign-in subject both deployments hold.
-    /// Never null: a null `expr`, or a person with no member there, is false.
+    /// `field == $caller` where the field belongs to an external from a
+    /// peer: the holder decides who `$caller` is there, for the person the
+    /// call is made for. Sent to the holder as a `caller` condition and
+    /// rewritten before the statement is planned
+    /// (`ordo_exec::peer_reads`); the planner refuses one left standing.
     PeerCaller {
         expr: BExpr,
         /// The local member id (`$caller` as bound).
         caller: BExpr,
-        /// The peer's Postgres schema.
+        /// The peer's nickname.
         peer: String,
     },
     /// Tree containment over the stored `$path` column (ruling 5): `expr`
@@ -447,9 +446,6 @@ pub struct Query {
 pub struct ExternalRead {
     /// The Postgres schema and table of the foreign table.
     pub schema: String,
-    /// `Some(schema)` when the table belongs to a peer: `schema` again, the
-    /// peer's Postgres schema, where its members and sign-in links live.
-    pub peer: Option<String>,
     pub table: String,
     /// The one unique, non-null key column, and its base type.
     pub key_column: String,
@@ -458,10 +454,14 @@ pub struct ExternalRead {
     pub prefix: String,
     /// Every declared field, in declaration order.
     pub columns: Vec<ExternalColumn>,
-    /// `Some(nickname)` when the peer is read through its door
-    /// (`ORDO_PEER_<NAME>_URL`, step G5): the table is never read, and each
-    /// read is served the rows the holder answered ([`Self::served`]).
+    /// `Some(nickname)` when the table belongs to a peer, which is read
+    /// through its door (`plan-federation-grants.md` §4): the table is never
+    /// read, and each read is served the rows the holder answered
+    /// ([`Self::served`]).
     pub door: Option<String>,
+    /// The holder's op a door read calls: `std.<table>.list`, or the op of
+    /// the `peer` block named like the table. Empty when `door` is `None`.
+    pub door_op: String,
     /// The rows the holder answered for this call, by the alias that reads
     /// them. Set by the executor for one statement and dropped with it: no
     /// copy outlives the call (`plan-federation-grants.md` §2, rule 1).

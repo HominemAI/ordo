@@ -54,19 +54,12 @@ pub struct Program {
     /// (ruled 2026-11-15, `external-entities`). Never an entity: the schema
     /// keeps these apart so DDL, diff, dev reset and erase never see one.
     pub externals: Vec<ExternalDecl>,
-    /// `peer journal`: a local nickname for another Ordo deployment in the
-    /// same database (owner rulings 2026-11-17,
-    /// `example-apps-notes-v2-plus-note_viewer` asks 5 and 10). An external
-    /// `from journal.notes` then reads the peer's `notes`, in the schema the
-    /// setting `ORDO_PEER_JOURNAL_SCHEMA` names, and `$caller` on it means
-    /// the peer's member for the same person.
+    /// `peer notes { std.notes.list  addComment }`: a local nickname for
+    /// another Ordo deployment, the holder, and the holder's ops this
+    /// deployment calls through the holder's door
+    /// (`plan-federation-grants.md` §4). An external `from notes.<table>`
+    /// reads the holder's table through that door.
     pub peers: Vec<PeerDecl>,
-    /// `reader note_viewer reads notes, notesAccess`: another Ordo
-    /// deployment that may read these tables of this one (owner ruling
-    /// 2026-11-18, `example-apps-notes-v2-plus-note_viewer` ask 17). Its
-    /// database role comes from `ORDO_READER_NOTE_VIEWER_ROLE`, and this
-    /// deployment grants that role `SELECT` on exactly these tables.
-    pub readers: Vec<ReaderDecl>,
     /// `grant note_viewer { std.notes.get  /add.*/  !addAdmin }`: the ops
     /// another Ordo deployment may call through this one's door
     /// (`plan-federation-grants.md` §3). Expanded against this program's
@@ -142,30 +135,17 @@ impl GrantDecl {
     }
 }
 
-/// `reader <name> reads <table>, <table>`: a local nickname for a deployment
-/// that reads this one, and the tables it may read. The role it reads with
-/// comes from the environment, never from the file.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReaderDecl {
-    pub name: Ident,
-    pub tables: Vec<Ident>,
-    pub span: Span,
-}
-
-/// `peer <name>`: a local nickname for another Ordo deployment. It does not
-/// name or change that deployment. The schema comes from the environment,
-/// never from the file, so one file works in every environment.
-///
-/// With a block, `peer notes { std.notes.list  addComment }`, it lists the
-/// holder's ops this deployment calls through the holder's door
-/// (`plan-federation-grants.md` §4, step G4). The holder's address comes
-/// from the setting `ORDO_PEER_<NAME>_URL`, never the file.
+/// `peer notes { std.notes.list  addComment }`: a local nickname for another
+/// Ordo deployment, and the holder's ops this deployment calls through the
+/// holder's door (`plan-federation-grants.md` §4). It does not name or
+/// change that deployment. The holder's address comes from the setting
+/// `ORDO_PEER_<NAME>_URL`, never the file, so one file works in every
+/// environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerDecl {
     pub name: Ident,
-    /// The block's op lines, in the order written. `None` for the one-line
-    /// form, which the shared-database path reads.
-    pub uses: Option<Vec<PeerUse>>,
+    /// The block's op lines, in the order written. Never empty.
+    pub uses: Vec<PeerUse>,
     pub span: Span,
 }
 

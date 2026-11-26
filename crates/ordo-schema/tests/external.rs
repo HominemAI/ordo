@@ -334,15 +334,22 @@ external customers from crm.customers shared {
     assert!(msg.contains("Add a field to the translation"), "{msg}");
 }
 
-// ── peers (owner, 2026-11-17, `example-apps-notes-v2-plus-note_viewer`) ──
+// ── peers: another Ordo deployment, read through its door (`plan-federation-grants.md` §4) ──
 
 const VIEWER: &str = r#"
-peer journal
+peer journal {
+  std.notes.list
+  publicNotes
+}
 external entries from journal.notes shared {
   id: text <- id
   title: text <- title
   owner: text <- owner
   access read owner == $caller
+}
+external published from journal.publicNotes shared {
+  id: text <- id
+  title: text <- title
 }
 external customers from crm.customers shared {
   id <- "customer_id"
@@ -350,36 +357,28 @@ external customers from crm.customers shared {
 "#;
 
 #[test]
-fn a_peer_marks_the_externals_that_read_it() {
+fn a_peer_marks_the_externals_that_read_it_and_the_op_each_calls() {
     let s = schema_of(VIEWER);
-    assert_eq!(s.peers, ["journal"]);
+    assert_eq!(s.peer_uses.len(), 1);
+    assert_eq!(s.peer_uses[0].name, "journal");
     let entries = s.entity("entries").unwrap().external.clone().unwrap();
     let peer = entries.peer.clone().expect("a peer's table");
     assert_eq!(peer.name, "journal");
-    assert_eq!(
-        peer.schema, None,
-        "the schema is the environment's, never the file's"
-    );
+    assert_eq!(peer.op, "std.notes.list", "a table is read by its std list");
     assert_eq!(
         entries.pg_schema(),
-        ordo_schema::unresolved_peer_schema("journal"),
-        "unresolved, it reads a schema nobody can create"
+        ordo_schema::peer_door_schema("journal"),
+        "a peer's table is never read from a schema"
     );
-    // The same prefix with no `peer` line is a plain schema, as today.
+    // A table named like an op of the block is read by that op.
+    let published = s.entity("published").unwrap().external.clone().unwrap();
+    assert_eq!(published.peer.expect("a peer's table").op, "publicNotes");
+    // The same prefix with no `peer` is a plain schema, as today.
     let customers = s.entity("customers").unwrap().external.clone().unwrap();
     assert!(customers.peer.is_none());
     assert_eq!(customers.pg_schema(), "crm");
     // A peer's table is still an external: no DDL.
     assert!(!ddl_for(&s).unwrap().contains("notes"));
-}
-
-#[test]
-fn a_peer_no_external_reads_is_refused() {
-    let (code, msg) = refused(
-        "peer journal\nexternal customers from crm.customers shared {\n  id <- \"customer_id\"\n}\n",
-    );
-    assert_eq!(code, "peer_unused", "{msg}");
-    assert!(msg.contains("journal.<table>"), "{msg}");
 }
 
 #[test]

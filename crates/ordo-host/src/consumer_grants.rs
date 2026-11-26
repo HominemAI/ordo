@@ -267,6 +267,53 @@ pub fn expand(g: &GrantDecl, ops: &[String]) -> Result<Expansion, Vec<Refusal>> 
     })
 }
 
+/// **Who reads a table through this deployment's door**: each grant that
+/// opens `std.<table>.list` or `std.<table>.get` of a native entity, by its
+/// header (`grant note_viewer`, `grant provider hominem`), with the tables
+/// it opens. What a plan names when a step changes a table another
+/// deployment reads (`plan-evolution-federation.md` F1), and what a prune
+/// lists. A pattern that is not a regex opens nothing here; the apply
+/// refuses it ([`expand`]).
+pub fn tables_read(schema: &ordo_schema::Schema) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for g in &schema.grants {
+        let matchers: Vec<Matcher> = g
+            .lines
+            .iter()
+            .map(|l| match &l.pattern {
+                GrantPattern::All => Matcher::All,
+                GrantPattern::Op(n) => Matcher::Op(n.clone()),
+                GrantPattern::Regex(r) => regex::RegexBuilder::new(&format!("^(?:{r})$"))
+                    .size_limit(REGEX_SIZE_LIMIT)
+                    .build()
+                    .map(Matcher::Regex)
+                    .unwrap_or(Matcher::Broken),
+            })
+            .collect();
+        let negated: Vec<bool> = g.lines.iter().map(|l| l.negated).collect();
+        for e in schema.entities.iter().filter(|e| e.external.is_none()) {
+            let ops = [
+                format!("std.{}.list", e.name),
+                format!("std.{}.get", e.name),
+            ];
+            if !decide(&matchers, &negated, &ops, None).is_empty() {
+                out.entry(g.header()).or_default().insert(e.name.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The grants, by header, that open `table` to another deployment
+/// ([`tables_read`]).
+pub fn readers_of(schema: &ordo_schema::Schema, table: &str) -> Vec<String> {
+    tables_read(schema)
+        .into_iter()
+        .filter(|(_, t)| t.contains(table))
+        .map(|(g, _)| g)
+        .collect()
+}
+
 /// The program's own ops, from its compiled document: every authored op and
 /// every derived `std.<entity>.*`, sorted.
 pub fn program_ops(doc: &Value) -> Vec<String> {

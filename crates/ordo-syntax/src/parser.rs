@@ -56,16 +56,17 @@ pub const DUPLICATE_AUTH: &str = "duplicate_auth";
 /// `$caller` inside a release rule. The seat being released is `$member`,
 /// and the rule is about that seat whoever asks (27aq).
 pub const RELEASE_SUBJECT: &str = "release_subject";
-/// A `peer` line that cannot be one: a name that is not lowercase letters
-/// and digits, or a second line with the same name.
+/// A `peer` that cannot be one: a name that is not lowercase letters and
+/// digits, a second one with the same name, or the one-line form of the
+/// removed shared-database path (`peer notes` with no block).
 pub const PEER_NAME: &str = "peer_name";
 /// A `peer` block that cannot be one: no line, two ops on one line, an op
 /// named twice, or a line that is not an exact op name
 /// (`plan-federation-grants.md` §4).
 pub const PEER_BLOCK: &str = "peer_block";
-/// A `reader` line that cannot be one: a name that is not lowercase
-/// letters, digits and underscores, a second line with the same name, no
-/// table, or a table named twice.
+/// A `reader` line. The shared-database path it opened was removed
+/// (`plan-federation-grants.md` §8, G8): a deployment opens its ops to
+/// another with a `grant` block. The refusal writes the block.
 pub const READER_LINE: &str = "reader_line";
 /// A `grant` block that cannot be one: a name that is not lowercase
 /// letters, digits and underscores, a second block with the same name, no

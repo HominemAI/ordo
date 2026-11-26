@@ -44,7 +44,7 @@ test('a fill on one tenant under live writes: every row ends filled, what was ty
   testInfo.setTimeout(420_000);
   // After `rollout-moves`, production serves 0.3.4. Run alone, v3 is applied.
   if (!['0.3.0', '0.3.4'].includes(servingVersion() ?? '')) {
-    ensureServing(stack().programV2, '0.2.0');
+    ensureServing(stack().programV2, '0.2.1');
     applyProgram(stack().programV3);
   }
   const from = servingVersion() ?? '';

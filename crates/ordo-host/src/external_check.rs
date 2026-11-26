@@ -36,9 +36,8 @@
 //! holds that tenant only. A program applied to a tenant's database is
 //! checked there as well.
 //!
-//! A peer column its read app renamed is noted as [`CHANGING`] while it is
-//! still written, and named with its new column once it is not
-//! (`ordo_exec::peer::Renamed`).
+//! A peer's tables are never checked here: a peer is read through its door,
+//! and the holder answers for its own tables on every call.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
@@ -55,10 +54,6 @@ use ordo_syntax::{ExternalKeyTy, ScalarTy};
 pub const WATCH_ENV: &str = "ORDO_EXTERNAL_WATCH_SECS";
 /// Five minutes.
 pub const WATCH_DEFAULT_SECS: u64 = 300;
-
-/// How a note about a peer column that is being renamed starts
-/// (`plan-evolution-federation.md` §3.3). The watcher logs these lines.
-pub const CHANGING: &str = "changing:";
 
 /// [`WATCH_ENV`], or the default when unset. A value that is not a whole
 /// number of seconds from 1 is refused at boot, naming the setting.
@@ -85,9 +80,6 @@ pub enum ProblemKind {
     NoGrant,
     /// A mapped column is gone, retyped, or nullable against the file.
     Changed,
-    /// A peer's schema holds no Ordo deployment, so `$caller` cannot be
-    /// resolved there.
-    PeerNotOrdo,
 }
 
 impl ProblemKind {
@@ -97,7 +89,6 @@ impl ProblemKind {
             ProblemKind::Missing => "external_missing",
             ProblemKind::NoGrant => "external_no_grant",
             ProblemKind::Changed => "external_changed",
-            ProblemKind::PeerNotOrdo => "peer_not_ordo",
         }
     }
 }
@@ -241,13 +232,14 @@ async fn check_one(
     let Some(src) = &e.external else {
         return Ok(());
     };
-    // A peer read through its door (step G5): its tables are its own, and
-    // the holder answers for them on every call.
-    if src.peer.as_ref().is_some_and(|p| p.door) {
+    // A peer is read through its door (`plan-federation-grants.md` §4):
+    // its tables are its own, and the holder answers for them on every
+    // call.
+    if src.peer.is_some() {
         return Ok(());
     }
-    // The schema this environment reads: a peer's resolved schema, or a
-    // plain external's swap (`ordo_exec::peer`).
+    // The schema this environment reads: as written, or the plain
+    // external's swap (`ordo_exec::peer`).
     let pg = src.pg_schema();
     let table = format!("{pg}.{}", src.table);
     let regenerate = format!(
@@ -273,75 +265,7 @@ async fn check_one(
         .await
         .map_err(|err| db("the grants", err))?
     {
-        // **A column the read app stopped writing** (owner ruling
-        // 2026-11-23, Q1). A peer that left a mapped column behind grants
-        // its table by column, without it, so the table reads as not
-        // granted whole while the other mapped columns are. The reader is
-        // held, and the refusal names each column it lost.
-        let mut column_granted = false;
-        if let (Some(p), true, false) = (src.peer.as_ref(), a.schema_usage, a.select) {
-            let mut mapped: Vec<&str> = vec![src.key_column.as_str()];
-            mapped.extend(src.columns.iter().map(|(_, c)| c.as_str()));
-            let lost = migrate::columns_not_granted(pool, &pg, &src.table, &mapped)
-                .await
-                .map_err(|err| db("the column grants", err))?;
-            column_granted = lost.is_empty();
-            if !lost.is_empty() && lost.len() < mapped.len() {
-                // A renamed field's old column names the new one
-                // (`ordo_exec::peer::Renamed`).
-                let comments = migrate::column_comments(pool, &pg, &src.table)
-                    .await
-                    .map_err(|err| db("the column comments", err))?;
-                let named = lost
-                    .iter()
-                    .map(|c| {
-                        match comments
-                            .get(c)
-                            .and_then(|t| ordo_exec::peer::Renamed::new_column(t))
-                        {
-                            Some(new) => format!("column `{c}` (it is now `{new}`)"),
-                            None => format!("column `{c}`"),
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let (is, it) = if lost.len() == 1 {
-                    ("is", "it")
-                } else {
-                    ("are", "them")
-                };
-                report.problems.push(Problem {
-                    entity: e.name.clone(),
-                    kind: ProblemKind::Changed,
-                    detail: format!(
-                        "{named} {is} no longer written by `{}`: a version of it stopped \
-                         declaring {it}, and its grant to this deployment ended. {regenerate}",
-                        p.name
-                    ),
-                });
-                return Ok(());
-            }
-        }
-        if let Some(p) = src
-            .peer
-            .as_ref()
-            .filter(|_| !column_granted && (!a.schema_usage || !a.select))
-        {
-            // A peer's table: the deployment being read grants it, by its
-            // `reader` line (owner ruling 2026-11-18).
-            report.problems.push(Problem {
-                entity: e.name.clone(),
-                kind: ProblemKind::NoGrant,
-                detail: format!(
-                    "role `{}` cannot read `{table}`. Add `reader <name> reads {}` to {}'s \
-                     definition file, set ORDO_READER_<NAME>_ROLE={} in its settings, and \
-                     apply or restart it",
-                    a.role, src.table, p.name, a.role
-                ),
-            });
-            return Ok(());
-        }
-        if !column_granted && (!a.schema_usage || !a.select) {
+        if !a.schema_usage || !a.select {
             let mut grants = Vec::new();
             if !a.schema_usage {
                 grants.push(format!(
@@ -418,30 +342,6 @@ async fn check_one(
         });
         return Ok(());
     }
-    // **Changing** (`plan-evolution-federation.md` §3.3): a mapped column
-    // its peer renamed is still written and granted, until the version that
-    // stops writing it. Said now, while the reader can still switch; it
-    // holds nothing.
-    if let Some(p) = &src.peer {
-        let comments = migrate::column_comments(pool, &pg, &src.table)
-            .await
-            .map_err(|err| db("the column comments", err))?;
-        for (field, column) in &src.columns {
-            let Some(new) = comments
-                .get(column)
-                .and_then(|t| ordo_exec::peer::Renamed::new_column(t))
-            else {
-                continue;
-            };
-            report.notes.push(format!(
-                "{CHANGING} `{table}.{column}`, which `{}` reads as `{field}`, is renamed \
-                 to `{new}` by `{}`. It is written until a version of `{}` stops \
-                 declaring the rename; then this deployment loses it. Map `{field}` to \
-                 `{new}`. {regenerate}",
-                e.name, p.name, p.name,
-            ));
-        }
-    }
     let unused: Vec<String> = live
         .keys()
         .filter(|c| !read.contains(&c.as_str()))
@@ -468,21 +368,6 @@ pub async fn check(pool: &Pool, schema: &Schema) -> Result<ExternalReport, Strin
     let mut report = ExternalReport::default();
     for e in &schema.externals {
         check_one(pool, e, schema, &mut report).await?;
-    }
-    if let Err(refusal) = ordo_exec::peer::check(pool, schema).await {
-        if let ordo_exec::peer::SchemaRefusal::Database(e) = refusal {
-            return Err(format!("reading the peer schemas: {e}"));
-        }
-        report.problems.push(Problem {
-            entity: schema
-                .externals
-                .iter()
-                .find(|e| e.external.as_ref().is_some_and(|x| x.peer.is_some()))
-                .map(|e| e.name.clone())
-                .unwrap_or_default(),
-            kind: ProblemKind::PeerNotOrdo,
-            detail: refusal.to_string(),
-        });
     }
     report.present = present_not_ordos(pool, schema).await?;
     Ok(report)
@@ -562,8 +447,6 @@ pub struct ExternalGate {
     /// The fixture that serves one tenant.
     for_space: ForSpace,
     reads: RwLock<HashMap<usize, Reads>>,
-    /// The last pass's [`CHANGING`] notes: peer columns being renamed.
-    changing: RwLock<Vec<String>>,
     /// What the last pass over the tenants' own databases found, by
     /// tenant: the identity of the fixture it was found for, and the held
     /// entities.
@@ -687,62 +570,6 @@ fn reads_of(f: &ordo_conformance::Fixture, op: &str) -> Vec<String> {
     reached
 }
 
-/// The class of the refusal for a tenant kept in a database of its own
-/// that reaches a peer through the shared database
-/// (`plan-federation-grants.md` §6, step G7).
-pub const PEER_TENANT_DATABASE: &str = "peer_tenant_database";
-
-/// **A tenant in a database of its own and a peer read through the shared
-/// database** (step G7). A peer's tables are in the deployment's own
-/// database, never in a tenant's, so such a read would find no table or,
-/// worse, another one. `Some` names the peer, the setting that moves it to
-/// its door, and the tenant, for `op` when it reads one; `None` when it
-/// reads no peer that way. The caller has found that `space` is served
-/// from a database other than the deployment's.
-pub fn shared_peer_refusal(
-    f: &ordo_conformance::Fixture,
-    op: &str,
-    space: &str,
-) -> Option<ExecError> {
-    // Each such entity: its peer's nickname and the peer's table.
-    let shared: BTreeMap<&str, (&str, &str)> = f
-        .schema
-        .externals
-        .iter()
-        .filter_map(|e| {
-            let x = e.external.as_ref()?;
-            let p = x.peer.as_ref()?;
-            (!p.door).then_some((e.name.as_str(), (p.name.as_str(), x.table.as_str())))
-        })
-        .collect();
-    if shared.is_empty() {
-        return None;
-    }
-    // A derived op names its entity: `std.<entity>.<verb>`.
-    let mut reached = reads_of(f, op);
-    if let Some(entity) = op
-        .strip_prefix("std.")
-        .and_then(|rest| rest.split('.').next())
-    {
-        reached.push(entity.to_string());
-    }
-    let (entity, (peer, table)) = reached
-        .iter()
-        .find_map(|n| shared.get_key_value(n.as_str()))?;
-    Some(ExecError::new(
-        ErrorCode::PeerRefused,
-        format!(
-            "{PEER_TENANT_DATABASE}: `{op}` reads `{entity}` from peer `{peer}` through the \
-             shared database, and space `{space}` is kept in a database of its own, where \
-             `{peer}`'s tables are not. Fix: read `{peer}` through its door, which reaches it \
-             from every database: set ORDO_PEER_{}_URL to its address and have its owner \
-             grant this deployment `std.{}.list`",
-            peer.to_ascii_uppercase(),
-            table,
-        ),
-    ))
-}
-
 impl ExternalGate {
     /// One program for every tenant: `source` returns the fixture the
     /// deployment serves now.
@@ -755,7 +582,6 @@ impl ExternalGate {
             served: Arc::new(move || vec![(String::new(), served())]),
             for_space: Arc::new(move |_| for_space()),
             reads: RwLock::new(HashMap::new()),
-            changing: RwLock::new(Vec::new()),
             tenant_holds: RwLock::new(HashMap::new()),
         })
     }
@@ -770,7 +596,6 @@ impl ExternalGate {
             served,
             for_space,
             reads: RwLock::new(HashMap::new()),
-            changing: RwLock::new(Vec::new()),
             tenant_holds: RwLock::new(HashMap::new()),
         })
     }
@@ -786,15 +611,6 @@ impl ExternalGate {
             }
         }
         out
-    }
-
-    /// The last pass's notes on peer columns being renamed
-    /// ([`CHANGING`]), each version's once.
-    pub fn changing(&self) -> Vec<String> {
-        self.changing
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
     }
 
     /// The entities held for the version that serves `space`.
@@ -850,7 +666,6 @@ impl ExternalGate {
         let many = served.len() > 1;
         let mut holds: HashMap<usize, BTreeMap<String, String>> = HashMap::new();
         let mut lines = Vec::new();
-        let mut changing: Vec<String> = Vec::new();
         for (version, fixture) in &served {
             if fixture.schema.externals.is_empty() || holds.contains_key(&identity(fixture)) {
                 continue;
@@ -863,13 +678,6 @@ impl ExternalGate {
             for l in report.refusals() {
                 lines.push(if many { format!("{version}: {l}") } else { l });
             }
-            for n in report.notes.iter().filter(|n| n.starts_with(CHANGING)) {
-                changing.push(if many {
-                    format!("{version}: {n}")
-                } else {
-                    n.clone()
-                });
-            }
             let down: BTreeMap<String, String> = report
                 .problems
                 .into_iter()
@@ -880,7 +688,6 @@ impl ExternalGate {
             }
         }
         *self.holds.write().unwrap_or_else(|e| e.into_inner()) = holds;
-        *self.changing.write().unwrap_or_else(|e| e.into_inner()) = changing;
         // A version no longer served keeps nothing here.
         let keep: std::collections::HashSet<usize> =
             served.iter().map(|(_, f)| identity(f)).collect();
@@ -1018,20 +825,11 @@ pub fn spawn_watch(
         let mut tick = tokio::time::interval(every);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut held = false;
-        let mut said: Vec<String> = Vec::new();
         let mut tenant_said: Vec<String> = Vec::new();
         loop {
             tick.tick().await;
             match gate.watch_once(&pool).await {
                 Ok(lines) => {
-                    // A rename is said once each time the set changes.
-                    let changing = gate.changing();
-                    if changing != said {
-                        for c in &changing {
-                            println!("external: {c}");
-                        }
-                        said = changing;
-                    }
                     for l in &lines {
                         eprintln!("external: {l}");
                     }

@@ -5,7 +5,7 @@
  * The new version is the one production serves with `notes.title` renamed
  * to `heading` with `prev(title)`. Its ops still answer `title`, so the v2
  * page reads the same notes. After `rehearsal`, production serves 0.3.4
- * (notes.body sealed, notes off the reader line) and the new version is
+ * (notes.body sealed, notes off the grant to note_viewer) and the new version is
  * 0.3.6. Run alone (`--no-deps`), v3 is applied and it is 0.3.2. The
  * developer, signed in with `ordo login` (tests/developer.ts), stores it and
  * its step, then moves Ada's tenant onto it:
@@ -43,7 +43,7 @@ test('a rename on one tenant under live writes: nothing typed is lost, and a rev
   testInfo.setTimeout(420_000);
   // After `rehearsal`, production serves 0.3.4. Run alone, v3 is applied.
   if (!['0.3.0', '0.3.4'].includes(servingVersion() ?? '')) {
-    ensureServing(stack().programV2, '0.2.0');
+    ensureServing(stack().programV2, '0.2.1');
     applyProgram(stack().programV3);
   }
   const from = servingVersion() ?? '';

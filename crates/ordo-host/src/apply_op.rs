@@ -2249,9 +2249,9 @@ impl ApplyOps {
         let Ok(program) = Program::compile(source) else {
             return Ok(Vec::new());
         };
-        // Step G5: an external read through a peer's door calls the
-        // holder's `std.<table>.list`, so that op is checked and recorded
-        // as if its `peer` block listed it.
+        // An external from a peer calls the holder's `std.<table>.list`,
+        // or the op its `peer` block names like the table, so that op is
+        // checked and recorded as if the block listed it.
         let mut uses = program.schema.peer_uses.clone();
         if let Some(client) = self.peer_client.get() {
             for e in &program.schema.externals {
@@ -2260,7 +2260,7 @@ impl ApplyOps {
                 if client.holder(&p.name).is_err() {
                     continue;
                 }
-                let op = format!("std.{}.list", src.table);
+                let op = p.op.clone();
                 match uses.iter_mut().find(|u| u.name == p.name) {
                     Some(u) if u.ops.contains(&op) => {}
                     Some(u) => u.ops.push(op),
@@ -2281,7 +2281,18 @@ impl ApplyOps {
         if !found.refusals.is_empty() {
             return Err(ApplyRefused::Peer(found.refusals));
         }
-        Ok(found.notes)
+        // What each holder answered, for this deployment's release check.
+        let mut notes = found.notes;
+        for seen in &found.holders {
+            if let Err(e) = crate::peer_ops::record_holder(&self.pool, seen).await {
+                notes.push(format!(
+                    "peer        {}: its release was not kept here ({e}); the release check \
+                     names it after the next apply",
+                    seen.peer
+                ));
+            }
+        }
+        Ok(notes)
     }
 
     /// What a stored step runs its backfills with (10b): the backfill

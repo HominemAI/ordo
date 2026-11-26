@@ -65,7 +65,7 @@ test('notes v3 applied with the v2 page open: every note and file stays, a new n
   // v2 serves after the `v2` project. Run alone (`--no-deps`), it is
   // applied here. Never applied again over v3's schema, which `evolve`
   // leaves in place: v3 renames a column v2 requires, so that is refused.
-  ensureServing(stack().programV2, '0.2.0');
+  ensureServing(stack().programV2, '0.2.1');
   const ada = await owner('Ada');
   try {
     const page = ada.page;

@@ -543,14 +543,10 @@ pub enum LoadRefusal {
         version: String,
         drift: Vec<Drift>,
     },
-    /// An external's schema setting refused: a peer's
-    /// `ORDO_PEER_<NAME>_SCHEMA` unset, bad, this deployment's own, or a
-    /// schema with no Ordo deployment in it; or a plain external's
-    /// `ORDO_EXTERNAL_<SCHEMA>_SCHEMA` that is not a schema name. Also the
-    /// grants (owner ruling 2026-11-18): a `reader` line with no
-    /// `ORDO_READER_<NAME>_ROLE`, a peer table this deployment's role may
-    /// not read, or a role that reads the peer without a grant. The boot
-    /// is refused naming the variable or the line to add.
+    /// An external's setting refused: a peer with no
+    /// `ORDO_PEER_<NAME>_URL`, or a plain external's
+    /// `ORDO_EXTERNAL_<SCHEMA>_SCHEMA` that is not a schema name. The boot
+    /// is refused naming the variable.
     ExternalSchema {
         version: String,
         refusal: Box<ordo_exec::peer::SchemaRefusal>,
@@ -889,26 +885,6 @@ pub async fn verify_embedded(
     .await
 }
 
-/// Match this deployment's sign-in connections with each peer's, by
-/// provider fingerprint, and write the map the `$caller` guard joins
-/// (owner ruling 2026-11-18, `ordo_exec::peer::link`). A connection whose
-/// subject claim can change hands never links.
-pub async fn link_peers(
-    pool: &Pool,
-    fixture: &Fixture,
-    pass: ordo_exec::peer::Pass,
-) -> Result<Vec<ordo_exec::peer::PeerLinks>, ordo_exec::peer::SchemaRefusal> {
-    let callers = ordo_exec::peer::callers(&fixture.schema, &fixture.registry);
-    ordo_exec::peer::link(
-        pool,
-        &fixture.schema,
-        &callers,
-        &ordo_identity::oauth2::MUTABLE_SUBJECT_CLAIMS,
-        pass,
-    )
-    .await
-}
-
 /// The shared gating logic behind [`verify_candidate`] (the registry path)
 /// and [`verify_embedded`] (`ordo dev`'s path): assign custody and tenancy,
 /// validate specs, run the shape gate, and mint a [`Verified`]. Neither
@@ -929,48 +905,14 @@ async fn gate_fixture(
     // the ordering of the two assignments cannot silently matter.
     let mut fixture = compiled.in_space(&space.0);
     fixture.keys = keys.clone();
-    // Each external's schema, from its setting (a peer's, or a plain
-    // external's swap), before anything plans a statement: the compiled
+    // Each external's setting (a peer's door, or a plain external's
+    // schema swap), before anything plans a statement: the compiled
     // program is the same in every environment, and the schema is not.
-    // A peer schema must hold an Ordo deployment.
     let schema_refusal = |refusal| LoadRefusal::ExternalSchema {
         version: version.to_string(),
         refusal: Box::new(refusal),
     };
-    ordo_exec::peer::resolve(&mut fixture.schema, pool.schema()).map_err(schema_refusal)?;
-    // Consent is Postgres's (owner ruling 2026-11-18). As a reader: this
-    // role must hold the grants the peer gives, and must not read the peer
-    // without one. As the app being read, the grants are made last, below,
-    // once every refusal of this gate has passed.
-    let callers = ordo_exec::peer::callers(&fixture.schema, &fixture.registry);
-    for line in ordo_exec::peer::check_access_env(pool, &fixture.schema, &callers)
-        .await
-        .map_err(schema_refusal)?
-    {
-        println!("  {line}");
-    }
-    ordo_exec::peer::check(pool, &fixture.schema)
-        .await
-        .map_err(schema_refusal)?;
-    // As a reader, tell each read app which Ordo release this deployment
-    // runs: the one column of `$ordorelease`, granted to the role that
-    // owns the peer's schema (owner ruling 2026-11-25).
-    for line in ordo_exec::peer::grant_release_to_peers(pool, &fixture.schema)
-        .await
-        .map_err(schema_refusal)?
-    {
-        println!("  {line}");
-    }
-    // Who is the same person in each peer: the map of shared providers,
-    // built here and every minute after (`runtime::refresh_peer_links`).
-    for links in link_peers(pool, &fixture, ordo_exec::peer::Pass::Start)
-        .await
-        .map_err(schema_refusal)?
-    {
-        for line in links.start_lines() {
-            println!("  {line}");
-        }
-    }
+    ordo_exec::peer::resolve(&mut fixture.schema).map_err(schema_refusal)?;
     let fixture = Arc::new(fixture);
 
     // Registration's own refusal, before a shadow build pays for finding
@@ -1002,20 +944,6 @@ async fn gate_fixture(
         space: space.clone(),
     };
     let verified = Verified::from_gate(version, fixture, exec, report)?;
-
-    // As the app being read: the grants each `reader` line's role holds
-    // here are made to equal the file. Only for the active version, and
-    // only now, after every refusal above, so a version the gate refuses
-    // never changes them. A grant that fails still refuses the load, and
-    // the `Verified` is dropped before anyone holds it.
-    if live == LiveCheck::Deployment {
-        for line in ordo_exec::peer::grant_readers(pool, &verified.0.fixture.schema)
-            .await
-            .map_err(schema_refusal)?
-        {
-            println!("  {line}");
-        }
-    }
 
     // The seam, guarded where it is made. A future refactor that
     // reintroduces a `Fixture::from_source` after the assignment above —

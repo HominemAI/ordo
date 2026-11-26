@@ -330,13 +330,12 @@ impl<'s> Lexer<'s> {
 
     fn ident(&mut self, start: usize, line: u32, col: u32) -> Result<(), LexError> {
         let word = self.take_word();
-        // The one name that may hold underscores: a reader's nickname, the
-        // word after `reader` at the start of a top-level line (owner,
-        // 2026-11-18, `reader note_viewer reads notes`). It is upper-cased
-        // into `ORDO_READER_<NAME>_ROLE` and never names a field or table.
-        // A grant's name is the same kind of name (`grant note_viewer`,
-        // `grant provider hominem`): upper-cased into a setting, never a
-        // field or a table.
+        // The one name that may hold underscores: a grant's name, the word
+        // after `grant` at the start of a top-level line (`grant
+        // note_viewer`, `grant provider hominem`). It is upper-cased into a
+        // setting and never names a field or table. The word after the
+        // removed `reader` lexes the same way, so its line reaches the
+        // parser's refusal, which says what to write instead.
         let n = self.out.len();
         let head = |i: usize, word: &str| {
             matches!(

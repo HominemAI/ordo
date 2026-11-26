@@ -1,16 +1,17 @@
-//! `ordo apply --db` of a program with a `peer` line reads the peer's
-//! schema from `ORDO_PEER_<NAME>_SCHEMA`, as the door's apply does
-//! (reported fix, 2026-11-19, found wiring the federation e2e).
+//! `ordo apply --db` of a program with a `peer` block reads the peer's
+//! settings, as the door's apply does (reported fix, 2026-11-19, found
+//! wiring the federation e2e).
 //!
 //! What was seen: `ordo apply examples/note-viewer --direct` refused every
-//! external from the peer as `external_missing` on table
-//! `$unresolved peer notes.notes`, with the setting set. The cause: the
-//! command assembled the program without `ordo_exec::peer::resolve`, which
-//! `Program::compile` (the door's path) calls. The fix calls it in the same
-//! place, after the artifact and the DDL are taken.
+//! external from the peer as `external_missing`, with the setting set. The
+//! cause: the command assembled the program without
+//! `ordo_exec::peer::resolve`, which `Program::compile` (the door's path)
+//! calls. The fix calls it in the same place, after the artifact and the
+//! DDL are taken. Since G8 the setting is the holder's door,
+//! `ORDO_PEER_<NAME>_URL`: a peer is never read from a schema.
 //!
-//! A regression looks like `$unresolved peer` in the command's refusal, or an
-//! unset peer setting that is not named.
+//! A regression looks like a peer's table refused as missing, or an unset
+//! door that is not named.
 //!
 //! One test, in a binary of its own, because it sets the peer setting for
 //! the whole process. Its database is `ordo_peerapply`.
@@ -22,7 +23,9 @@ use ordo_conformance::Pg;
 use support::operator;
 
 const VIEWER: &str = r#"
-peer journal
+peer journal {
+  std.notes.list
+}
 
 external entries from journal.notes shared {
   id: text <- id
@@ -50,15 +53,11 @@ fn apply(db: &str, path: &Path) -> operator::Outcome {
 }
 
 #[test]
-fn apply_reads_the_peer_schema_from_its_setting() {
+fn apply_refuses_a_peer_with_no_door_naming_the_setting() {
     let db = "ordo_peerapply";
     let pg = Pg::named(db);
-    pg.exec(
-        "DROP SCHEMA public CASCADE; CREATE SCHEMA public; \
-         DROP SCHEMA IF EXISTS alpha CASCADE; CREATE SCHEMA alpha; \
-         CREATE TABLE alpha.notes (id text PRIMARY KEY, title text NOT NULL);",
-    )
-    .expect("the peer's table");
+    pg.exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+        .expect("an empty database");
 
     let dir: PathBuf = std::env::temp_dir().join("ordo-peer-apply");
     let _ = std::fs::remove_dir_all(&dir);
@@ -66,24 +65,17 @@ fn apply_reads_the_peer_schema_from_its_setting() {
     let path = dir.join("viewer.ordo");
     std::fs::write(&path, VIEWER).expect("write program");
 
-    // Unset: refused, naming the setting.
-    std::env::remove_var("ORDO_PEER_JOURNAL_SCHEMA");
+    std::env::remove_var("ORDO_PEER_JOURNAL_URL");
     let out = apply(db, &path);
     assert_ne!(out.code, 0, "{}", out.report);
     assert!(
-        out.report.contains("ORDO_PEER_JOURNAL_SCHEMA"),
+        out.report.contains("ORDO_PEER_JOURNAL_URL is not set"),
         "{}",
         out.report
     );
-
-    // Set: the externals read `alpha`. `alpha` holds no Ordo deployment, so
-    // the apply is still refused, now for that and by its real name.
-    std::env::set_var("ORDO_PEER_JOURNAL_SCHEMA", "alpha");
-    let out = apply(db, &path);
     assert!(
-        !out.report.contains("$unresolved peer"),
-        "the peer was not resolved: {}",
+        !out.report.contains("external_missing"),
+        "a peer's table is never looked for in a schema: {}",
         out.report
     );
-    assert!(out.report.contains("alpha"), "{}", out.report);
 }

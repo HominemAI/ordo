@@ -391,24 +391,14 @@ export interface AuthNode {
 }
 
 /**
- * `peer journal`: a local nickname for another Ordo deployment. With
- * `uses`, the block form `peer notes { std.notes.list }`: the holder's ops
- * this deployment calls through the holder's door.
+ * `peer notes { std.notes.list }`: a local nickname for another Ordo
+ * deployment, and the holder's ops this deployment calls through the
+ * holder's door.
  */
 export interface PeerNode {
   readonly kind: 'peer';
   readonly name: string;
-  readonly uses: readonly string[] | null;
-}
-
-/**
- * `reader note_viewer reads notes, notesAccess`: another Ordo deployment that
- * may read these tables of this one.
- */
-export interface ReaderNode {
-  readonly kind: 'reader';
-  readonly name: string;
-  readonly tables: readonly string[];
+  readonly uses: readonly string[];
 }
 
 /**
@@ -431,7 +421,6 @@ export interface GrantNode {
 export type Declaration =
   | DomainNode
   | PeerNode
-  | ReaderNode
   | GrantNode
   | EntityNode
   | ExternalNode

@@ -59,7 +59,6 @@ export {
   named,
   op,
   peer,
-  reader,
   ref,
   src,
   star,

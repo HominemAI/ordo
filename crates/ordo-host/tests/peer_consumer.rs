@@ -767,6 +767,42 @@ async fn the_consumer_registers_its_key_and_its_apply_is_checked_against_the_hol
     );
     assert_eq!(uses[0].ops, ["std.journal.list", "addEntry"]);
 
+    // G8: each side keeps the Ordo release the other said through the
+    // door, and the release check names it there. The consumer sent its
+    // own with the use; the holder answered its own.
+    use ordo_host::release_check;
+    assert_eq!(uses[0].release.as_deref(), Some(release_check::release()));
+    let holders = peer_ops::holders(&viewer.pool).await.unwrap();
+    assert_eq!(holders.len(), 1, "{holders:?}");
+    assert_eq!(
+        (holders[0].peer.as_str(), holders[0].handle.as_str()),
+        ("notes", "notes")
+    );
+    assert_eq!(holders[0].release, release_check::release());
+    let mine = Program::compile(&consumer_source("1.0.0", &["std.journal.list", "addEntry"]))
+        .expect("compiles");
+    let seen = release_check::neighbours(&viewer.pool, &[mine.schema])
+        .await
+        .expect("read");
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!((seen[0].kind, seen[0].name.as_str()), ("peer", "notes"));
+    assert_eq!(seen[0].release.as_deref(), Some(release_check::release()));
+    let holder_program =
+        Program::compile(&format!("{FIXTURE}\n{HOLDER}")).expect("the holder compiles");
+    let seen = release_check::neighbours(&holder.pool, &[holder_program.schema])
+        .await
+        .expect("read");
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!((seen[0].kind, seen[0].at.as_str()), ("consumer", "viewer"));
+    assert_eq!(seen[0].release.as_deref(), Some(release_check::release()));
+    assert!(
+        seen[0]
+            .line(release_check::release())
+            .contains("this release"),
+        "{}",
+        seen[0].line(release_check::release())
+    );
+
     // The holder's plan of a version that stops granting `addEntry` names
     // the consumer it breaks, and warns: nothing is refused.
     let next = Program::compile(&format!("{FIXTURE}\n{HOLDER_NEXT}")).expect("compiles");

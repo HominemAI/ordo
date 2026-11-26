@@ -17,9 +17,8 @@
 //!    target recomputes it and refuses a difference, naming the file
 //!    ([`Edited`]).
 //! 5. The target's own checks run before anything is stored: each secret a
-//!    function declares has a value here ([`SecretsMissing`]), each external
-//!    entity checks out ([`External`]), and each `reader` line has its role
-//!    ([`Readers`]). The `requires` check is not here: the language has no
+//!    function declares has a value here ([`SecretsMissing`]), and each
+//!    external entity checks out ([`External`]). The `requires` check is not here: the language has no
 //!    `requires` yet (the parser refuses it, `ordo_syntax::auth`), and the
 //!    host derives no needs (`plan-configuration-in-the-file.md` §3, step 2).
 //! 6. The act is a named deployment owner's, recorded in `$promotions` and
@@ -43,7 +42,6 @@
 //! [`Edited`]: PromotionRefusal::Edited
 //! [`SecretsMissing`]: PromotionRefusal::SecretsMissing
 //! [`External`]: PromotionRefusal::External
-//! [`Readers`]: PromotionRefusal::Readers
 
 use std::collections::BTreeMap;
 
@@ -209,9 +207,6 @@ pub enum PromotionRefusal {
     SecretsMissing(Vec<String>),
     /// An external entity does not check out here.
     External(Vec<String>),
-    /// A `reader` line has no usable role here. The refusal names the
-    /// setting.
-    Readers(String),
     /// The program was refused as an apply would refuse it.
     Apply(ApplyRefused),
     /// The version did not arrive through the gate. Promote it.
@@ -297,12 +292,6 @@ impl std::fmt::Display for PromotionRefusal {
                 "an external entity does not check out on this deployment: {}",
                 lines.join("; ")
             ),
-            PromotionRefusal::Readers(why) => {
-                write!(
-                    f,
-                    "a `reader` line does not check out on this deployment: {why}"
-                )
-            }
             PromotionRefusal::Apply(a) => write!(f, "{a}"),
             PromotionRefusal::NotPromoted {
                 version,
@@ -628,9 +617,6 @@ async fn land(
     if !external.problems.is_empty() {
         return Err(PromotionRefusal::External(external.refusals()));
     }
-    ordo_exec::peer::check_readers(pool, &program.schema)
-        .await
-        .map_err(|e| PromotionRefusal::Readers(e.to_string()))?;
 
     for bytes in to_store.values() {
         crate::functions::store_code(pool, bytes)

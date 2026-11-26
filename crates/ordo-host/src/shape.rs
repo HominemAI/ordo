@@ -98,6 +98,10 @@ pub struct ShapeReport {
     pub no_result_shape: Vec<String>,
     /// Ops the gate could not pose, each with the reason why.
     pub undescribable: Vec<Undescribable>,
+    /// Read ops over another deployment's rows, which arrive through its
+    /// door at each call (`plan-federation-grants.md` §4): nothing here to
+    /// describe, and the holder's door checks its own shape.
+    pub peer_reads: Vec<String>,
     /// Ways the **live** schema is not the shape this DDL asserts.
     ///
     /// Observed here and refused by [`crate::deploy`], not by this
@@ -111,18 +115,23 @@ pub struct ShapeReport {
 
 impl ShapeReport {
     pub fn total(&self) -> usize {
-        self.verified.len() + self.no_result_shape.len() + self.undescribable.len()
+        self.verified.len()
+            + self.no_result_shape.len()
+            + self.undescribable.len()
+            + self.peer_reads.len()
     }
 
     /// One line an operator can read at a glance.
     pub fn summary(&self) -> String {
         format!(
             "{} of {} registered ops shape-verified against an empty shadow \
-             ({} have no result shape, {} were undescribable, {} live-schema drift)",
+             ({} have no result shape, {} were undescribable, {} read a peer through \
+             its door, {} live-schema drift)",
             self.verified.len(),
             self.total(),
             self.no_result_shape.len(),
             self.undescribable.len(),
+            self.peer_reads.len(),
             self.drift.len(),
         )
     }
@@ -137,7 +146,7 @@ pub enum ShapeRefusal {
     Mismatch(Vec<ShapeMismatch>),
     /// Every registered read op turned out to be undescribable, so the gate
     /// verified nothing. A gate with zero coverage is not a gate.
-    NoCoverage(ShapeReport),
+    NoCoverage(Box<ShapeReport>),
     /// The shadow schema could not be built, or the database was
     /// unreachable. Verification could not run, so it did not pass.
     Unavailable(String),
@@ -398,22 +407,6 @@ async fn verify_on(
     shadow: &str,
     ddl: &str,
 ) -> Result<ShapeReport, ShapeRefusal> {
-    // `$caller` on a peer's table reads this deployment's own sign-in
-    // directory (`$principal`, `$authenticator`) unqualified, beside
-    // `members`. Those are platform tables, not the program's DDL, so the
-    // shadow is given them too, or every op that reads a peer would fail to
-    // describe here and run fine in production.
-    let with_directory;
-    let ddl = if f.schema.peers.is_empty() {
-        ddl
-    } else {
-        let mut all = vec![ddl.to_string()];
-        all.extend(crate::principal_directory::directory_ddl().map(str::to_string));
-        // And the map of shared providers it joins (`ordo_exec::peer::link`).
-        all.push(ordo_exec::peer::LINK_DDL.to_string());
-        with_directory = all.join(";\n");
-        &with_directory
-    };
     pool.build_shadow_in(shadow, ddl)
         .await
         .map_err(|e| ShapeRefusal::Unavailable(format!("the shadow schema did not build: {e}")))?;
@@ -503,6 +496,13 @@ async fn verify_on(
         // set than the descriptor declares, and the gate would go on passing
         // while the two disagreed.
         let _ = ordo_plan::artifact::project_row_key(&mut q);
+        // A read of a peer runs over the rows its holder answers at each
+        // call, never a table here: there is nothing to describe until the
+        // holder is asked. The holder's door checks its own shape.
+        if ordo_exec::peer_reads::reads_a_door(&q) {
+            report.peer_reads.push(spec.name.clone());
+            continue;
+        }
         let plan = match ordo_plan::plan(&q, &ordo_plan::Space::bound(&f.space().0)) {
             Ok(p) => p,
             Err(e) => {
@@ -550,8 +550,9 @@ async fn verify_on(
     if !mismatches.is_empty() {
         return Err(ShapeRefusal::Mismatch(mismatches));
     }
-    if report.verified.is_empty() {
-        return Err(ShapeRefusal::NoCoverage(report));
+    // A program whose every read is a peer's has nothing here to verify.
+    if report.verified.is_empty() && report.peer_reads.is_empty() {
+        return Err(ShapeRefusal::NoCoverage(Box::new(report)));
     }
     Ok(report)
 }

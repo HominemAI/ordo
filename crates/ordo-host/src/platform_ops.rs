@@ -2787,6 +2787,15 @@ impl PlatformOps {
         Box::pin(self.execute_all(op, space, bound, caller))
     }
 
+    /// Put the stored input caps (`limits.*`, 2026-11-25) in force before an
+    /// evolution op checks a reason or a name. A deployment with no apply
+    /// state holds the defaults.
+    async fn refresh_input_caps(&self) {
+        if let Ok(ops) = self.apply_ops() {
+            let _ = crate::input_caps::refresh(&ops.pool).await;
+        }
+    }
+
     /// Every platform op but the deploy ops [`Self::execute`] sends on.
     async fn execute_all(
         &self,
@@ -2865,6 +2874,7 @@ impl PlatformOps {
                     .await
             }
             name if crate::clones::OPS.contains(&name) => {
+                self.refresh_input_caps().await;
                 let clones = self.clones.as_deref().ok_or_else(|| {
                     ExecError::internal(
                         "this deployment registered the clone ops and wired no state for them",
@@ -2873,6 +2883,7 @@ impl PlatformOps {
                 clones.execute(name, space, bound, caller).await
             }
             name if crate::rehearsals::OPS.contains(&name) => {
+                self.refresh_input_caps().await;
                 let clones = self.clones.as_deref().ok_or_else(|| {
                     ExecError::internal(
                         "this deployment registered the rehearsal ops and wired no state for them",
@@ -2881,9 +2892,11 @@ impl PlatformOps {
                 crate::rehearsals::execute(clones, name, space, bound, caller).await
             }
             name if crate::tenant_builds::OPS.contains(&name) => {
+                self.refresh_input_caps().await;
                 crate::tenant_builds::execute(self.apply_ops()?, name, space, bound, caller).await
             }
             name if crate::window_ops::OPS.contains(&name) => {
+                self.refresh_input_caps().await;
                 crate::window_ops::execute(self.apply_ops()?, name, space, bound, caller).await
             }
             // The tenant moves itself off a revoked version: bound to the

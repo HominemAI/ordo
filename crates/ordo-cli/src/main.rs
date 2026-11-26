@@ -301,10 +301,10 @@ fn usage() -> ! {
          ordo versions  remove <version> --reason \"<text>\" [--move-to <version>]\n      \
          remove a stored version, moving its tenants first. Refused when it\n      \
          is active, a build serves it, or a restore may still need it.\n  \
-         ordo versions  settings | set <served|minimum|new-tenant|min-residency|idle-evict-after|restore-window|max-loaded|memory-budget|max-concurrent-loads|at-capacity|wake-wait|windows.<name>|soak.length> <value> | --clear --reason \"<text>\"\n      \
+         ordo versions  settings | set <served|minimum|new-tenant|min-residency|idle-evict-after|restore-window|max-loaded|memory-budget|max-concurrent-loads|at-capacity|wake-wait|windows.<name>|limits.<name>|soak.length> <value> | --clear --reason \"<text>\"\n      \
          read or change which versions are served, the oldest a tenant may\n      \
          stay on, the version new tenants start on, how many versions a node\n      \
-         keeps loaded, the window caps and the soak. Stored in Ordo,\n      \
+         keeps loaded, the window caps, the input caps and the soak. Stored in Ordo,\n      \
          through the door only (`--host ...`); a refused value is named.\n  \
          ordo environments list [<name>] | register <name> [--position <n>] --reason \"<text>\"\n      \
          the chain of environments this deployment declares (dev, staging,\n      \

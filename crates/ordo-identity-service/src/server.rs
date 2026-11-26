@@ -373,6 +373,7 @@ impl Service {
         self.refresh_deployments().await?;
         audit::checkpoint_if_due(self.0.store.pool(), self.handle(), &self.0.keys, now).await?;
         crate::oidc::sweep_codes(self.0.store.pool(), self.handle(), now).await?;
+        crate::exchange::sweep_assertions(self.0.store.pool(), self.handle(), now).await?;
         crate::throttle::sweep(self.0.store.pool(), self.handle(), now).await?;
         Ok(())
     }

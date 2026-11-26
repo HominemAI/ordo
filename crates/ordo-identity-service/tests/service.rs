@@ -23,7 +23,7 @@ async fn boot_migrates_makes_one_key_of_each_kind_and_keeps_them_across_restarts
     let h = boot_with("boot", &[]).await;
     assert_eq!(
         h.svc.store().applied().await.unwrap(),
-        vec![1, 2, 3, 4, 5, 6]
+        vec![1, 2, 3, 4, 5, 6, 7]
     );
     let (_, v, _) = h
         .call("GET", "/.well-known/jwks.json", &[], Value::Null)

@@ -134,7 +134,11 @@ peer notes {
   (PKCE, no secret; `ordo-identity-service/src/oidc.rs`). Recommendation:
   a key derived from the deployment's master key, registered at the service
   when the deployment is registered, so no person handles a key (owner on
-  Q11: having to give a key is a nuisance).
+  Q11: having to give a key is a nuisance). Built in G2 this way
+  (`plan-identity-service.md` 11.5). Still open: who carries the public
+  half to the service. A provisioner registers it with the deployment;
+  the route also takes the deployment's own admin token, so the host or
+  console can register it unasked.
 - How the call chain is carried for the loop check (a header listing the
   deployments a call has passed through, signed with the token).
 
@@ -143,7 +147,7 @@ peer notes {
 | Step | What | Size |
 |---|---|---|
 | G1 | `grant` blocks: parser, expansion at apply, plan output, refusals | M |
-| G2 | The identity service: consumer credentials, token exchange with the actor claim | M |
+| G2 | The identity service: consumer credentials, token exchange with the actor claim. **Built** on `fed-g2-token-exchange`: consumer key derived from the master key, public half registered (`consumerKey`, `deployment consumer-key`); RFC 7523 assertions, each `jti` once; RFC 8693 exchange (`typ` `ordo-peer+jwt`, `act.sub`) and `client_credentials` (`typ` `ordo-client+jwt`, `kind` `client`), `aud` `ordo-peer:<holder>`; `ORDO_IDENTITY_PEER_TOKEN_SECS` 300, `ORDO_IDENTITY_CLIENT_ASSERTION_SECS` 120; audit `oidc.exchange`, `oidc.client-token`. Tests: `ordo-identity-service/tests/federation_exchange.rs`, 7. The host deriving and registering its key is G4 | M |
 | G3 | The holder's door: grant check on every call, on behalf or as itself, the loop check, audit | M |
 | G4 | The consumer: `peer` block checked against the holder at apply; the holder records uses and names breaks | M |
 | G5 | Peer entities served by door calls: pushdown, batched joins, `$caller` through the exchanged token | L |

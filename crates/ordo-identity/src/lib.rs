@@ -43,6 +43,7 @@ pub mod oauth2;
 pub mod oidc;
 pub mod origin;
 pub mod passkey;
+pub mod peer_token;
 pub mod pins;
 pub mod principal;
 pub mod provider;

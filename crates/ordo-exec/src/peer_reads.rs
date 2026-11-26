@@ -117,19 +117,43 @@ impl From<PeerReadFail> for ExecFail {
 /// The host's half: the one client to other deployments' doors
 /// (`ordo_host::peer_client`). `caller` is the member this read is made
 /// for, `None` when nobody is signed in: then the call is made as this
-/// deployment itself.
+/// deployment itself. `chain` is the chain of the call being served,
+/// oldest first, empty for a call from a person or a client: every peer
+/// call passes it on, so a cycle of deployments is refused by name at
+/// once (step G5b).
 #[async_trait::async_trait]
 pub trait PeerFetch: Send + Sync {
     async fn fetch(
         &self,
         pool: &Pool,
         caller: Option<&str>,
+        chain: &[String],
         fetch: &Fetch,
     ) -> Result<Vec<Map<String, Value>>, PeerReadFail>;
 
     /// The most refs one batched call carries; more are split into calls
     /// of this size.
     fn batch_keys(&self) -> usize;
+}
+
+/// The client to other deployments' doors for one call, with the chain
+/// that call came by (step G5b).
+#[derive(Clone, Copy)]
+pub struct Peers<'a> {
+    pub fetch: &'a dyn PeerFetch,
+    /// The incoming chain, oldest first; empty for a call from a person.
+    pub chain: &'a [String],
+}
+
+/// What a write needs to serve the peer reads its guards make (step G5b):
+/// the client, the member the write is made for, and the incoming chain.
+/// The reads are door calls made while the write runs, never part of its
+/// transaction: the guard is decided on the holder's answer.
+#[derive(Clone)]
+pub struct PeerWrite {
+    pub fetch: Arc<dyn PeerFetch>,
+    pub caller: Option<String>,
+    pub chain: Vec<String>,
 }
 
 /// How a read is paged, so a probe reads the same rows.
@@ -175,7 +199,7 @@ struct Site {
 /// longer bounds it).
 pub async fn serve<R, Fut>(
     q: &mut Query,
-    fetcher: &dyn PeerFetch,
+    peers: Peers<'_>,
     pool: &Pool,
     caller: Option<&str>,
     paging: Option<Paging<'_>>,
@@ -236,7 +260,7 @@ where
                 f.whole = false;
             }
         }
-        let rows = fetcher.fetch(pool, person, &f).await?;
+        let rows = peers.fetch.fetch(pool, person, peers.chain, &f).await?;
         served.insert(s.alias.clone(), to_rows(&s.read, &rows)?);
     }
 
@@ -300,7 +324,7 @@ where
                 }
             }
             let mut got = Vec::new();
-            let size = fetcher.batch_keys().max(1);
+            let size = peers.fetch.batch_keys().max(1);
             for chunk in keys.chunks(size) {
                 let mut f = base_fetch(s);
                 f.conds.push(json!({
@@ -310,7 +334,7 @@ where
                 }));
                 f.limit = Some(chunk.len());
                 f.whole = false;
-                got.extend(fetcher.fetch(pool, person, &f).await?);
+                got.extend(peers.fetch.fetch(pool, person, peers.chain, &f).await?);
             }
             served.insert(s.alias.clone(), to_rows(&s.read, &got)?);
         }
@@ -319,6 +343,20 @@ where
     rewrite_callers(q, &sites);
     set_served(q, &externals, served);
     Ok(())
+}
+
+/// Does `q` read a peer through its door? What [`serve`] would ask a
+/// holder for; `false` costs nothing to the many reads that do not.
+pub fn reads_a_door(q: &Query) -> bool {
+    let Some(externals) = externals_of(q) else {
+        return false;
+    };
+    if !externals.values().any(|r| r.door.is_some()) {
+        return false;
+    }
+    let mut sites = Vec::new();
+    collect(q, &externals, true, &mut sites);
+    !sites.is_empty()
 }
 
 /// The member id an anonymous call carries (`ordo_api::ANONYMOUS`).

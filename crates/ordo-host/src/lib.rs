@@ -966,6 +966,22 @@ impl FixtureExecutor {
             .map(String::from)
     }
 
+    /// Another deployment's chain, when the door admitted one
+    /// ([`ordo_api::CHAIN_PARAM`]): passed on by every peer call the op
+    /// makes (step G5b). Never a guard input.
+    fn chain_of(bound: &BoundParams) -> Vec<String> {
+        bound
+            .0
+            .get(ordo_api::CHAIN_PARAM)
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|d| d.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn call_source(op: &OpSpec, bound: &BoundParams) -> Result<String, ExecError> {
         let mut args = Vec::new();
         for p in &op.params {
@@ -1196,6 +1212,7 @@ impl OpExecutor for FixtureExecutor {
         Box::pin(async move {
             let caller = Self::caller_of(&bound)?;
             let agent = Self::agent_of(&bound);
+            let chain = Self::chain_of(&bound);
             let call = Self::call_source(op, &bound)?;
             // One read of the live program AND of the space binding, held
             // for the whole call: a swap landing mid-request must not move
@@ -1278,7 +1295,12 @@ impl OpExecutor for FixtureExecutor {
                             page_rows.map_or(self.page_size, |n| n as i64),
                             after.as_deref(),
                             &correlation.0,
-                            self.spaces.deployment().peer_reads(),
+                            self.spaces.deployment().peer_reads().map(|f| {
+                                ordo_exec::peer_reads::Peers {
+                                    fetch: &**f,
+                                    chain: &chain,
+                                }
+                            }),
                         )
                         .await
                         .map_err(|e| {
@@ -1319,15 +1341,25 @@ impl OpExecutor for FixtureExecutor {
                     // `agent` the token's holder: the guards see the first,
                     // and the chain names both.
                     let lease = lease.map(|l| (l.key, l.fingerprint));
+                    // A guard that reads a peer through its door asks the
+                    // holder while the write runs (step G5b).
+                    let peers = self.spaces.deployment().peer_reads().map(|f| {
+                        ordo_exec::peer_reads::PeerWrite {
+                            fetch: f.clone(),
+                            caller: Some(caller.clone()),
+                            chain: chain.clone(),
+                        }
+                    });
                     let first = view
                         .exec
-                        .write_chained_as(
+                        .write_chained_served(
                             view.fixture.clone(),
                             bound_space.log.clone(),
                             call.clone(),
                             caller.clone(),
                             agent.clone(),
                             lease.clone(),
+                            peers.clone(),
                         )
                         .await;
                     // **The pin moved under this node** (§1.3): another
@@ -1358,13 +1390,14 @@ impl OpExecutor for FixtureExecutor {
                             }
                             let view = &again.view;
                             view.exec
-                                .write_chained_as(
+                                .write_chained_served(
                                     view.fixture.clone(),
                                     again.log.clone(),
                                     call,
                                     caller,
                                     agent,
                                     lease,
+                                    peers,
                                 )
                                 .await
                         }
@@ -2740,6 +2773,18 @@ impl AccessChecker for IdentityAccess {
             peer_door::PeerDecision::Refused { why, .. } => why,
             _ => None,
         }
+    }
+
+    /// Another deployment's chain, for the peer calls its op makes
+    /// (step G5b).
+    fn peer_chain(&self, token: &str) -> Vec<String> {
+        if !ordo_identity::peer_token::is_peer_shape(token) {
+            return Vec::new();
+        }
+        self.peer
+            .get()
+            .map(|p| p.chain_of(token))
+            .unwrap_or_default()
     }
 
     fn versions_disagree(&self, token: &str, space: &str, op: &str) -> Option<String> {

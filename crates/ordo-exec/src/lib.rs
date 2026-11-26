@@ -2492,6 +2492,9 @@ pub struct BlockingTx {
     /// While a seal runs: what this write's own statements returned for
     /// the seal overlay (`overlay::RowCapture`).
     row_capture: std::sync::Mutex<overlay::RowCapture>,
+    /// The client that serves a guard's peer read through its door, and
+    /// the pool it reads the caller's sign-in link from (step G5b).
+    peers: Option<(peer_reads::PeerWrite, Pool)>,
 }
 
 impl ordo_conformance::write::WriteDb for BlockingTx {
@@ -2512,6 +2515,56 @@ impl ordo_conformance::write::WriteDb for BlockingTx {
 
     fn refused_by_constraint(&self) -> bool {
         self.constraint.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A guard's read of a peer through its door (step G5b): the holder is
+    /// asked as a read of it is ([`peer_reads::serve`]), its refs from a
+    /// probe run in this transaction, and the guard runs here over the
+    /// holder's answer. The calls are made while the write runs and are
+    /// not part of its transaction: there is none across deployments.
+    fn serve_peers(
+        &self,
+        q: &mut ordo_sema::ir::Query,
+        space: &ordo_plan::Space,
+    ) -> Result<(), String> {
+        if !peer_reads::reads_a_door(q) {
+            return Ok(());
+        }
+        let Some((peers, pool)) = &self.peers else {
+            return Err(format!(
+                "{}: this write's guard reads a peer through its door, and this write path \
+                 serves no door reads. Fix: run the write through the deployment's door",
+                peer_reads::PeerReadFail::REFUSED
+            ));
+        };
+        let space = space.clone();
+        let tx = &self.tx;
+        let conflict = &self.conflict;
+        let served = self.handle.block_on(peer_reads::serve(
+            q,
+            peer_reads::Peers {
+                fetch: &*peers.fetch,
+                chain: &peers.chain,
+            },
+            pool,
+            peers.caller.as_deref(),
+            None,
+            |probe, _whole| async move {
+                let sql = ordo_plan::plan(&probe, &space)
+                    .map_err(|e| ExecFail::Compile(format!("plan: {e}")))?
+                    .sql;
+                tx.rows(&sql).await.map_err(|e| {
+                    if e.is_retryable() {
+                        conflict.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    ExecFail::Pool(e)
+                })
+            },
+        ));
+        served.map_err(|e| match e {
+            ExecFail::Pool(p) if p.is_busy() => format!("server_busy: {p}"),
+            other => other.to_string(),
+        })
     }
 }
 
@@ -2566,7 +2619,7 @@ impl Executor {
         caller: String,
         lease: Option<(String, String)>,
     ) -> Result<Option<serde_json::Value>, ExecFail> {
-        self.write_retrying(fixture, log, call, caller, None, lease, None)
+        self.write_retrying(fixture, log, call, caller, None, lease, None, None)
             .await
     }
 
@@ -2604,6 +2657,27 @@ impl Executor {
         agent: Option<String>,
         lease: Option<(String, String)>,
     ) -> Result<Option<serde_json::Value>, ExecFail> {
+        self.write_chained_served(fixture, log, call, caller, agent, lease, None)
+            .await
+    }
+
+    /// [`Executor::write_chained_as`], with the client that serves the
+    /// peer reads its guards make through their doors (step G5b,
+    /// [`peer_reads::PeerWrite`]). Each is a door call made while the
+    /// write runs, outside its transaction; the guard is decided on the
+    /// holder's answer. `None` serves none: a guard that reads a peer
+    /// through its door is refused by name.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_chained_served(
+        &self,
+        fixture: std::sync::Arc<ordo_conformance::Fixture>,
+        log: std::sync::Arc<std::sync::Mutex<ordo_conformance::WriteLog>>,
+        call: String,
+        caller: String,
+        agent: Option<String>,
+        lease: Option<(String, String)>,
+        peers: Option<peer_reads::PeerWrite>,
+    ) -> Result<Option<serde_json::Value>, ExecFail> {
         self.write_retrying(
             fixture,
             log,
@@ -2612,6 +2686,7 @@ impl Executor {
             agent,
             lease,
             Some(self.chain_space()),
+            peers,
         )
         .await
     }
@@ -2663,6 +2738,7 @@ impl Executor {
                     lease.clone(),
                     Some(self.chain_space()),
                     runs_alone(attempt, attempts),
+                    None,
                     move |db, wlog| w(db, wlog),
                 )
                 .await;
@@ -2705,6 +2781,7 @@ impl Executor {
         agent: Option<String>,
         lease: Option<(String, String)>,
         append_to: Option<ordo_commandlog::SpaceId>,
+        peers: Option<peer_reads::PeerWrite>,
     ) -> Result<Option<serde_json::Value>, ExecFail> {
         let attempts = self.pool.write_attempts();
         let mut last = None;
@@ -2719,6 +2796,7 @@ impl Executor {
                     lease.clone(),
                     append_to.clone(),
                     runs_alone(attempt, attempts),
+                    peers.clone(),
                 )
                 .await;
             match out {
@@ -2751,8 +2829,9 @@ impl Executor {
         lease: Option<(String, String)>,
         append_to: Option<ordo_commandlog::SpaceId>,
         alone: bool,
+        peers: Option<peer_reads::PeerWrite>,
     ) -> Result<Option<serde_json::Value>, ExecFail> {
-        self.attempt(log, lease, append_to, alone, move |db, log| {
+        self.attempt(log, lease, append_to, alone, peers, move |db, log| {
             log.act_for(agent);
             fixture.run_write_on(db, log, &call, Some(&caller))
         })
@@ -2818,6 +2897,7 @@ impl Executor {
         lease: Option<(String, String)>,
         append_to: Option<ordo_commandlog::SpaceId>,
         alone: bool,
+        peers: Option<peer_reads::PeerWrite>,
         work: W,
     ) -> Result<Option<serde_json::Value>, ExecFail>
     where
@@ -2975,6 +3055,9 @@ impl Executor {
             }
         }
         let handle = tokio::runtime::Handle::current();
+        // The guards' peer reads read who the caller is at the identity
+        // service through the pool, outside this transaction.
+        let peer_pool = self.pool.clone();
         // The shared log, for the post-commit append.
         let log_after = log;
         let conflict = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -3006,6 +3089,7 @@ impl Executor {
                 conflict,
                 constraint: std::sync::atomic::AtomicBool::new(false),
                 row_capture: std::sync::Mutex::new(capture),
+                peers: peers.map(|p| (p, peer_pool)),
             };
             let out = work(&db, &mut scratch);
             let capture = db.row_capture.into_inner().expect("seal capture");
@@ -3383,6 +3467,7 @@ impl Executor {
             None,
             Some(self.chain_space()),
             false,
+            None,
             move |db, log| {
                 log.act_for(agent);
                 fixture.run_platform_converge(db, log, value, &caller)
@@ -3429,6 +3514,7 @@ impl Executor {
             None,
             Some(self.chain_space()),
             false,
+            None,
             move |db, log| work(db, log),
         )
         .await
@@ -3494,6 +3580,7 @@ impl LoggedExecutor {
                 None,
                 lease,
                 Some(self.space.clone()),
+                None,
             )
             .await
     }
@@ -3627,7 +3714,7 @@ impl Executor {
         page_size: i64,
         after: Option<&[Option<String>]>,
         correlation: &str,
-        peers: Option<&dyn peer_reads::PeerFetch>,
+        peers: Option<peer_reads::Peers<'_>>,
     ) -> Result<Page, ExecFail> {
         let call = label;
         let q = ordo_sema::bind_as(
@@ -3668,11 +3755,11 @@ impl Executor {
         let _ = ordo_plan::artifact::project_row_key(&mut q);
         // A peer read through its door: the holder's rows for this call,
         // asked before the plan and served to it (step G5).
-        if let Some(fetcher) = peers {
+        if let Some(peers) = peers {
             let space = self.plan_space();
             peer_reads::serve(
                 &mut q,
-                fetcher,
+                peers,
                 &self.pool,
                 caller,
                 Some(peer_reads::Paging { page_size, after }),

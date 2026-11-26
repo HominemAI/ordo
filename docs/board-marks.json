@@ -1027,6 +1027,62 @@
   "mark": "done",
   "at": "2026-10-09T09:31:18+00:00"
  },
+ "federation-build-5-choices-from-steps:1": {
+  "mark": "done",
+  "at": "2026-11-26T20:47:04+00:00"
+ },
+ "federation-build-5-choices-from-steps:10": {
+  "mark": "done",
+  "at": "2026-11-26T20:50:40+00:00"
+ },
+ "federation-build-5-choices-from-steps:11": {
+  "mark": "done",
+  "at": "2026-11-26T20:50:39+00:00"
+ },
+ "federation-build-5-choices-from-steps:12": {
+  "mark": "done",
+  "at": "2026-11-26T20:50:52+00:00"
+ },
+ "federation-build-5-choices-from-steps:13": {
+  "mark": "done",
+  "at": "2026-11-26T20:51:29+00:00"
+ },
+ "federation-build-5-choices-from-steps:14": {
+  "mark": "done",
+  "at": "2026-11-26T20:51:32+00:00"
+ },
+ "federation-build-5-choices-from-steps:15": {
+  "mark": "done",
+  "at": "2026-11-26T20:51:38+00:00"
+ },
+ "federation-build-5-choices-from-steps:2": {
+  "mark": "done",
+  "at": "2026-11-26T20:47:05+00:00"
+ },
+ "federation-build-5-choices-from-steps:3": {
+  "mark": "done",
+  "at": "2026-11-26T20:47:14+00:00"
+ },
+ "federation-build-5-choices-from-steps:4": {
+  "mark": "questions",
+  "at": "2026-11-26T20:48:46+00:00"
+ },
+ "federation-build-5-choices-from-steps:5": {
+  "mark": "done",
+  "at": "2026-11-26T20:49:10+00:00"
+ },
+ "federation-build-5-choices-from-steps:7": {
+  "mark": "questions",
+  "at": "2026-11-26T20:49:35+00:00"
+ },
+ "federation-build-5-choices-from-steps:8": {
+  "mark": "done",
+  "at": "2026-11-26T20:49:39+00:00"
+ },
+ "federation-build-5-choices-from-steps:9": {
+  "mark": "done",
+  "at": "2026-11-26T20:49:45+00:00"
+ },
  "federation-ordo-deployments-share-data-through:2": {
   "mark": "done",
   "at": "2026-11-25T23:17:35+00:00"

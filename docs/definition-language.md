@@ -2647,6 +2647,76 @@ its own role:
   unless `ORDO_PEER_SHARED_ROLE=on`. `ordo dev` turns that on, since it runs
   every app as one role.
 
+### `grant`: what another deployment may call through this one's door [ruled 2026-11-26, built at G1, not enforced until G3]
+
+`plan-federation-grants.md` §3. A grant replaces `reader` once the door
+path works (step G8). Until step G3 the door does not check it: the apply
+expands it, stores it and shows it, and nothing more.
+
+```
+grant note_viewer {
+  std.notes.get
+  std.notes.list
+  /std\.notesAccess\..*/
+  /add.*/
+  !addAdmin
+}
+
+grant billing as itself {
+  markPaid
+}
+
+grant provider hominem {
+  std.notes.get
+}
+```
+
+- The header is `grant <name>`, `grant <name> as itself` or
+  `grant provider <name>`. The name is lowercase letters, digits and
+  underscores, starting with a letter, and each block is declared once
+  (`grant_block`).
+- Without `as itself`, the grant is used only on behalf of a person. With
+  it, calls carrying no person are allowed too.
+- `grant provider <name>` covers every deployment registered at that
+  identity service, on behalf of a person only. `as itself` is refused on
+  it (`grant_block`).
+- The block holds op lines only, one per line. A line is an exact op name,
+  a `/regex/` that must match the whole name (Rust `regex`, linear time;
+  `\/` is a slash), or `*` for every op.
+- `!` before a line takes the ops it matches away. Lines are read top to
+  bottom and the last line that matches an op decides. An op no line
+  matches is not granted.
+- An empty block is refused (`grant_block`).
+
+**At apply.** Each block is expanded against this program's own ops,
+the derived `std.<entity>.get`, `.list` and the rest included. The
+expanded list is stored with the version (`$consumergrant`), and the door
+will check only that list. The plan (`ordo plan`) and the apply show each
+list and every change to it against the serving version:
+`grant note_viewer gains addReaction, matches /add.*/`. A later op that a
+pattern matches is granted and shown this way. The lines as written are in
+the version's artifact, so a changed grant is a new version.
+
+**The consumer's id** is never in the file. The deployment owner sets
+`ORDO_CONSUMER_NOTE_VIEWER_CLIENT`, the name upper-cased, to the consumer's
+client id at the identity service. The plan shows its value. Unset is a
+warning naming it.
+
+**Refusals at apply**, each named with the fix, before anything is stored
+(`grant_refused`):
+
+- `grant_matches_nothing`: a line no op of the program matches.
+- `grant_line_changes_nothing`: a line whose removal leaves the grant the
+  same. Usually a later line overrides every op it matches; also a `!` line
+  with nothing above it to take away.
+- `grant_pattern_invalid`: a `/…/` that is not a regex.
+- `grant_provider_not_identity_service`: `grant provider <name>` where
+  `<name>` is not a sign-in connection to Ordo's identity service. A
+  connection is the identity service when `ORDO_AUTH_<NAME>_KIND=oidc` and
+  its `ORDO_AUTH_<NAME>_ISSUER` is `ORDO_IDENTITY_ORIGIN`. A preset (Google,
+  Microsoft) or any other issuer is an outside provider, where everything
+  registered is anyone.
+
 ---
 
 ## 4. Conditions

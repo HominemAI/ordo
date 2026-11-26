@@ -139,6 +139,11 @@ peer notes {
   half to the service. A provisioner registers it with the deployment;
   the route also takes the deployment's own admin token, so the host or
   console can register it unasked.
+- How a `grant provider` tells Ordo's identity service from an outside
+  provider. G1 uses the deployment's settings: the connection is an OIDC
+  connection whose `ORDO_AUTH_<NAME>_ISSUER` is `ORDO_IDENTITY_ORIGIN`.
+  G2 now exists; whether the service should mark itself (for example in
+  its discovery document) is for G6.
 - How the call chain is carried for the loop check (a header listing the
   deployments a call has passed through, signed with the token).
 
@@ -146,7 +151,7 @@ peer notes {
 
 | Step | What | Size |
 |---|---|---|
-| G1 | `grant` blocks: parser, expansion at apply, plan output, refusals | M |
+| G1 | `grant` blocks: parser, expansion at apply, plan output, refusals. **Built** (branch `fed-g1-grant-blocks`): the parser and the CDK's `grant()` and `grantProvider()`; `ordo_host::consumer_grants` expands each block at plan and apply, stores the lists in `$consumergrant` by version, and shows each list, its changes and `ORDO_CONSUMER_<NAME>_CLIENT`; the 4 refusals are `grant_refused`. A provider is the identity service when its OIDC issuer is `ORDO_IDENTITY_ORIGIN`. Not enforced on the door (G3). Tests: `ordo-syntax/tests/grant.rs`, `ordo-host/tests/consumer_grants.rs` (notes v2 with a `grant note_viewer` block), `ordo-cdk/test/grant.test.ts`, the isomorphism corpus | M |
 | G2 | The identity service: consumer credentials, token exchange with the actor claim. **Built** on `fed-g2-token-exchange`: consumer key derived from the master key, public half registered (`consumerKey`, `deployment consumer-key`); RFC 7523 assertions, each `jti` once; RFC 8693 exchange (`typ` `ordo-peer+jwt`, `act.sub`) and `client_credentials` (`typ` `ordo-client+jwt`, `kind` `client`), `aud` `ordo-peer:<holder>`; `ORDO_IDENTITY_PEER_TOKEN_SECS` 300, `ORDO_IDENTITY_CLIENT_ASSERTION_SECS` 120; audit `oidc.exchange`, `oidc.client-token`. Tests: `ordo-identity-service/tests/federation_exchange.rs`, 7. The host deriving and registering its key is G4 | M |
 | G3 | The holder's door: grant check on every call, on behalf or as itself, the loop check, audit | M |
 | G4 | The consumer: `peer` block checked against the holder at apply; the holder records uses and names breaks | M |

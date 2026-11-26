@@ -63,6 +63,11 @@ pub const PEER_NAME: &str = "peer_name";
 /// letters, digits and underscores, a second line with the same name, no
 /// table, or a table named twice.
 pub const READER_LINE: &str = "reader_line";
+/// A `grant` block that cannot be one: a name that is not lowercase
+/// letters, digits and underscores, a second block with the same name, no
+/// line, two patterns on one line, or `grant provider … as itself`
+/// (`plan-federation-grants.md` §3).
+pub const GRANT_BLOCK: &str = "grant_block";
 /// An `external` declaration without `shared` (ruled 2026-11-15,
 /// `external-entities`): who reads the rows must be written down.
 pub const EXTERNAL_NOT_SHARED: &str = "external_not_shared";
@@ -313,6 +318,8 @@ pub(crate) fn describe(kind: &TokenKind) -> String {
         Slash => "`/`".into(),
         Question => "`?`".into(),
         At => "`@`".into(),
+        Bang => "`!`".into(),
+        Regex(r) => format!("`/{r}/`"),
         Newline => "end of line".into(),
         Eof => "end of input".into(),
     }

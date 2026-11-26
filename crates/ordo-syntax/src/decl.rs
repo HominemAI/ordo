@@ -67,6 +67,79 @@ pub struct Program {
     /// database role comes from `ORDO_READER_NOTE_VIEWER_ROLE`, and this
     /// deployment grants that role `SELECT` on exactly these tables.
     pub readers: Vec<ReaderDecl>,
+    /// `grant note_viewer { std.notes.get  /add.*/  !addAdmin }`: the ops
+    /// another Ordo deployment may call through this one's door
+    /// (`plan-federation-grants.md` §3). Expanded against this program's
+    /// ops at apply. Built at G1; the door checks it from G3.
+    pub grants: Vec<GrantDecl>,
+}
+
+/// `grant <name> [as itself] { … }` or `grant provider <name> { … }`
+/// (`plan-federation-grants.md` §3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantDecl {
+    /// The consumer's local nickname, upper-cased into
+    /// `ORDO_CONSUMER_<NAME>_CLIENT`; for `grant provider`, the sign-in
+    /// connection's name.
+    pub name: Ident,
+    /// `grant provider <name>`: every deployment registered at that
+    /// identity service, on behalf of a person only.
+    pub provider: bool,
+    /// `as itself`: calls carrying no person are allowed too. Without it
+    /// the grant is used only on behalf of a person.
+    pub as_itself: bool,
+    /// The lines, top to bottom. The last line that matches an op decides.
+    pub lines: Vec<GrantLine>,
+    pub span: Span,
+}
+
+/// One line of a grant block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantLine {
+    /// `!` before it: the line takes the ops it matches away.
+    pub negated: bool,
+    pub pattern: GrantPattern,
+    pub span: Span,
+}
+
+/// What a grant line matches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrantPattern {
+    /// An exact op name, `std.notes.get`.
+    Op(String),
+    /// `/regex/`: the text between the slashes, matched against the whole
+    /// op name (Rust `regex` syntax).
+    Regex(String),
+    /// `*`: every op.
+    All,
+}
+
+impl GrantLine {
+    /// The line as written: `!/add.*/`, `std.notes.get`, `*`.
+    pub fn text(&self) -> String {
+        let body = match &self.pattern {
+            GrantPattern::Op(n) => n.clone(),
+            GrantPattern::Regex(r) => format!("/{}/", r.replace('/', "\\/")),
+            GrantPattern::All => "*".into(),
+        };
+        if self.negated {
+            format!("!{body}")
+        } else {
+            body
+        }
+    }
+}
+
+impl GrantDecl {
+    /// The header as written: `grant note_viewer`, `grant billing as
+    /// itself`, `grant provider hominem`.
+    pub fn header(&self) -> String {
+        match (self.provider, self.as_itself) {
+            (true, _) => format!("grant provider {}", self.name.name),
+            (false, true) => format!("grant {} as itself", self.name.name),
+            (false, false) => format!("grant {}", self.name.name),
+        }
+    }
 }
 
 /// `reader <name> reads <table>, <table>`: a local nickname for a deployment

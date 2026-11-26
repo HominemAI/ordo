@@ -172,6 +172,10 @@
     "crates/ordo-host/src/clones.rs": "all",
     "crates/ordo-host/src/consent.rs": "all",
     "crates/ordo-host/src/console_keys.rs": "all",
+    "crates/ordo-host/src/consumer_grants.rs": [
+      "consumer_grants",
+      "deploy_apply"
+    ],
     "crates/ordo-host/src/contact_email.rs": [
       "attest",
       "attest_webhook",

@@ -164,6 +164,26 @@ pub fn program_artifact(schema: &Schema, registry: &Registry) -> Result<Value, S
     if !schema.functions.is_empty() {
         doc["functions"] = Value::Array(function_artifacts(schema));
     }
+    // And for `grant` blocks (`plan-federation-grants.md` §3), as written: a
+    // changed line is a new version, so the apply that changes what another
+    // deployment may call is one that stores and activates. Their expansion
+    // against the ops is the apply's, stored with the version.
+    if !schema.grants.is_empty() {
+        doc["grants"] = Value::Array(
+            schema
+                .grants
+                .iter()
+                .map(|g| {
+                    json!({
+                        "name": g.name.name,
+                        "provider": g.provider,
+                        "as_itself": g.as_itself,
+                        "lines": g.lines.iter().map(|l| l.text()).collect::<Vec<_>>(),
+                    })
+                })
+                .collect(),
+        );
+    }
     // And for the `auth` block: a program without one keeps its version.
     if let Some(auth) = auth_artifact(schema) {
         doc["auth"] = auth;

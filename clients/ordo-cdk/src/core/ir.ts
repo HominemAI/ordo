@@ -406,11 +406,28 @@ export interface ReaderNode {
   readonly tables: readonly string[];
 }
 
+/**
+ * `grant note_viewer { std.notes.get  /add.*\/  !addAdmin }`: the ops another
+ * Ordo deployment may call through this one's door. Each line is an exact op
+ * name, a `/regex/` matching whole names, or `*`, optionally after `!`; the
+ * last line that matches an op decides. Expanded at apply.
+ */
+export interface GrantNode {
+  readonly kind: 'grant';
+  readonly name: string;
+  /** `grant provider <name>`: every deployment registered at that identity service. */
+  readonly provider: boolean;
+  /** `as itself`: calls with no person are allowed too. */
+  readonly asItself: boolean;
+  readonly lines: readonly string[];
+}
+
 /** Anything `synth()` accepts, in written order. */
 export type Declaration =
   | DomainNode
   | PeerNode
   | ReaderNode
+  | GrantNode
   | EntityNode
   | ExternalNode
   | OpNode

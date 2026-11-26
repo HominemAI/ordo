@@ -623,6 +623,14 @@ export function printDeclaration(d: Declaration): string {
       return `peer ${d.name}`;
     case 'reader':
       return `reader ${d.name} reads ${d.tables.join(', ')}`;
+    case 'grant': {
+      const head = d.provider
+        ? `grant provider ${d.name}`
+        : d.asItself
+          ? `grant ${d.name} as itself`
+          : `grant ${d.name}`;
+      return [`${head} {`, ...d.lines.map((l) => `  ${l}`), '}'].join('\n');
+    }
     case 'entity':
       return printEntity(d);
     case 'external':

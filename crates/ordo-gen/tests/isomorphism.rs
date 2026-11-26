@@ -59,6 +59,7 @@ use ordo_syntax::{parse_program, Program};
 const SYNTAX: &str = include_str!("../../../docs/syntax-examples.md");
 const MARKET: &str = include_str!("../../../crates/ordo-conformance/fixtures/market.ordo");
 const EXTERNAL: &str = include_str!("fixtures/external.ordo");
+const GRANT: &str = include_str!("fixtures/grant.ordo");
 const WIDE: &str = include_str!("../../../crates/ordo-conformance/fixtures/wide.ordo");
 
 /// The `auth` block, every clause written
@@ -195,6 +196,11 @@ fn candidates() -> Vec<Candidate> {
         Candidate {
             name: "fixture-external".into(),
             source: EXTERNAL.to_string(),
+        },
+        // And `grant` blocks (`plan-federation-grants.md` §3).
+        Candidate {
+            name: "fixture-grant".into(),
+            source: GRANT.to_string(),
         },
     ];
     for (line, text) in blocks(SYNTAX) {

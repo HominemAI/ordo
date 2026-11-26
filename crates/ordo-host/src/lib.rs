@@ -63,6 +63,7 @@ pub mod ceremonies;
 pub mod clones;
 pub mod consent;
 pub mod console_keys;
+pub mod consumer_grants;
 pub mod contact_email;
 pub mod credential_ops;
 pub mod credentials;

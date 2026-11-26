@@ -261,6 +261,16 @@ the deployment owner sets `ORDO_READER_NOTE_VIEWER_ROLE`. `synth` refuses a
 table that is not an entity of the file (`reader_unknown_table`) and a reader
 passed twice (`reader_line`).
 
+**Covered: grants** (built at G1, not enforced on the door until G3).
+`grant('note_viewer', ['std.notes.get', '/add.*/', '!addAdmin'])` prints a
+`grant note_viewer { … }` block, one line each. `{ asItself: true }` adds
+`as itself`, and `grantProvider('hominem', [...])` prints
+`grant provider hominem { … }`. The consumer's id is never in the file: the
+deployment owner sets `ORDO_CONSUMER_NOTE_VIEWER_CLIENT`. What each line
+matches is decided at apply. `grant()` refuses a bad name, an empty list and a
+line that is not an op name, `/regex/` or `*`; `synth` refuses a grant passed
+twice (`grant_block`).
+
 And the routine (12a). Its body is a write op's body, built with the same
 calls. The trigger is `every('15m')`, `daily('09:00Z')` or
 `when('estate.events.created', { debounce: '30s', coalesce: true })`, and the

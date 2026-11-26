@@ -116,3 +116,24 @@ Owner clarification, 2026-11-26: subsequent implementation is restricted to
 examples, tests and coverage/CI support. Product defects are recorded in
 `web-findings.md`, not fixed here. The 2 earlier production fixes remain in the
 PR; no further runtime changes are authorized by this work.
+
+## Function file inspection extension, awaiting execution
+
+The campaign detail page calls `inspectCampaignFile` once per explicitly
+supplied blob, at most 32 files. The actual function reads the campaign and
+its file ownership before reading bytes through `ctx.blob`. The UI reports
+metadata and byte count, never file content. `api/function-files.spec.ts`
+checks success, mismatched campaign refusal, anonymous refusal and actual
+function-run records, including failure records and missing-run refusal.
+The browser upload journey also invokes inspection. No runtime hits are
+credited until execution. Local HTTPS receiver trust remains a source finding
+in `web-findings.md`, not an implemented production change.
+
+## Maintenance extension, awaiting execution
+
+A separate real-console browser journey creates a one-off window, reloads to
+verify persistence, refuses an inverted range, creates and edits a recurring
+window, adds/removes its skip, and deletes only its own windows. Requests go
+through the existing console UI to the actual host. Window configuration alone
+does not prove that a scheduled deployment or promotion ran. No such outcome
+is credited here.

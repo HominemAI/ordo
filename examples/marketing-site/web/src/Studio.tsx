@@ -721,6 +721,7 @@ function CampaignDetail(ctx: Context & { row: Row; close: () => void }) {
   const reminders = useListing('campaignReminders');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [inspection, setInspection] = useState<{ files: { name: string; type: string; size: number }[]; totalBytes: number } | null>(null);
   const [notice, setNotice] = useState('');
   async function act(work: () => Promise<unknown>) {
     setBusy(true);
@@ -749,6 +750,20 @@ function CampaignDetail(ctx: Context & { row: Row; close: () => void }) {
       <p>{text(ctx.row['brief'])}</p>
       {error && <p role="alert">{error}</p>}
       {notice && <p role="status">{notice}</p>}
+      <button type="button" disabled={busy} onClick={() => void act(async () => {
+        if (files.rows.length > 32) throw new Error('Inspect at most 32 files at a time.');
+        const inspected: { name: string; type: string; size: number }[] = [];
+        for (const row of files.rows) {
+          if (!row['file']) continue;
+          const answer = await ctx.client.callFunction<{ name: string; type: string; size: number }>('inspectCampaignFile', { campaign, file: row['file'] });
+          inspected.push(answer.result);
+        }
+        setInspection({ files: inspected, totalBytes: inspected.reduce((sum, file) => sum + file.size, 0) });
+      })}>Inspect campaign files</button>
+      {inspection && <section aria-label="File inspection">
+        <p>{inspection.files.length} {inspection.files.length === 1 ? 'file' : 'files'} verified, {inspection.totalBytes} bytes read.</p>
+        <ul>{inspection.files.map((file, index) => <li key={`${file.name}-${index}`}>{file.name}: {file.type}, {file.size} bytes</li>)}</ul>
+      </section>}
       <h4 id="approval-title">Editorial review</h4>
       <button
         disabled={busy}

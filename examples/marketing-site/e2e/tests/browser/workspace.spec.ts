@@ -109,6 +109,8 @@ test('staff create a campaign, upload a brief and schedule a reminder', async ({
     .setInputFiles({ name: 'brief.txt', mimeType: 'text/plain', buffer: Buffer.from('A campaign brief') });
   await page.getByRole('button', { name: 'Upload file' }).click();
   await expect(page.getByRole('row').filter({ hasText: 'brief.txt' })).toBeVisible();
+  await page.getByRole('button', { name: 'Inspect campaign files' }).click();
+  await expect(page.getByRole('region', { name: 'File inspection' })).toContainText('1 file verified, 16 bytes read.');
   await page.getByLabel('Remind at (your local time)').fill('2030-01-01T10:00');
   await page.getByRole('button', { name: 'Set reminder' }).click();
   await expect(page.getByRole('button', { name: 'Clear reminder' })).toBeVisible();

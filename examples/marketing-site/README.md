@@ -267,3 +267,10 @@ refusals, foreign-tenant access, retirement on both replicas and re-addition
 with a new connection key. It does not claim a successful external-provider
 login: its issuer is deliberately unused, and no external call is needed for
 these configuration outcomes.
+
+Campaign details also offer file inspection. The page submits each explicit
+blob handle to a sandboxed function that checks campaign ownership and reads
+through the caller's blob permissions. Up to 32 files are inspected per click;
+the page shows their media types and byte counts, not their contents. The
+application journeys inspect the corresponding real function-run records as
+a deployment owner and verify that a mismatched campaign is refused.

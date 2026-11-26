@@ -142,6 +142,104 @@ test('the real console sets up, links, rotates its key and manages a disposable 
     await expect(page.getByRole('button', { name: 'Sign out', exact: true })).toBeVisible();
   } finally {
     const all = (await cdp.send('WebAuthn.getCredentials', { authenticatorId })).credentials;
+    writeFileSync(`${state}/console-owner-credentials.json`, JSON.stringify(all.filter(c => !deploymentIds.has(c.credentialId))), { mode: 0o600 });
     writeFileSync(`${state}/browser-owner-credentials.json`, JSON.stringify(all.filter(c => deploymentIds.has(c.credentialId))), { mode: 0o600 });
+  }
+});
+
+// Keep this separate from recovery/runtime checks: a failure in those checks
+// must not skip maintenance coverage after console setup has succeeded.
+test('real console maintenance windows persist, reject invalid ranges, edit and remove skips', async ({ page, context }) => {
+  const consoleState = JSON.parse(readFileSync(`${state}/console.json`, 'utf8'));
+  const cdp = await context.newCDPSession(page);
+  await cdp.send('WebAuthn.enable');
+  const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', { options: {
+    protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true,
+    isUserVerified: true, automaticPresenceSimulation: true,
+  } });
+  const deployment = JSON.parse(readFileSync(`${state}/browser-owner-credentials.json`, 'utf8'));
+  const consoleCredentials = JSON.parse(readFileSync(`${state}/console-owner-credentials.json`, 'utf8'));
+  expect(consoleCredentials.length, 'The real console setup must have enrolled a credential').toBeGreaterThan(0);
+  for (const credential of consoleCredentials) await cdp.send('WebAuthn.addCredential', { authenticatorId, credential });
+  await page.goto(consoleState.url);
+  await page.getByRole('button', { name: 'Sign in with a passkey' }).click();
+  await expect(page.getByRole('button', { name: 'Sign out', exact: true })).toBeVisible();
+  writeFileSync(`${state}/console-owner-credentials.json`, JSON.stringify((await cdp.send('WebAuthn.getCredentials', { authenticatorId })).credentials), { mode: 0o600 });
+  // Only deployment credentials during door touches; both services use localhost.
+  for (const credential of consoleCredentials) await cdp.send('WebAuthn.removeCredential', { authenticatorId, credentialId: credential.credentialId });
+  for (const credential of deployment) await cdp.send('WebAuthn.addCredential', { authenticatorId, credential });
+  async function open(name: string) {
+    await page.getByRole('navigation', { name: 'Console', exact: true }).getByRole('link', { name: 'Deployment', exact: true }).click();
+    await page.getByRole('navigation', { name: 'Deployment pages' }).getByRole('link', { name, exact: true }).click();
+  }
+  async function settled(message: string, role: 'status' | 'alert' = 'status') {
+    const result = page.getByRole(role).filter({ hasText: message });
+    const prompt = page.getByRole('dialog', { name: 'Touch your passkey for the deployment' });
+    await expect(result.or(prompt)).toBeVisible();
+    if (await prompt.isVisible()) await prompt.getByRole('button', { name: 'Use my passkey' }).click();
+    await expect(result).toBeVisible();
+  }
+  function local(days: number, hour: number) {
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(hour)}:00`;
+  }
+  try {
+    await open('Connection');
+    if (await page.getByRole('button', { name: 'Link with your passkey' }).isVisible()) {
+      await page.getByRole('button', { name: 'Link with your passkey' }).click();
+      await expect(page.getByRole('status')).toContainText('Linked.');
+    }
+    await open('Maintenance');
+    await expect(page.getByRole('heading', { name: 'Maintenance windows', level: 1 })).toBeVisible();
+    const label = `Release rehearsal ${randomUUID()}`;
+    await page.getByLabel('Starts (your local time)').fill(local(1, 2));
+    await page.getByLabel('Ends (your local time)').fill(local(1, 3));
+    await page.getByLabel('Message').fill(label);
+    await page.getByRole('button', { name: 'Add window' }).click();
+    await settled('Added window');
+    const windows = page.getByRole('list', { name: 'Windows', exact: true });
+    await page.reload();
+    await expect(windows.getByText(label, { exact: true })).toBeVisible();
+    await page.getByLabel('Starts (your local time)').fill(local(2, 5));
+    await page.getByLabel('Ends (your local time)').fill(local(2, 4));
+    await page.getByLabel('Message').fill('Backwards');
+    await page.getByRole('button', { name: 'Add window' }).click();
+    await settled('ends after it starts', 'alert');
+    await expect(windows.getByRole('listitem').filter({ hasText: 'Backwards' })).toHaveCount(0);
+    await page.getByLabel('Repeats on a schedule').check();
+    await page.getByLabel('Schedule (cron, 5 fields, UTC)').fill('0 3 * * 0');
+    await page.getByLabel('Length (minutes)').fill('60');
+    await page.getByLabel('Message').fill(`${label} weekly`);
+    await page.getByRole('button', { name: 'Add window' }).click();
+    await settled('Added window');
+    const weekly = windows.getByRole('listitem').filter({ hasText: `${label} weekly` });
+    await weekly.getByRole('button', { name: 'Edit', exact: true }).click();
+    await page.getByLabel('Length (minutes)').fill('90');
+    await page.getByRole('button', { name: 'Save window' }).click();
+    await settled('Saved window');
+    await weekly.getByRole('button', { name: 'Skip a range' }).click();
+    await weekly.getByLabel('From', { exact: true }).fill(local(0, 0));
+    await weekly.getByLabel('To', { exact: true }).fill(local(8, 0));
+    await weekly.getByLabel('Reason (optional)').fill('Release rehearsal');
+    await page.getByRole('button', { name: 'Skip these times' }).click();
+    await settled('Skipping window');
+    await expect(page.getByRole('list', { name: 'Upcoming windows' }).getByText('skipped').first()).toBeVisible();
+    await weekly.getByRole('button', { name: 'Remove skip' }).click();
+    await settled('Removed skip');
+    // Delete only the windows this journey created.
+    for (const message of [`${label} weekly`, label]) {
+      const row = windows.getByRole('listitem').filter({ has: page.getByText(message, { exact: true }) });
+      await row.getByRole('button', { name: 'Delete', exact: true }).click();
+      await page.getByRole('group', { name: /Confirm delete window/ }).getByRole('button', { name: 'Delete window' }).click();
+      await settled('Deleted window');
+      await expect(row).toHaveCount(0);
+    }
+    await page.reload();
+    await expect(windows.getByText(label)).toHaveCount(0);
+  } finally {
+    const updated = (await cdp.send('WebAuthn.getCredentials', { authenticatorId })).credentials;
+    writeFileSync(`${state}/browser-owner-credentials.json`, JSON.stringify(updated), { mode: 0o600 });
   }
 });

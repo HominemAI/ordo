@@ -61,3 +61,17 @@ All changes remain in PR #59.
 These rows need the existing owner contract questions resolved through the
 board before changing their acceptance rules. They must not be silently
 counted as passing or excluded from release evidence.
+
+## Controlled HTTPS function receiver needs supported trust configuration
+
+- Source finding: `runtime.rs` constructs the function fetch transport with
+  `TlsRoots::webpki()`. The configured `ORDO_AUTH_PROVIDER_CA_FILE` is passed
+  to identity-provider transports, but not to function fetch.
+- Impact on the requested journey: a throwaway local HTTPS receiver signed by
+  the fixture CA cannot exercise successful function egress under that wiring.
+  `ORDO_EGRESS_PRIVATE_HOSTS` permits its address but does not trust its CA.
+- Reproduction to add: call an egress-authorized function against a fixture-CA
+  HTTPS endpoint. Identity-provider trust configuration alone cannot make the
+  function transport trust it.
+- Status: source-level limitation, not yet an executed failure. No runtime fix
+  made. Successful local HTTPS secret-consumer coverage remains unresolved.

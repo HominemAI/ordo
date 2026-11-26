@@ -222,3 +222,11 @@ op approveCampaign($id: id, $rev: int, $note: text, $at: datetime filled) =
 op approvalHistory($campaign: id) unbounded =
   approvals(campaign == $campaign)[id, reviewer, at, note]
   sort -at
+
+# File inspection uses the same caller and blob door as downloading a file.
+function inspectCampaignFile in marketing {
+  call($campaign: id, $file: blob) -> json by member
+  code "fn/inspect-files.js"
+  uses oneCampaign, campaignFiles
+  limit wall 10s, memory 32 mb
+}

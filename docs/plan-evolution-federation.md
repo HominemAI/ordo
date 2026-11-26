@@ -1,6 +1,19 @@
 # Evolution across deployments: externals, peers and readers under versions
 
-Status: **plan started 2026-11-23; Q1, Q2 and Q16 ruled 2026-11-23; F1 to F6 built, save soaks closing together on a shared database (11b); see §6.** Written
+Status: **the shared-database parts are replaced (G8 of `plan-federation-grants.md`, 2026-11-26).** One Ordo deployment now reaches another only through its door (owner, board `federation-ordo-deployments-share-data-through`, asks 1 and 2: "Remove"). What is left of this plan, and what replaced the rest:
+
+| Here | Now |
+|---|---|
+| §1, §3.1 to §3.5: the `reader` line, grants by column, the renamed-column comment, `changing` notes, `/health/ready` `external.changing` | **Replaced.** A holder opens ops with `grant`; a consumer reads through `peer notes { … }`. A field a consumer reads that the holder renames or stops declaring is refused by name at the consumer's read (`peer_refused`) |
+| F1: the plan lists the readers of a changed table | **Kept, on grants.** The plan lists each `grant` that opens the table (`consumer_grants::tables_read`), outside the digest. No grant end date: there is no column grant |
+| §4: plain externals | **Unchanged** |
+| §5, F6: the release check names peers and readers by reading their `$ordorelease` | **Replaced.** Each side keeps the release the other said through the door (`$peeruses` on the holder, `$peerholders` on the consumer), recorded at the consumer's apply |
+| F4: a rollback is checked against the external tables | **Kept for plain externals.** A peer is checked by its holder at each read |
+| `seal_read_by_reader`, `peer_tenant_database` | **Removed** with the path they guarded |
+
+The rest of this file is the plan as it was built, kept for its reasoning.
+
+Was: **plan started 2026-11-23; Q1, Q2 and Q16 ruled 2026-11-23; F1 to F6 built, save soaks closing together on a shared database (11b); see §6.** Written
 by the review of the evolution plans (`review-evolution-plans-2026-11-23.md`).
 It is increment 7b of `plan-versions.md` §4. Its open questions are Q1, Q2
 and Q16 of that review.

@@ -1,19 +1,20 @@
 /**
- * The deployment's developer, signed in through the identity service with
+ * The deployments' developer, signed in through the identity service with
  * `ordo login` (examples/e2e-shared/developer.ts, shared with the notes
- * e2e). One person is an admin of the service's own deployment, `main`,
- * which both doors take their tokens for, so the same session acts on notes
- * and on note_viewer.
+ * e2e). Each door is its own deployment at the service (`notes`,
+ * `viewer`), with its own `ORDO_IDENTITY_DEPLOYMENT`, so a call from one to
+ * the other is addressed to that deployment. The developer is a member of
+ * both and holds a session for each.
  *
  * The CLI reaches the service over plain http on loopback, since it trusts
  * no test certificate; the browser opens its links at the https issuer.
  */
 
 import type { Browser } from '@playwright/test';
-import { developerKit } from '../../../e2e-shared/developer.js';
+import { developerKit, type CliRun, type ManyDeployments } from '../../../e2e-shared/developer.js';
 import { person, stack } from './support.js';
 
-export type { CliRun, Developer } from '../../../e2e-shared/developer.js';
+export type { CliRun };
 
 const kit = developerKit<Browser>(
   () => {
@@ -32,10 +33,23 @@ const kit = developerKit<Browser>(
   person,
 );
 
-export const { developer } = kit;
+export type App = 'notes' | 'viewer';
+
+/** The developer of both apps: `ordo <args>` with the session for `app`. */
+export interface Developer {
+  readonly ordo: (app: App, args: readonly string[]) => CliRun;
+  readonly token: (app: App) => string;
+  readonly close: () => Promise<void>;
+}
+
+/** The one developer of the stack, made on first use and found after. */
+export async function developer(browser: Browser): Promise<Developer> {
+  const d: ManyDeployments = await kit.developerOf(browser, 'Dev', ['notes', 'viewer']);
+  return { ordo: d.ordo, token: d.token, close: d.close };
+}
 
 /** The door flags of a deployment command on notes or note_viewer: its own space. */
-export function door(app: 'notes' | 'viewer'): string[] {
+export function door(app: App): string[] {
   const s = stack();
   return ['--host', app === 'notes' ? s.notesDoor : s.viewerDoor, '--space', 'system'];
 }

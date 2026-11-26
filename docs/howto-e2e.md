@@ -459,12 +459,13 @@ The stack is `examples/note-viewer/e2e/stack.sh`. It starts, in order:
 4. **notes v2** on `http://localhost:4740`, as `notes_app` in schema
    `notes`. People sign in through the service (connection `accounts`).
    The deployment's own space admits anyone who signs in, as an editor.
-   `ORDO_READER_NOTE_VIEWER_ROLE=viewer_app` grants note_viewer its two
-   tables.
+   `grant note_viewer as itself` opens `std.notes.list` and `publicNotes`
+   to `viewer` (`ORDO_CONSUMER_NOTE_VIEWER_CLIENT=viewer`).
 5. **note_viewer** on `http://localhost:4750`, as `viewer_app` in schema
-   `viewer`, with `ORDO_PEER_NOTES_SCHEMA=notes`. People sign in through
-   the same service. `ORDO_PEER_SHARED_ROLE` is not set: the stack proves
-   the two-role setup.
+   `viewer`. It reads notes v2 only through notes v2's door
+   (`ORDO_PEER_NOTES_URL`); its role is granted nothing in `notes`. People
+   sign in through the same service. Each door is its own deployment at the
+   service (`ORDO_IDENTITY_DEPLOYMENT` `notes` and `viewer`).
 6. **The two pages**: notes v2 on `http://localhost:5290`, built with
    `VITE_ORDO_SPACE=system`, and note_viewer on `http://localhost:5291`.
 
@@ -472,10 +473,14 @@ The Playwright projects:
 
 | Project | What it tests |
 |---|---|
-| `api` | As `viewer_app`, Postgres answers `notes.notes` and `notes."notesAccess"` and refuses `attachments`, `reminders`, `$commandlog` and the members columns it was not granted. `notes_app` cannot read the viewer's schema. The viewer's door, with no token, answers only notes tagged `public` and refuses `myNotes` |
+| `door` | The viewer's apply through its door is refused until its consumer key is registered; the developer registers it with `std.peer.registerKey`, and the apply then checks the `peer notes` block against notes' grant and records the use |
+| `api` | Postgres refuses `viewer_app` every `notes` table, and `notes_app` the viewer's schema. The viewer's door, with no token, answers only notes tagged `public` (notes' `publicNotes`, called as the viewer itself) and refuses `myNotes`. Each side's release check names the other and its release, as it came through the door |
 | `browser` | In order: Ada signs up openly from notes v2 and writes a public and a private note. Signed out, note_viewer shows the public one only. She signs in to note_viewer with the same passkey and sees both, and a reload keeps her signed in. Bo signs up from notes v2 and sees his own note and the public one, never Ada's private one. Cy signs up from note_viewer, holds nothing in notes v2, and sees no private note |
 | `v3` | notes v3 applied over v2 with both pages open: the viewer reads every note through the move |
-| `orphans` | notes applies `fixtures/notes-no-tags.ordo.fixture` (0.3.2), which stops declaring `notes.tags`. Postgres then refuses `viewer_app` the `tags` column and serves the rest, and the viewer's page shows `external_changed` naming the column, notes, and `ordo introspect --external`. The stack runs the external check every 2 seconds (`ORDO_EXTERNAL_WATCH_SECS=2`) |
+| `rename` | notes renames `title` to `heading` (0.3.1). The plan names `grant note_viewer`. The public list reads `publicNotes`, which keeps answering `title`; the person's list (`std.notes.list`) shows a named refusal until the viewer maps `heading` |
+| `orphans` | notes stops declaring `tags` (0.3.3) and opens only `std.notes.list`. Each list shows its refusal by name, the field or the op; the viewer stops reading `tags` and the person's list shows again |
+| `seal` | notes seals `body` (0.3.4, `std sealed`) through its door: the plan is not refused, the table holds no plaintext, and the viewer shows the body |
+| `narrowed` | notes takes `std.notes.list` off its grant (0.3.5): its apply names the consumer it breaks, and the viewer's page shows the door's refusal naming the op and the grant |
 
 Chromium refuses a passkey on a page with a certificate error. The
 `browser` project tells Chromium to trust the test leaf's key, by its SPKI

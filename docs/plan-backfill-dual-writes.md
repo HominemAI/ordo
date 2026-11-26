@@ -473,11 +473,11 @@ recorded, so sharing again reads. Test: `notes_app.rs`
   happens to the plaintext. Its old values stay in earlier backups and WAL.
 - Refused by name: `sealed indexed` or `sealed unique` in one step
   (`seal_then_index`, renamed in part 2), a field that is not `text`
-  before (`seal_type_not_built`), a node with no key custody, and a field
-  a reader app reads (`seal_read_by_reader`): the reader would read
-  ciphertext. It names the reader and the fix: a reader version that reads
-  the sealed field (7b, not built), or the table off the `reader` line in a
-  version before the seal.
+  before (`seal_type_not_built`), and a node with no key custody. A field
+  another deployment reads was refused too (`seal_read_by_reader`) until
+  G8 of `plan-federation-grants.md` removed the shared-database path: a
+  consumer now reads through this deployment's door, which opens the field
+  in its own answers, and the plan names the grant as a warning.
 
 **Built (13, 2026-11-24, second part: 64612e41).**
 

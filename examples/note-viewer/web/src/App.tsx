@@ -8,8 +8,9 @@
  *   person back here with `?handoff=`, and `/auth/complete` swaps it for a
  *   session. The sign-in arrives at the deployment's own space, where the
  *   deployment admits people (`VITE_ORDO_SPACE`, `system` by default).
- * - Signed in, `myNotes` lists every note the person may read in notes v2.
- *   The viewer's guard follows notes v2's acl through `$caller`.
+ * - Signed in, `myNotes` lists every note the person may read in notes v2,
+ *   read through notes v2's door for that person: notes v2's acl decides.
+ * - A list notes v2 refuses shows the refusal in its own section.
  * - A reload resumes the sign-in through the door's renewal cookie.
  *
  * The token stays in memory. Only the binder waits in `sessionStorage` while
@@ -88,12 +89,16 @@ export function App() {
   const [open, setOpen] = useState<readonly PublicNotesRow[] | null>(null);
   const [mine, setMine] = useState<readonly MyNotesRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Each list's own refusal, shown in its section: notes v2 may refuse one
+  // list and answer the other (its grant, a field it no longer has).
+  const [openError, setOpenError] = useState<string | null>(null);
+  const [mineError, setMineError] = useState<string | null>(null);
 
   // The public list, with no token.
   useEffect(() => {
     publicNotes(new OrdoClient({ baseUrl: DOOR, space: SPACE }))
       .rows()
-      .then(setOpen, (e: unknown) => setError(String(e)));
+      .then(setOpen, (e: unknown) => setOpenError(String(e)));
   }, []);
 
   // A return from the service, or a sign-in this browser still holds.
@@ -133,7 +138,7 @@ export function App() {
     }
     myNotes(new OrdoClient({ baseUrl: DOOR, space: SPACE, token }))
       .rows()
-      .then(setMine, (e: unknown) => setError(String(e)));
+      .then(setMine, (e: unknown) => setMineError(String(e)));
   }, [signedIn]);
 
   async function signIn() {
@@ -175,14 +180,22 @@ export function App() {
       <section aria-labelledby="public-heading">
         <h2 id="public-heading">Public notes</h2>
         <p>Notes tagged “public” in notes v2. Anyone can read them here.</p>
-        <Notes rows={open} label="Public notes" empty="No public notes yet." />
+        {openError ? (
+          <p role="alert">{openError}</p>
+        ) : (
+          <Notes rows={open} label="Public notes" empty="No public notes yet." />
+        )}
       </section>
 
       {held && (
         <section aria-labelledby="mine-heading">
           <h2 id="mine-heading">Your notes</h2>
           <p>Every note you can read in notes v2: your own and the ones shared with you.</p>
-          <Notes rows={mine} label="Your notes" empty="You have no notes in notes v2 yet." />
+          {mineError ? (
+            <p role="alert">{mineError}</p>
+          ) : (
+            <Notes rows={mine} label="Your notes" empty="You have no notes in notes v2 yet." />
+          )}
         </section>
       )}
     </main>

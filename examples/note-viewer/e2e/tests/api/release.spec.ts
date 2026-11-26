@@ -1,18 +1,17 @@
 /**
- * The sign-in contract and the release check's peers and readers
- * (plan-evolution-federation.md §5, step F6; owner ruling 2026-11-23, Q16).
+ * The release check's peers and consumers, through the door
+ * (plan-evolution-federation.md §5, step F6; owner ruling 2026-11-23, Q16;
+ * plan-federation-grants.md §6, step G8).
  *
- * Each deployment records the Ordo release it started under in
- * `$ordorelease`, and notes v2 grants its `release` column to note_viewer's
- * role with the sign-in columns, and nothing else of that row.
- * `ordo release-check --direct` run as note_viewer names its peer `notes`
- * and the release it runs; run as notes v2 it names its reader
- * `note_viewer` by its role and the release it runs, which the viewer
- * grants to notes v2's role (owner, 2026-11-25). Neither fails the check.
+ * The viewer's apply through its door (tests/door) recorded its use at
+ * notes v2 with the Ordo release it runs, and kept the release notes v2
+ * answered. `ordo release-check --direct` run as note_viewer names its peer
+ * `notes` and that release; run as notes v2 it names its consumer
+ * note_viewer (by the grant tied to `viewer`) and its release. Neither
+ * fails the check, and neither app reads the other's database for it.
  *
- * A regression looks like the viewer's role refused the release or granted
- * the rest of the row, or a release check that leaves out the peer or the
- * reader.
+ * A regression looks like a release check that leaves out the peer or the
+ * consumer, or names no release for either.
  */
 
 import { expect, test } from '@playwright/test';
@@ -32,12 +31,7 @@ function neighbours(app: 'notes' | 'viewer'): { release: string; neighbours: Nei
   return JSON.parse(r.out) as { release: string; neighbours: Neighbour[] };
 }
 
-test('the viewer’s role reads the release notes v2 runs, and no other column of that row', () => {
-  expect(sqlAs('viewer_app', 'SELECT release FROM notes."$ordorelease"')).toMatch(/^\d+\.\d+\.\d+/);
-  expect(() => sqlAs('viewer_app', 'SELECT started_at FROM notes."$ordorelease"')).toThrow(/permission denied/);
-});
-
-test('the viewer’s release check names its peer notes and the release it runs', () => {
+test('the viewer’s release check names its peer notes and the release it answered', () => {
   const report = neighbours('viewer');
   const peer = report.neighbours.find((n) => n.kind === 'peer' && n.name === 'notes');
   expect(peer, JSON.stringify(report.neighbours)).toBeDefined();
@@ -47,19 +41,15 @@ test('the viewer’s release check names its peer notes and the release it runs'
   expect(peer?.otherRelease).toBe(false);
 });
 
-test('notes v2’s release check names its reader note_viewer by its role and the release it runs', () => {
+test('notes v2’s release check names its consumer note_viewer and the release it sent', () => {
   const report = neighbours('notes');
-  const reader = report.neighbours.find((n) => n.kind === 'reader');
-  expect(reader, JSON.stringify(report.neighbours)).toMatchObject({ name: 'note_viewer', at: 'viewer_app' });
-  // The viewer grants its release to the role that owns notes v2's schema
-  // (owner, 2026-11-25), so the reader's release is named, not only its role.
-  expect(reader?.release).toBe(report.release);
-  expect(reader?.otherRelease).toBe(false);
+  const consumer = report.neighbours.find((n) => n.kind === 'consumer');
+  expect(consumer, JSON.stringify(report.neighbours)).toMatchObject({ name: 'note_viewer', at: 'viewer' });
+  expect(consumer?.release).toBe(report.release);
+  expect(consumer?.otherRelease).toBe(false);
 });
 
-test('notes v2’s role reads the release the viewer runs, and nothing else of the viewer', () => {
-  expect(sqlAs('notes_app', 'SELECT release FROM viewer."$ordorelease"')).toMatch(/^\d+\.\d+\.\d+/);
-  expect(() => sqlAs('notes_app', 'SELECT started_at FROM viewer."$ordorelease"')).toThrow(/permission denied/);
-  expect(() => sqlAs('notes_app', 'SELECT * FROM viewer."$ordorelease"')).toThrow(/permission denied/);
-  expect(() => sqlAs('notes_app', 'SELECT * FROM viewer."$readergrant"')).toThrow(/permission denied|does not exist/);
+test('neither role is granted the other’s release table', () => {
+  expect(() => sqlAs('viewer_app', 'SELECT release FROM notes."$ordorelease"')).toThrow(/permission denied|does not exist/);
+  expect(() => sqlAs('notes_app', 'SELECT release FROM viewer."$ordorelease"')).toThrow(/permission denied|does not exist/);
 });

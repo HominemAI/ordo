@@ -118,6 +118,28 @@ export function list(page: Page, name: 'Public notes' | 'Your notes') {
   return page.getByRole('list', { name });
 }
 
+/** The refusal a section of the viewer's page shows when notes v2 refuses its list. */
+export function refusal(page: Page, name: 'Public notes' | 'Your notes') {
+  return page.getByRole('region', { name }).getByRole('alert');
+}
+
+/**
+ * Sign in to note_viewer through the identity service, joining it when the
+ * person is not a member yet. The person may already be signed in there.
+ */
+export async function signInToViewer(page: Page): Promise<void> {
+  await page.goto(stack().viewerPage);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  const join = page.getByRole('button', { name: 'Join' });
+  const signOut = page.getByRole('button', { name: 'Sign out' });
+  const passkey = page.getByRole('button', { name: 'Sign in with a passkey' });
+  await expect(join.or(signOut).or(passkey)).toBeVisible({ timeout: 30_000 });
+  if (await passkey.isVisible()) await passkey.click();
+  await expect(join.or(signOut)).toBeVisible({ timeout: 30_000 });
+  if (await join.isVisible()) await join.click();
+  await expect(signOut).toBeVisible({ timeout: 30_000 });
+}
+
 /**
  * Wait until the viewer's page shows `title` in the list, reloading: notes v2
  * writes on the device first and sends the note to its door a moment later.

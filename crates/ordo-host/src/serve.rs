@@ -997,6 +997,7 @@ async fn health_deep(State(state): State<PlatformState>, headers: HeaderMap) -> 
                 "summary": r.summary(),
                 "verified": r.verified,
                 "no_result_shape": r.no_result_shape,
+                "peer_reads": r.peer_reads,
                 "undescribable": r.undescribable.iter().map(|u| json!({
                     "op": u.op, "reason": u.reason,
                 })).collect::<Vec<_>>(),

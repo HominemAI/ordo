@@ -1,7 +1,8 @@
 import { defineConfig, devices } from '@playwright/test';
 
 // The two-deployment stack (stack.sh) is Playwright's web server: the
-// identity service, notes v2 and note_viewer, on one Postgres with two roles.
+// identity service, notes v2 and note_viewer, each with its own database
+// role and schema. note_viewer reads notes v2 through notes v2's door.
 // Chromium only: the virtual passkey device (Chrome DevTools' WebAuthn
 // domain) is Chromium's. The flows share the stack's people, so they run in
 // order in one worker.
@@ -37,17 +38,34 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   projects: [
-    { name: 'api', testMatch: /api\/.*\.spec\.ts/ },
+    // note_viewer's consumer key is registered at the identity service, and
+    // its apply through its door records its use at notes v2: what a
+    // deployment owner does once (plan-federation-grants.md §7). Every
+    // project after it reads through notes v2's door.
+    {
+      name: 'door',
+      testMatch: /door\/.*\.spec\.ts/,
+      use: {
+        ...devices['Desktop Chrome'],
+        launchOptions: { args: [`--ignore-certificate-errors-spki-list=${FIXTURE_LEAF_SPKI}`] },
+      },
+    },
+    {
+      name: 'api',
+      testMatch: /api\/.*\.spec\.ts/,
+      dependencies: ['door'],
+    },
     {
       name: 'browser',
       testMatch: /browser\/.*\.spec\.ts/,
+      dependencies: ['door'],
       use: {
         ...devices['Desktop Chrome'],
         launchOptions: { args: [`--ignore-certificate-errors-spki-list=${FIXTURE_LEAF_SPKI}`] },
       },
     },
     // Notes v3 applied over the running notes v2 (plan-versions.md, increment
-    // 7a). It changes notes' program for the whole stack, so it runs last.
+    // 7a). It changes notes' program for the whole stack, so it runs after.
     {
       name: 'v3',
       testMatch: /v3\/.*\.spec\.ts/,
@@ -57,7 +75,7 @@ export default defineConfig({
         launchOptions: { args: [`--ignore-certificate-errors-spki-list=${FIXTURE_LEAF_SPKI}`] },
       },
     },
-    // notes renames a column the viewer reads (plan-versions.md, increment
+    // notes renames a field the viewer reads (plan-versions.md, increment
     // 7b). It changes notes' program again, so it runs after v3.
     {
       name: 'rename',
@@ -68,8 +86,8 @@ export default defineConfig({
         launchOptions: { args: [`--ignore-certificate-errors-spki-list=${FIXTURE_LEAF_SPKI}`] },
       },
     },
-    // notes stops writing a column the viewer reads (plan-versions.md,
-    // increment 14). Its fixture keeps the rename, so it runs after it.
+    // notes stops declaring a field the viewer reads (increment 14). Its
+    // fixture keeps the rename, so it runs after it.
     {
       name: 'orphans',
       testMatch: /orphans\/.*\.spec\.ts/,
@@ -79,12 +97,28 @@ export default defineConfig({
         launchOptions: { args: [`--ignore-certificate-errors-spki-list=${FIXTURE_LEAF_SPKI}`] },
       },
     },
-    // notes takes a table off its `reader` line (plan-evolution-federation.md
-    // §7, test 5). The viewer cannot start after it, so it runs last.
+    // notes seals a field the viewer reads; the viewer shows it, opened by
+    // notes' door (plan-federation-grants.md §6).
     {
-      name: 'reader-line',
-      testMatch: /reader-line\/.*\.spec\.ts/,
+      name: 'seal',
+      testMatch: /seal\/.*\.spec\.ts/,
       dependencies: ['orphans'],
+      use: {
+        ...devices['Desktop Chrome'],
+        launchOptions: { args: [`--ignore-certificate-errors-spki-list=${FIXTURE_LEAF_SPKI}`] },
+      },
+    },
+    // notes takes an op the viewer calls off its grant. The viewer's page
+    // names the refusal. It narrows the grant for the whole stack, so it
+    // runs last.
+    {
+      name: 'narrowed',
+      testMatch: /narrowed\/.*\.spec\.ts/,
+      dependencies: ['seal'],
+      use: {
+        ...devices['Desktop Chrome'],
+        launchOptions: { args: [`--ignore-certificate-errors-spki-list=${FIXTURE_LEAF_SPKI}`] },
+      },
     },
   ],
   webServer: {

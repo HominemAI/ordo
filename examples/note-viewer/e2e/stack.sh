@@ -13,18 +13,21 @@
 #   2. HTTPS in front (tls-front.mjs): an OIDC issuer and an app's callback
 #      must be https, and everything here serves plain http on loopback.
 #   3. The identity service, with `notes` and `viewer` registered, each with
-#      open sign-up and its callback as a return URL. Its own deployment,
-#      `main`, holds the deployment's people: the developer joins by its
-#      first invite and signs the `ordo` command in (tests/developer.ts).
-#      Both doors take their tokens (ORDO_IDENTITY_URL).
+#      open sign-up and its callback as a return URL. Each door is that
+#      deployment at the service (ORDO_IDENTITY_DEPLOYMENT), so the
+#      developer is a member of both and signs the `ordo` command in to each
+#      (tests/developer.ts).
 #   4. notes v2 (examples/notes-v2) as role `notes_app` in schema `notes`.
 #      Its people sign in through the identity service (`accounts`). The
 #      deployment's own space admits anyone who signs in, as an editor.
-#      `reader note_viewer` grants `viewer_app` its two tables.
+#      `grant note_viewer` opens two of its ops to `viewer`
+#      (ORDO_CONSUMER_NOTE_VIEWER_CLIENT).
 #   5. note_viewer (examples/note-viewer) as role `viewer_app` in schema
-#      `viewer`, its peer `notes` set to schema `notes`. Its people sign in
-#      through the same service. ORDO_PEER_SHARED_ROLE is left unset: the two
-#      roles are the point.
+#      `viewer`. It reads notes v2 only through notes v2's door
+#      (ORDO_PEER_NOTES_URL); its role is granted nothing in `notes`. Its
+#      people sign in through the same service. Its consumer key is
+#      registered, and its use recorded at notes v2, by the first test
+#      project (tests/door), as a deployment owner does.
 #   6. The two pages, built with Vite and served by `vite preview`.
 #
 # Playwright starts this script (playwright.config.ts, `webServer`) and stops
@@ -183,7 +186,7 @@ wait_for "the identity service" "$issuer/health/ready" "$last"
 # a note written in notes v2 shows on note_viewer's public list at once. The
 # external check runs every 2 seconds (300 by default), so a column notes
 # stops writing holds the viewer at once (tests/orphans).
-door_env() { # role, schema, port, public, page, client id, then the command
+door_env() { # role, schema, port, public, page, handle at the service, then the command
   local role=$1 schema=$2 port=$3 public=$4 page=$5 client=$6
   shift 6
   exec env ORDO_PG_HOST="$pg_host" ORDO_PG_PORT="$pg_port" ORDO_PG_DB="$db" \
@@ -200,10 +203,11 @@ door_env() { # role, schema, port, public, page, client id, then the command
     ORDO_AUTH_ACCOUNTS_CLIENT_ID="$client" ORDO_AUTH_ACCOUNTS_CLIENT_AUTH=none \
     ORDO_AUTH_PROVIDER_CA_FILE="$ca" ORDO_EGRESS_PRIVATE_HOSTS=localhost \
     ORDO_BLOB_STORE="fs:$state/blobs-$schema" ORDO_DEV_UNSAFE_BLOB_STORE=1 \
-    ORDO_READER_NOTE_VIEWER_ROLE=viewer_app ORDO_PEER_NOTES_SCHEMA=notes \
+    ORDO_CONSUMER_NOTE_VIEWER_CLIENT=viewer \
+    ORDO_PEER_NOTES_URL="$notes_door" ORDO_PEER_NOTES_DEPLOYMENT=notes ORDO_PEER_NOTES_SPACE=system \
     ORDO_PUBLIC_CDN_S_MAXAGE=2 ORDO_EXTERNAL_WATCH_SECS=2 \
     ORDO_IDENTITY_URL="http://127.0.0.1:$id_port" ORDO_IDENTITY_ORIGIN="$issuer" \
-    ORDO_IDENTITY_DEPLOYMENT=main \
+    ORDO_IDENTITY_DEPLOYMENT="$client" \
     RUST_LOG="${RUST_LOG:-info}" "$@"
 }
 notes_env() { door_env notes_app notes "$notes_port" "$notes_public" "$notes_page" notes "$@"; }

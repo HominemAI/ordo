@@ -284,6 +284,7 @@ pub(crate) fn encode(v: &str) -> String {
 pub struct DoorClient {
     url: DoorUrl,
     tls: Option<Arc<rustls::ClientConfig>>,
+    idempotency_key: Option<String>,
 }
 
 impl fmt::Debug for DoorClient {
@@ -303,7 +304,19 @@ impl DoorClient {
                     .with_no_client_auth(),
             )
         });
-        DoorClient { url, tls }
+        DoorClient {
+            url,
+            tls,
+            idempotency_key: None,
+        }
+    }
+
+    /// A request-scoped clone: a retry of this logical write keeps its key.
+    /// The shared client and other callers are never mutated.
+    pub(crate) fn with_idempotency_key(&self, key: &str) -> Self {
+        let mut client = self.clone();
+        client.idempotency_key = Some(key.to_string());
+        client
     }
 
     pub fn url(&self) -> &DoorUrl {
@@ -459,6 +472,11 @@ impl DoorClient {
         }
         if let Some(s) = space {
             req = req.header(SPACE_HEADER, s);
+        }
+        if method == "POST" && path.starts_with("/op/") {
+            if let Some(key) = &self.idempotency_key {
+                req = req.header("Idempotency-Key", key);
+            }
         }
         let bytes = match body {
             Some(b) => {

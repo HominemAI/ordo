@@ -1,7 +1,7 @@
 {
   "version": 1,
   "status": "discovery-only",
-  "sourceDigest": "48bc46b521fa646dcf5da6188c4e9448b92211774fd48ce1d40772aa2fa8e009",
+  "sourceDigest": "8941f23fc332bca71aef5d7ab4d4b35bc538e1c98a246451ba573c3dc5b21b93",
   "files": [
     {
       "file": "crates/ordo-api/src/attest.rs",
@@ -340,8 +340,8 @@
     },
     {
       "file": "crates/ordo-console/src/door.rs",
-      "sha256": "83887561d7545942264f6bd20b12f9b1fb99556a28a9ca1a5603efe5061c97d7",
-      "lines": 643
+      "sha256": "1080d002a6165e42019bbe59524decc58da4522a29ba8d066737caebb0503059",
+      "lines": 661
     },
     {
       "file": "crates/ordo-console/src/error.rs",
@@ -365,8 +365,8 @@
     },
     {
       "file": "crates/ordo-console/src/link.rs",
-      "sha256": "74caf8d96c4b60601881349bb46e0256f29f7e225842412d46d1c0ee26a47394",
-      "lines": 910
+      "sha256": "a4fa72605974435d5f13b8ccdb52ea02067b9bdcfc7020c77a52c4eba5599f4e",
+      "lines": 929
     },
     {
       "file": "crates/ordo-console/src/main.rs",
@@ -450,8 +450,8 @@
     },
     {
       "file": "crates/ordo-console/src/server/tenants.rs",
-      "sha256": "7aa1ea5ed7a93ecfe1166c95fc40ca540f0e82dc0c5f31adc82dcefa326bf2d1",
-      "lines": 586
+      "sha256": "432422274e622c4f1dc71df441e4759d02cb9944a0aa9f9623beac6bdb334c9f",
+      "lines": 613
     },
     {
       "file": "crates/ordo-console/src/server/usage.rs",

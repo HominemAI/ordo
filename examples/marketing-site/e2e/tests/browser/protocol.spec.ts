@@ -80,7 +80,7 @@ test('renewal cookies are scoped, reject missing origin and revoke the family af
     const headers: Record<string, string> = { Cookie: oldCookie };
     if (origin) headers.Origin = origin;
     const response = await request.post(`${door}/auth/refresh`, { headers });
-    expect(response.status()).toBe(403);
+    expect(response.status()).toBe(401);
     expect((await response.json()).error.code).toBe('remember_off');
     expect(response.headers()['set-cookie']).toBeUndefined();
   }

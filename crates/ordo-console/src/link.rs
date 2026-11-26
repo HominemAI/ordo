@@ -775,6 +775,25 @@ impl DoorAs<'_> {
             .await
     }
 
+    /// A presence-bound write whose idempotency key belongs to the page's
+    /// logical action, including retries after a passkey touch.
+    pub async fn op_present_keyed(
+        &self,
+        name: &str,
+        params: &Value,
+        key: &str,
+    ) -> Result<Vec<Value>, ConsoleError> {
+        let token = self.present().await?;
+        let space = self.link.linked_space().await?;
+        self.answer(
+            self.link
+                .client
+                .with_idempotency_key(key)
+                .op(name, &space, &token, false, params)
+                .await,
+        )
+    }
+
     /// [`DoorAs::op_present`], allowed `timeout`: an apply runs schema
     /// changes and may wait for another apply's lock.
     pub async fn op_present_within(

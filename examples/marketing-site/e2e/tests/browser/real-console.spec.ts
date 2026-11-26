@@ -54,11 +54,21 @@ test('the real console sets up, links, rotates its key and manages a disposable 
     await open('Tenants');
     const name = `Console ${randomUUID()}`;
     await page.getByLabel('Name', { exact: true }).fill(name);
+    const creation = page.waitForResponse(r => r.url().endsWith('/api/tenants/create') && r.status() === 200);
     await page.getByRole('button', { name: 'Create tenant' }).click();
     await deploymentOnly(async () => {
       await page.getByRole('dialog', { name: 'Touch your passkey for the deployment' }).getByRole('button', { name: 'Use my passkey' }).click();
     });
     await expect(page.getByRole('status')).toContainText(`Created ${name}.`);
+    const createdResponse = await creation;
+    const original = createdResponse.request().postDataJSON();
+    expect(original.idempotencyKey).toEqual(expect.any(String));
+    const replay = await page.request.post(createdResponse.url(), {
+      headers: { Origin: consoleState.url }, data: original,
+    });
+    expect(replay.status()).toBe(200);
+    expect((await replay.json()).created.space).toBe((await createdResponse.json()).created.space);
+
     const row = page.getByRole('region', { name: 'Tenants, newest first' }).getByRole('row').filter({ hasText: name });
     await expect(row).toContainText('Active');
     await page.getByRole('button', { name: `Pause ${name}`, exact: true }).click();

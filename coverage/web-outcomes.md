@@ -36,16 +36,16 @@ used by these new console journeys. A pending row is not coverage evidence.
 
 | Journey | Actual observations required | Validation |
 |---|---|---|
-| `browser/lifecycle.spec.ts`: tenant | Create, write, policy change/readback, malformed policy, active/paused reap refusal, last-owner refusal, colleague leave, pause/read/write refusal across replicas, resume/data retained, wrong confirmation, delete | Pending. First run caught missing create idempotency key; corrected |
-| `browser/lifecycle.spec.ts`: secrets | Set/replace/version/list/remove, redaction, anonymous refusal, repeated removal | Passed in 45894957979 |
-| `browser/lifecycle.spec.ts`: operations | Live/ready/deep health, metrics, usage/security exports, cost/quotas, forbidden actor and malformed query | Pending |
-| `browser/protocol.spec.ts`: CORS | Real external page, private preflight refusal, public access, allowed origin and credential mode | Passed in 45894957979 |
-| `browser/protocol.spec.ts`: renewals | Concurrent bearer refresh, use all tokens, UI logout, refusal across replicas | Passed in 45894957979 |
+| `browser/lifecycle.spec.ts`: tenant | Create, write, policy change/readback, malformed policy, active/paused reap refusal, last-owner refusal, colleague leave, pause/read/write refusal across replicas, resume/data retained, wrong confirmation, delete | Passed in 45897056095 before the colleague-leave extension; that extension is pending |
+| `browser/lifecycle.spec.ts`: secrets | Set/replace/version/list/remove, redaction, anonymous refusal, repeated removal | Passed in 45894957979 and 45897056095 |
+| `browser/lifecycle.spec.ts`: operations | Live/ready/deep health, metrics, usage/security exports, cost/quotas, forbidden actor and malformed query | Passed in 45897056095 |
+| `browser/protocol.spec.ts`: CORS | Real external page, private preflight refusal, public access, allowed origin and credential mode | Passed in 45894957979 and 45897056095 |
+| `browser/protocol.spec.ts`: renewals | Concurrent bearer refresh, use all tokens, UI logout, refusal across replicas | Passed in 45894957979 and 45897056095 |
 | `browser/protocol.spec.ts`: cookies | HttpOnly/path/SameSite, missing/wrong Origin, rotation, real replay grace and family revocation | Pending |
 | `browser/protocol.spec.ts`: live origins | Real embed blocked/allowed/revoked, other tenant remains blocked, wildcard refused | Pending |
-| `browser/real-console.spec.ts` | Initial setup, real door link, key rotation, tenant create/pause/resume/delete, real supervised host restart with retained data, unlink/relink, passkey loss/recovery and old-code refusal | Pending. Initial run reached rotation, then exposed a missing second step-up in the fixture; corrected |
+| `browser/real-console.spec.ts` | Initial setup, real door link, key rotation, tenant create/pause/resume/delete, real supervised host restart with retained data, unlink/relink, passkey loss/recovery and old-code refusal | Pending. Real door exposed the console's missing idempotency header in 45897056095; fixed with a keyed replay regression |
 | `browser/portability.spec.ts` | UI selects tenant, exports bundle, operator stages it, UI imports into another tenant, compares typed values, retries import, refuses invalid bundle names | Pending. Operator file staging is explicit; there is no claimed browser bundle-transfer endpoint |
-| `browser/volume.spec.ts` | 257 records from 3 writers, browser filter sees all records, replica B deletion arrives live, cleanup | Pending. This is a data-size check, not a latency SLO |
+| `browser/volume.spec.ts` | 257 records from 3 writers, browser filter sees all records, replica B deletion arrives live, cleanup | Passed in 45897056095. This is a data-size check, not a latency SLO |
 | Identity service `e2e/tests/identity.spec.ts` | Passkey CLI approval/denial, redemption/reuse, session-to-token exchange, Ed25519 machine authentication, invalid proof/replay/mint refusal and revocation | Pending. Run 45896467506 caught the missing session-to-token exchange; corrected |
 
 ## Required outcomes still missing or awaiting further journeys

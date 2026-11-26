@@ -187,6 +187,8 @@ async fn tenants_list(
 #[derive(Deserialize)]
 struct CreateBody {
     name: String,
+    #[serde(default, rename = "idempotencyKey")]
+    idempotency_key: Option<String>,
     /// The principal who will own the tenant. Unset: the deployment owner.
     #[serde(default)]
     owner: Option<String>,
@@ -222,6 +224,31 @@ async fn tenants_create(
             "`name` must be 1 to 256 printable characters".into(),
         ));
     }
+    let key = match req.idempotency_key {
+        Some(key)
+            if !key.is_empty()
+                && key.len() <= 128
+                && key
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') =>
+        {
+            key
+        }
+        Some(_) => {
+            return Err(ConsoleError::BadRequest(
+                "`idempotencyKey` must be 1 to 128 letters, digits, dashes or underscores".into(),
+            ))
+        }
+        None => {
+            // Older API clients still get a keyed single attempt. New pages
+            // supply the key so a retry can identify the same action.
+            let mut bytes = [0u8; 24];
+            getrandom::getrandom(&mut bytes).map_err(|e| {
+                ConsoleError::Internal(format!("tenant creation key could not be generated: {e}"))
+            })?;
+            ordo_identity::webauthn::b64url_encode(&bytes)
+        }
+    };
     let link = who.door(c)?;
     let owner = match req
         .owner
@@ -242,7 +269,7 @@ async fn tenants_create(
         None => own_principal(door_link(c)?).await?,
     };
     let rows = link
-        .op_present(CREATE, &json!({"name": name, "owner": owner}))
+        .op_present_keyed(CREATE, &json!({"name": name, "owner": owner}), &key)
         .await?;
     let made = first(rows);
     call.detail = format!(

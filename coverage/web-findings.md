@@ -16,8 +16,23 @@ All changes remain in PR #59.
 - Regression: the existing real-browser public editor journey keeps normal
   browser caching enabled and must display the acknowledged edit after reload.
   It also checks the split headers. Existing host header assertions track it.
-- Status: implementation 90878598; CI validation pending.
+- Status: implementation 90878598; browser journey passed in CI 45897056095.
 - Source: https://www.rfc-editor.org/rfc/rfc9213.html
+
+## Real console could not create a tenant
+
+- Seen: console creation completed both passkey touches, then the real door
+  refused `400 missing_param`, naming the required `Idempotency-Key` header.
+  CI 45897056095 retained the page and network trace.
+- Cause: the console's shared door client had no way to carry this key.
+  Stand-in door fixtures did not enforce the host's side-effect contract.
+- Fix: the page creates one key per action, retained across the touch retry.
+  The tenant route passes it through the shared door client on a request-scoped
+  clone. Existing API clients without a key receive a generated single-attempt
+  key; supplying the key enables an explicit replay.
+- Regression: the real-console browser journey creates a tenant and replays
+  the exact keyed request. Both responses must name the same tenant.
+- Status: implemented, awaiting CI.
 
 ## Fixture corrections, not product failures
 

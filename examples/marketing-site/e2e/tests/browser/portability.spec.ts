@@ -28,7 +28,7 @@ test('a tenant exports real data and imports a staged bundle without duplicating
     }));
     const id = created[0].created;
     await ownerPage.reload();
-    await ownerPage.getByLabel('Workspace', { exact: true }).selectOption(source);
+    await ownerPage.getByRole('combobox', { name: 'Workspace', exact: true }).selectOption(source);
     await ownerPage.getByRole('button', { name: 'Open workspace' }).click();
     await ownerPage.getByRole('button', { name: 'Data', exact: true }).click();
     const [exportResponse] = await Promise.all([
@@ -45,7 +45,7 @@ test('a tenant exports real data and imports a staged bundle without duplicating
     // themselves are real application calls, never internal executor calls.
     await cp(path, stage, { recursive: true, errorOnExist: true, force: false });
     const input = { bundle: 'roundtrip', name: `roundtrip-${randomUUID()}` };
-    await ownerPage.getByLabel('Workspace', { exact: true }).selectOption(destination);
+    await ownerPage.getByRole('combobox', { name: 'Workspace', exact: true }).selectOption(destination);
     await ownerPage.getByRole('button', { name: 'Open workspace' }).click();
     await ownerPage.getByRole('button', { name: 'Data', exact: true }).click();
     await ownerPage.getByLabel('Staged bundle name (required)').fill(input.bundle);

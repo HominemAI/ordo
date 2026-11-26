@@ -76,9 +76,10 @@ export const PAUSE_NOTES = ['owner', 'billing', 'abuse', 'legal', 'maintenance',
 
 export const listTenants = (): Promise<TenantList> => get<TenantList>('tenants');
 
-export const createTenant = (name: string, owner: string) =>
+export const createTenant = (name: string, owner: string, idempotencyKey: string) =>
   post<{ created: { space: string; name: string; owner: string } }>('tenants/create', {
     name,
+    idempotencyKey,
     ...(owner ? { owner } : {}),
   });
 

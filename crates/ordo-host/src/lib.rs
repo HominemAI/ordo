@@ -194,6 +194,12 @@ use ordo_conformance::{Fixture, Pg};
 use ordo_syntax::{OpBody, ScalarTy, WriteStmt};
 use sha2::{Digest, Sha256};
 
+/// Are 2 pools on the same database: host, port and name.
+fn same_database(a: &ordo_exec::Pool, b: &ordo_exec::Pool) -> bool {
+    let (a, b) = (a.config(), b.config());
+    a.host == b.host && a.port == b.port && a.db == b.db
+}
+
 /// A space that could not be resolved, in the executor's vocabulary.
 ///
 /// Four refusals with three very different remedies, which is the whole
@@ -1217,6 +1223,20 @@ impl OpExecutor for FixtureExecutor {
             }
             .map_err(space_refusal)?;
             let view = &bound_space.view;
+            // A tenant kept in a database of its own reaches a peer only
+            // through the peer's door: a peer read through the shared
+            // database is refused by name, never answered from a database
+            // that does not hold its tables (step G7).
+            if !same_database(
+                &view.exec.pool,
+                &self.spaces.deployment().current().exec.pool,
+            ) {
+                if let Some(e) =
+                    crate::external_check::shared_peer_refusal(&view.fixture, &op.name, space)
+                {
+                    return Err(e);
+                }
+            }
             match op.kind {
                 OpKind::Read => {
                     // The cursor's keys are text on the way out and back;

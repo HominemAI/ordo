@@ -393,7 +393,16 @@ pub fn op_class(name: &str) -> Option<OpClass> {
         | "std.space.pause"
         | "std.space.resume"
         | "std.space.moveOffRevoked" => Nobody,
-        n if n.starts_with("std.deployment.") || n.starts_with("std.identity.") => Deployment,
+        // `std.peer.*` (step G4): the deployment's, on `APPLY`'s terms. The
+        // two another deployment calls reach it only through the door for
+        // other deployments, which `peer_door.rs` and `peer_consumer.rs`
+        // test.
+        n if n.starts_with("std.deployment.")
+            || n.starts_with("std.identity.")
+            || n.starts_with("std.peer.") =>
+        {
+            Deployment
+        }
         _ => return None,
     };
     Some(class)

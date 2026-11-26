@@ -155,9 +155,24 @@ pub struct ReaderDecl {
 /// `peer <name>`: a local nickname for another Ordo deployment. It does not
 /// name or change that deployment. The schema comes from the environment,
 /// never from the file, so one file works in every environment.
+///
+/// With a block, `peer notes { std.notes.list  addComment }`, it lists the
+/// holder's ops this deployment calls through the holder's door
+/// (`plan-federation-grants.md` §4, step G4). The holder's address comes
+/// from the setting `ORDO_PEER_<NAME>_URL`, never the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerDecl {
     pub name: Ident,
+    /// The block's op lines, in the order written. `None` for the one-line
+    /// form, which the shared-database path reads.
+    pub uses: Option<Vec<PeerUse>>,
+    pub span: Span,
+}
+
+/// One line of a `peer` block: an exact op name of the holder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerUse {
+    pub op: String,
     pub span: Span,
 }
 

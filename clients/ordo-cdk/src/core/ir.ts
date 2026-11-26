@@ -390,10 +390,15 @@ export interface AuthNode {
   } | null;
 }
 
-/** `peer journal`: a local nickname for another Ordo deployment. */
+/**
+ * `peer journal`: a local nickname for another Ordo deployment. With
+ * `uses`, the block form `peer notes { std.notes.list }`: the holder's ops
+ * this deployment calls through the holder's door.
+ */
 export interface PeerNode {
   readonly kind: 'peer';
   readonly name: string;
+  readonly uses: readonly string[] | null;
 }
 
 /**

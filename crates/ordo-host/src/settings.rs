@@ -1391,6 +1391,36 @@ pub static REGISTRY: &[Setting] = &[
         r#""#,
     ),
     s(
+        "ORDO_PEER_<NAME>_URL",
+        "Databases and pools",
+        r#"none, required per peer block"#,
+        r#""#,
+    ),
+    s(
+        "ORDO_PEER_<NAME>_DEPLOYMENT",
+        "Databases and pools",
+        r#"the nickname"#,
+        r#""#,
+    ),
+    s(
+        "ORDO_PEER_<NAME>_SPACE",
+        "Databases and pools",
+        r#"none, required per peer block"#,
+        r#""#,
+    ),
+    s(
+        "ORDO_PEER_PLAIN_HTTP",
+        "Databases and pools",
+        r#"off"#,
+        r#""#,
+    ),
+    s(
+        "ORDO_CONSUMER_<NAME>_CLIENT",
+        "Databases and pools",
+        r#"none"#,
+        r#""#,
+    ),
+    s(
         "ORDO_EXTERNAL_<NAME>_SCHEMA",
         "Databases and pools",
         r#"as written"#,

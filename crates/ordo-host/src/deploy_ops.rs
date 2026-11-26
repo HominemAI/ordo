@@ -1007,10 +1007,20 @@ pub async fn execute(
                 .get("program")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ExecError::internal("`$program` did not reach the platform op"))?;
-            apply_op::preview(&ops.pool, source)
+            let mut preview = apply_op::preview(&ops.pool, source)
                 .await
-                .map_err(|refusal| ExecError::new(refusal.code(), refusal.to_string()))?
-                .to_json()
+                .map_err(|refusal| ExecError::new(refusal.code(), refusal.to_string()))?;
+            // The holders this program calls, checked as the apply checks
+            // them, recording nothing (step G4).
+            match ops.check_peers(source, false).await {
+                Ok(notes) => preview.notes.extend(notes),
+                Err(refusal) => {
+                    if !matches!(preview.would, apply_op::Would::Refuse(_)) {
+                        preview.would = apply_op::Would::Refuse(refusal);
+                    }
+                }
+            }
+            preview.to_json()
         }
         LABEL => {
             let version = text(bound, "version").unwrap_or_default();

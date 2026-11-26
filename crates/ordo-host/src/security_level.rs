@@ -234,6 +234,11 @@ pub fn situation_of(op: &str) -> Option<Situation> {
         // A rollout's controls (`plan-versions.md` §3.7): moves, no touch
         // (`NO_PRESENCE`).
         ("std.deployment.rollout", _) => Deploying,
+        // Between Ordo deployments (`plan-federation-grants.md` §4):
+        // registering this deployment's consumer key, and a holder keeping
+        // what a consumer calls. The second is reached only through the door
+        // for other deployments, which asks no person to touch.
+        ("std.peer", _) => Deploying,
         // A tenant's own move off a revoked version, when the developer
         // grants it. Like every move it asks no touch (`NO_PRESENCE`).
         ("std.space", "moveOffRevoked") => Deploying,

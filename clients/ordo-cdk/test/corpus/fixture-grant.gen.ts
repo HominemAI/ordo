@@ -9,13 +9,16 @@
 // between them is documented in the package README. An edit here is
 // lost the next time the generator runs.
 
-import { entity, grant, grantProvider, synth, t } from '../../src/index.js';
+import { entity, grant, grantProvider, peer, synth, t } from '../../src/index.js';
+
+const journal = peer('journal', ['std.entries.list', 'addEntry']);
 
 const notes = entity('notes', {
   title: t.text(),
 });
 
 export const ordo: string = synth(
+  journal,
   grant('note_viewer', ['std.notes.get', 'std.notes.list', '/std\\.notesAccess\\..*/', '/a\\/b/', '!std.notes.delete']),
   grant('billing', ['*', '!/std\\..*/'], { asItself: true }),
   grantProvider('hominem', ['std.notes.get']),

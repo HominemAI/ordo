@@ -444,6 +444,18 @@ impl PeerDoor {
         }
     }
 
+    /// The serving version and every grant that covers `consumer`, on
+    /// behalf of a person or as itself: what `std.peer.grant` answers it
+    /// (step G4).
+    pub async fn grants_for(
+        &self,
+        consumer: &str,
+    ) -> Result<(Option<String>, Vec<Expanded>), String> {
+        self.refresh_grants().await?;
+        let version = self.grants.read().expect("peer grants").0.clone();
+        Ok((version, self.grants_of(consumer, true)))
+    }
+
     /// The grants that cover `consumer`: each `grant <name>` whose
     /// `ORDO_CONSUMER_<NAME>_CLIENT` is its id, and, on behalf of a person,
     /// `grant provider <connection>`.
@@ -493,6 +505,31 @@ impl PeerDoor {
             why: Some(format!("consumer `{consumer}`, op `{op}`: {why}")),
         };
         let on_behalf = claims.kind == PeerKind::OnBehalf;
+        // What the consumer's apply asks (step G4): its own grant, and the
+        // ops it calls. Any consumer a grant covers, as itself, in the
+        // deployment's own space.
+        if crate::peer_ops::CONSUMER_OPS.contains(&op)
+            && !self.grants_of(&consumer, true).is_empty()
+        {
+            if on_behalf {
+                return refuse(
+                    "this op answers a deployment calling as itself. Fix: ask the identity \
+                     service for a client token (`client_credentials`)"
+                        .into(),
+                );
+            }
+            if home != Some(space) {
+                return refuse(format!(
+                    "this op answers only in this deployment's own space{}, and this call \
+                     named `{space}`. Fix: set ORDO_PEER_<NAME>_SPACE to it",
+                    home.map(|h| format!(" `{h}`")).unwrap_or_default()
+                ));
+            }
+            return PeerDecision::AsItself {
+                consumer: consumer.clone(),
+                subject: subject.clone(),
+            };
+        }
         let grants = self.grants_of(&consumer, on_behalf);
         if grants.is_empty() {
             let names = self.grant_names();

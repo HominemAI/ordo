@@ -847,12 +847,18 @@ export function entity(
  * peer's `notes`, in the schema `ORDO_PEER_JOURNAL_SCHEMA` names, and
  * `$caller` on it means the peer's member for the same person. Pass the
  * peer to `synth` before the externals that read it.
+ *
+ * With `uses`, `peer('notes', ['std.notes.list', 'addComment'])` prints the
+ * block form: the holder's ops this deployment calls through the holder's
+ * door (`plan-federation-grants.md` §4). The holder's address is the
+ * setting `ORDO_PEER_<NAME>_URL`, never the file.
  */
 export class Peer {
   readonly kind = 'peer' as const;
   readonly name: string;
+  readonly uses: readonly string[] | null;
 
-  constructor(name: string) {
+  constructor(name: string, uses?: readonly string[]) {
     if (!/^[a-z][a-z0-9]*$/.test(name)) {
       throw new Error(
         `peer_name: \`peer ${name}\`: a peer name is lowercase letters and digits, ` +
@@ -860,16 +866,40 @@ export class Peer {
       );
     }
     this.name = name;
+    if (uses !== undefined) {
+      if (uses.length === 0) {
+        throw new Error(
+          `peer_block: \`peer ${name} { }\` names no op. List the holder's ops this ` +
+            'deployment calls, or leave `uses` out',
+        );
+      }
+      const seen = new Set<string>();
+      for (const op of uses) {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/.test(op)) {
+          throw new Error(
+            `peer_block: \`peer ${name}\`: \`${op}\` is not an op name. A line is one exact ` +
+              "op name of the holder; patterns belong in the holder's grant",
+          );
+        }
+        if (seen.has(op)) {
+          throw new Error(`peer_block: \`peer ${name}\` names \`${op}\` twice; keep one`);
+        }
+        seen.add(op);
+      }
+      this.uses = [...uses];
+    } else {
+      this.uses = null;
+    }
   }
 
   node(): PeerNode {
-    return { kind: 'peer', name: this.name };
+    return { kind: 'peer', name: this.name, uses: this.uses };
   }
 }
 
-/** `peer('journal')`: see {@link Peer}. */
-export function peer(name: string): Peer {
-  return new Peer(name);
+/** `peer('journal')` or `peer('notes', ['std.notes.list'])`: see {@link Peer}. */
+export function peer(name: string, uses?: readonly string[]): Peer {
+  return new Peer(name, uses);
 }
 
 /**
@@ -1303,6 +1333,8 @@ function checkPeers(nodes: Declaration[]): void {
         throw new Error(`peer_name: \`peer ${n.name}\` is passed twice; pass it once`);
       }
       declared.add(n.name);
+      // A block is used by its own ops, through the holder's door.
+      if (n.uses !== null) read.add(n.name);
     }
     if (n.kind === 'external' && n.peer !== null) {
       if (!declared.has(n.peer)) {

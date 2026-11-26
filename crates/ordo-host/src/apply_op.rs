@@ -524,6 +524,12 @@ pub enum ApplyRefused {
     /// `grant provider` that is not Ordo's identity service. One line each,
     /// leading with its class and ending with the fix. Nothing was applied.
     Grant(Vec<String>),
+    /// A `peer` block the holder does not back (`plan-federation-grants.md`
+    /// §4, step G4): an op its grant does not open to this deployment, or a
+    /// holder that could not be asked or could not record the use. One line
+    /// each, leading with its class and ending with the fix. Nothing was
+    /// applied.
+    Peer(Vec<String>),
     /// Staging comes before this deployment, and the version renames a
     /// field or an entity: a change only a stored plan staging rehearsed
     /// makes here (`crate::rehearsals`, §3.2). The text names the commands.
@@ -550,6 +556,7 @@ impl ApplyRefused {
             ApplyRefused::RolloutOpen(_) => "rollout_open",
             ApplyRefused::External(_) => "external_refused",
             ApplyRefused::Grant(_) => "grant_refused",
+            ApplyRefused::Peer(_) => "peer_refused",
             ApplyRefused::NotRehearsed(_) => "plan_not_rehearsed",
         }
     }
@@ -571,6 +578,7 @@ impl ApplyRefused {
             | ApplyRefused::RolloutOpen(_)
             | ApplyRefused::External(_)
             | ApplyRefused::Grant(_)
+            | ApplyRefused::Peer(_)
             | ApplyRefused::NotRehearsed(_) => ErrorCode::ApplyRefused,
             ApplyRefused::NotActivated { .. } => ErrorCode::NotActivated,
             ApplyRefused::InProgress => ErrorCode::ApplyInProgress,
@@ -645,6 +653,14 @@ impl std::fmt::Display for ApplyRefused {
             ApplyRefused::Grant(lines) => write!(
                 f,
                 "grant_refused: {} problem{} in the program's `grant` blocks, so nothing was \
+                 applied:\n{}",
+                lines.len(),
+                if lines.len() == 1 { "" } else { "s" },
+                lines.join("\n")
+            ),
+            ApplyRefused::Peer(lines) => write!(
+                f,
+                "peer_refused: {} problem{} with the program's `peer` blocks, so nothing was \
                  applied:\n{}",
                 lines.len(),
                 if lines.len() == 1 { "" } else { "s" },
@@ -2186,6 +2202,11 @@ pub struct ApplyOps {
     /// Key custody for a step that seals a field (increment 13), set by the
     /// runtime. Unset, such a step is refused naming why.
     pub backfill_keys: std::sync::OnceLock<Arc<dyn ordo_crypto::KeyProvider>>,
+    /// The client to other deployments' doors (step G4), set by the
+    /// runtime: a program's `peer` blocks are checked against each holder
+    /// with it. Unset, a program with a `peer` block is refused naming the
+    /// settings.
+    pub peer_client: std::sync::OnceLock<Arc<crate::peer_client::PeerClient>>,
 }
 
 impl ApplyOps {
@@ -2212,7 +2233,33 @@ impl ApplyOps {
             backfill_functions: std::sync::OnceLock::new(),
             spaces: std::sync::OnceLock::new(),
             backfill_keys: std::sync::OnceLock::new(),
+            peer_client: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Check the `peer` blocks of `source` against each holder
+    /// (`crate::peer_ops::check_uses`), recording the use with each when
+    /// `record` is set. A program that does not compile, or has no block,
+    /// passes here: the apply refuses the first itself.
+    pub async fn check_peers(
+        &self,
+        source: &str,
+        record: bool,
+    ) -> Result<Vec<String>, ApplyRefused> {
+        let Ok(program) = Program::compile(source) else {
+            return Ok(Vec::new());
+        };
+        let found = crate::peer_ops::check_uses(
+            self.peer_client.get().map(|c| c.as_ref()),
+            &program.schema.peer_uses,
+            &program.version,
+            record,
+        )
+        .await;
+        if !found.refusals.is_empty() {
+            return Err(ApplyRefused::Peer(found.refusals));
+        }
+        Ok(found.notes)
     }
 
     /// What a stored step runs its backfills with (10b): the backfill
@@ -2316,6 +2363,15 @@ impl ApplyOps {
             git_commit: text("gitCommit"),
         };
 
+        // **The holders this program calls, before anything is stored**
+        // (`plan-federation-grants.md` §4, step G4): each `peer` block's ops
+        // checked against the holder's grant, refused by name, and the use
+        // recorded with each holder.
+        let peer_notes = self
+            .check_peers(source, true)
+            .await
+            .map_err(|refusal| ExecError::new(refusal.code(), refusal.to_string()))?;
+
         match run_with(
             &self.pool,
             self.pools.as_ref(),
@@ -2328,7 +2384,8 @@ impl ApplyOps {
         )
         .await
         {
-            Ok(report) => {
+            Ok(mut report) => {
+                report.notes.extend(peer_notes);
                 let activation = match &report.activation {
                     Activation::Switched { from, .. } => format!(
                         "activation=switched was={}",
@@ -2536,6 +2593,7 @@ mod tests {
             },
             ApplyRefused::Provenance("label".into()),
             ApplyRefused::Grant(vec!["grant_matches_nothing in `grant v`".into()]),
+            ApplyRefused::Peer(vec!["peer_op_not_granted in `peer notes`".into()]),
         ];
         for r in &all {
             assert!(!r.class().is_empty());

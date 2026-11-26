@@ -1,7 +1,7 @@
 # Federation through the door: grants between Ordo deployments
 
 Status: **design agreed with the owner in conversation, 2026-11-25 and 2026-11-26.**
-G1 to G3 built; G4 to G8 not yet. Board task `federation-ordo-deployments-share-data-through`.
+G1 to G4 built; G5 to G8 not yet. Board task `federation-ordo-deployments-share-data-through`.
 Replaces the shared-database peer path (`peer`, `reader`, Postgres grants)
 described in `definition-language.md` "`peer`" and `plan-evolution-federation.md`.
 
@@ -135,10 +135,12 @@ peer notes {
   a key derived from the deployment's master key, registered at the service
   when the deployment is registered, so no person handles a key (owner on
   Q11: having to give a key is a nuisance). Built in G2 this way
-  (`plan-identity-service.md` 11.5). Still open: who carries the public
-  half to the service. A provisioner registers it with the deployment;
-  the route also takes the deployment's own admin token, so the host or
-  console can register it unasked.
+  (`plan-identity-service.md` 11.5). Who carries the public half: G4
+  built the host's side as the door op `std.peer.registerKey($token)`,
+  which registers it with a token for the deployment's own admin. The
+  host holds no admin token of its own, so a person (CLI or console)
+  passes theirs once; the apply's refusal names the op until then.
+  Whether the CLI or console should do this unasked is an owner question.
 - How a `grant provider` tells Ordo's identity service from an outside
   provider. G1 uses the deployment's settings: the connection is an OIDC
   connection whose `ORDO_AUTH_<NAME>_ISSUER` is `ORDO_IDENTITY_ORIGIN`.
@@ -158,7 +160,7 @@ peer notes {
 | G1 | `grant` blocks: parser, expansion at apply, plan output, refusals. **Built** (branch `fed-g1-grant-blocks`): the parser and the CDK's `grant()` and `grantProvider()`; `ordo_host::consumer_grants` expands each block at plan and apply, stores the lists in `$consumergrant` by version, and shows each list, its changes and `ORDO_CONSUMER_<NAME>_CLIENT`; the 4 refusals are `grant_refused`. A provider is the identity service when its OIDC issuer is `ORDO_IDENTITY_ORIGIN`. Not enforced on the door (G3). Tests: `ordo-syntax/tests/grant.rs`, `ordo-host/tests/consumer_grants.rs` (notes v2 with a `grant note_viewer` block), `ordo-cdk/test/grant.test.ts`, the isomorphism corpus | M |
 | G2 | The identity service: consumer credentials, token exchange with the actor claim. **Built** on `fed-g2-token-exchange`: consumer key derived from the master key, public half registered (`consumerKey`, `deployment consumer-key`); RFC 7523 assertions, each `jti` once; RFC 8693 exchange (`typ` `ordo-peer+jwt`, `act.sub`) and `client_credentials` (`typ` `ordo-client+jwt`, `kind` `client`), `aud` `ordo-peer:<holder>`; `ORDO_IDENTITY_PEER_TOKEN_SECS` 300, `ORDO_IDENTITY_CLIENT_ASSERTION_SECS` 120; audit `oidc.exchange`, `oidc.client-token`. Tests: `ordo-identity-service/tests/federation_exchange.rs`, 7. The host deriving and registering its key is G4 | M |
 | G3 | The holder's door: grant check on every call, on behalf or as itself, the loop check, audit. **Built** on `fed-g3-holder-door` (c4b6cd8d): `ordo_host::peer_door`. The token gate verifies `ordo-peer+jwt` and `ordo-client+jwt` with the identity service's keys (`typ`, the issuer of the one sign-in connection to the service, `aud` `ordo-peer:<ORDO_IDENTITY_DEPLOYMENT>`, `exp`), refuses a chain that names this deployment, and resolves the person as a direct sign-in does (`oidc:<connection>:<sub>`, the sign-up rules and ceiling). `check` then needs the op in the consumer's grants for the serving version (`ORDO_CONSUMER_<NAME>_CLIENT`; `grant provider <connection>` on behalf of a person only); as itself, a grant marked `as itself`, in the deployment's own space only; on behalf, the access engine for that person. Refusals name the consumer, the op and the fix (`AccessChecker::peer_refused`, answered `access_denied`); a bad signature keeps the uniform denial. Recorded as `PeerTokenRefused`, `ConsumerNotGranted`, `PeerLoop`, and each allowed call with the person and the consumer (`peer-person`/`peer-client`); a write's command log names `consumer:<handle>` as the agent. G2 change: the service writes the `chain` claim from `ordo_chain`. Tests: `ordo-host/tests/peer_door.rs` (4, real service and door), `federation_exchange.rs` chain test, `peer_token` unit tests. No live stream for a peer token yet | M |
-| G4 | The consumer: `peer` block checked against the holder at apply; the holder records uses and names breaks | M |
+| G4 | The consumer: `peer` block checked against the holder at apply; the holder records uses and names breaks. **Built** on `fed-g4-consumer` (135b7166). `peer <name> { op … }` (`peer_block`); the one-line form stays until G8. One client, `ordo_host::peer_client` (`PeerClientError`: retry, refuse, fix input): consumer key from custody (`blind_index` seed, then `peer_token::consumer_key`), a client assertion per token, `client_credentials` or token exchange, the incoming chain as `ordo_chain`, the door by `GET`/`POST`/`DELETE`. Settings `ORDO_PEER_<NAME>_URL`, `_DEPLOYMENT` (default the nickname), `_SPACE`, `ORDO_PEER_PLAIN_HTTP`. Door ops (`ordo_host::peer_ops`): `std.peer.grant` (read, the consumer's expanded grants and each granted op's `op`, `kind`, `params`), `std.peer.recordUse` (`$peeruses`), both only as itself in the holder's own space; `std.peer.registerKey($token)`, owner only. Consumer apply and plan: an ungranted op is `peer_refused` / `peer_op_not_granted`, nothing stored; the use is recorded before the version is stored. Holder plan and apply: `warning     breaks note_viewer: note_viewer calls addEntry …`, never a refusal (owner question). Tests: `ordo-host/tests/peer_consumer.rs` (3, real service and 2 deployments), `ordo-syntax/tests/peer.rs`, `peer_ops` and `peer_client` unit tests, `ordo-cdk/test/peer.test.ts`, the isomorphism corpus. Not built: a CLI command for the key; the promotion gate's apply does not check peer blocks yet | M |
 | G5 | Peer entities served by door calls: pushdown, batched joins, `$caller` through the exchanged token | L |
 | G6 | `grant provider` | S |
 | G7 | Sealed fields through the holder; tenants in their own database | S |

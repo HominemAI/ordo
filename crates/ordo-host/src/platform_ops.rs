@@ -1071,6 +1071,7 @@ pub fn specs() -> Vec<OpSpec> {
     .chain(crate::secrets::specs())
     .chain(crate::fn_runs::specs())
     .chain(crate::deploy_ops::specs())
+    .chain(crate::peer_ops::specs())
     .chain(crate::clones::specs())
     .chain(crate::branches::specs())
     .chain(crate::rehearsals::specs())
@@ -1888,6 +1889,11 @@ pub fn owner_only(name: &str) -> bool {
         // G1 to G3: the program's history, its rollback and its preview
         // are the deployment's, on `APPLY`'s terms.
         || crate::deploy_ops::OPS.contains(&name)
+        // Between Ordo deployments (`plan-federation-grants.md` §4): the
+        // deployment's, on `APPLY`'s terms. Another deployment reaches the
+        // two it calls only through the door for other deployments
+        // (`crate::peer_door`), as itself, never through a role.
+        || crate::peer_ops::OPS.contains(&name)
         // Staging clones (`plan-versions.md` §3.4): the deployment's, on
         // `APPLY`'s terms. A clone discloses a tenant, masked.
         || crate::clones::OPS.contains(&name)
@@ -2261,6 +2267,10 @@ pub struct PlatformOps {
     /// wires nothing for it is a bug in the deployment, not a state a
     /// caller reaches on a correct one.
     pub apply: Option<Arc<crate::apply_op::ApplyOps>>,
+    /// The ops between Ordo deployments (`plan-federation-grants.md` §4,
+    /// step G4): a holder's grant and recorded uses, and registering this
+    /// deployment's consumer key.
+    pub peer: Option<Arc<crate::peer_ops::PeerOps>>,
     /// The clone ops' state (`plan-versions.md` §3.4): the deploy door's,
     /// the deployment's keys, and who opens a clone.
     pub clones: Option<Arc<crate::clones::CloneOps>>,
@@ -2375,6 +2385,7 @@ impl PlatformOps {
             identities: None,
             credentials: None,
             apply: None,
+            peer: None,
             clones: None,
             tenants: None,
             pause: None,
@@ -2469,6 +2480,12 @@ impl PlatformOps {
     /// serves no control plane needs no change.
     pub fn with_apply(mut self, apply: Arc<crate::apply_op::ApplyOps>) -> PlatformOps {
         self.apply = Some(apply);
+        self
+    }
+
+    /// Wire the ops between Ordo deployments (step G4).
+    pub fn with_peer(mut self, peer: Arc<crate::peer_ops::PeerOps>) -> PlatformOps {
+        self.peer = Some(peer);
         self
     }
 
@@ -2856,6 +2873,15 @@ impl PlatformOps {
                 out
             }
             crate::apply_op::APPLY => self.apply_ops()?.apply(space, bound, caller).await,
+            name if crate::peer_ops::OPS.contains(&name) => {
+                let peer = self.peer.as_deref().ok_or_else(|| {
+                    ExecError::internal(
+                        "this deployment registered the ops between deployments and wired no \
+                         state for them",
+                    )
+                })?;
+                peer.execute(name, space, bound, caller).await
+            }
             name if crate::branches::OPS.contains(&name) => {
                 let out = crate::branches::execute(
                     self.apply_ops()?,

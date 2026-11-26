@@ -316,6 +316,15 @@ pub struct PeerSource {
     pub schema: Option<String>,
 }
 
+/// A `peer` block: the holder's nickname and the holder's ops this
+/// deployment calls through its door, in the order written
+/// (`plan-federation-grants.md` §4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerUses {
+    pub name: String,
+    pub ops: Vec<String>,
+}
+
 /// The schema an unresolved peer reads, which no deployment can create: a
 /// program that skipped resolution fails on a missing relation and never
 /// reads a plain schema that happens to share the nickname.
@@ -440,9 +449,15 @@ pub struct Schema {
     /// The program's `auth` block, checked by [`auth::check`]. `None`:
     /// the deployment's settings decide sign-in, as before the block.
     pub auth: Option<ordo_syntax::AuthDecl>,
-    /// The nicknames of the program's `peer` lines, in the order written.
-    /// Each is read by at least one external.
+    /// The nicknames of the program's `peer` lines that an external reads,
+    /// in the order written: the shared-database path, which resolves each
+    /// through `ORDO_PEER_<NAME>_SCHEMA`.
     pub peers: Vec<String>,
+    /// The program's `peer` blocks (`plan-federation-grants.md` §4, step
+    /// G4): each holder this deployment calls through its door, and the
+    /// holder's ops it calls. Checked against the holder's grant at apply
+    /// (`ordo_host::peer_check`).
+    pub peer_uses: Vec<PeerUses>,
     /// The program's `reader` lines (owner, 2026-11-18,
     /// `example-apps-notes-v2-plus-note_viewer` ask 17): the deployments that
     /// may read this one, and the tables each may read. Each table is one of
@@ -977,12 +992,14 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
         entities.push(lowered);
     }
     // A `peer` line no external reads is refused: it would still ask the
-    // deployment owner for a setting that changes nothing.
+    // deployment owner for a setting that changes nothing. A `peer` block
+    // is used by its own ops, through the holder's door (step G4).
     for peer in &program.peers {
-        if !program
-            .externals
-            .iter()
-            .any(|x| x.schema.name == peer.name.name)
+        if peer.uses.is_none()
+            && !program
+                .externals
+                .iter()
+                .any(|x| x.schema.name == peer.name.name)
         {
             return Err(SchemaError {
                 code: "peer_unused",
@@ -1156,7 +1173,27 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
         secrets: program.secrets.clone(),
         functions: program.functions.clone(),
         auth: program.auth.clone(),
-        peers: program.peers.iter().map(|p| p.name.name.clone()).collect(),
+        peers: program
+            .peers
+            .iter()
+            .filter(|p| {
+                program
+                    .externals
+                    .iter()
+                    .any(|x| x.schema.name == p.name.name)
+            })
+            .map(|p| p.name.name.clone())
+            .collect(),
+        peer_uses: program
+            .peers
+            .iter()
+            .filter_map(|p| {
+                Some(PeerUses {
+                    name: p.name.name.clone(),
+                    ops: p.uses.as_ref()?.iter().map(|u| u.op.clone()).collect(),
+                })
+            })
+            .collect(),
         readers: program
             .readers
             .iter()

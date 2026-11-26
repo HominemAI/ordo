@@ -181,6 +181,10 @@ const READS: &[&str] = &[
     // A stored version as a promotion's source, with whether it was
     // activated: what `ordo promote` reads as the person promoting.
     "std.deployment.versionSource",
+    // A holder's grant for the calling consumer and each granted op's
+    // shape: another deployment's apply reads it as itself, through the
+    // door for other deployments (`plan-federation-grants.md` §4, G4).
+    "std.peer.grant",
     // The stored plans and their receipts; deployment owner only, home
     // space (versions increment 8).
     "std.deployment.plans",

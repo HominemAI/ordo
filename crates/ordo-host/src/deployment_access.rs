@@ -120,10 +120,32 @@ pub fn decide(
     }
 }
 
+/// **A person opening a staging clone** (`plan-versions.md` §3.4, owner
+/// ruling 2026-11-23, Q12): the caller found the tenant is a clone and the
+/// person may open it (`clones::CloneAccess`). A person with a touch in the
+/// last [`TENANT_REACH_SECS`] runs the app's ops there; a stale touch is
+/// asked again; a machine key is never let in.
+pub fn clone_realm(claims: &DeploymentClaims, now: u64) -> Realm {
+    if !matches!(claims.kind, Kind::Person | Kind::Breakglass) {
+        return Realm::Deny;
+    }
+    if fresh(claims.touched_at, TENANT_REACH_SECS, now) {
+        Realm::Allow
+    } else {
+        Realm::PresenceRequired
+    }
+}
+
 /// A machine key's row of the table: never asked for a touch, and only
 /// what its grants name.
 fn machine(claims: &DeploymentClaims, home: &str, space: &str, op: &str) -> Realm {
     use ordo_identity::deployment_token::{GRANT_DEPLOYMENT, GRANT_IMPORT};
+    // **Break-glass is a named person's act** (`plan-versions.md` §3.2
+    // item 6: "a named deployment owner may promote with a recorded
+    // reason"). No grant reaches it.
+    if op == crate::rehearsals::BREAK_GLASS {
+        return Realm::Deny;
+    }
     let granted = if space == home {
         claims.holds(GRANT_DEPLOYMENT)
     } else {
@@ -237,6 +259,42 @@ mod tests {
         // A touch from the future past the leeway is not a touch.
         let ahead = person(Some(NOW + 600));
         assert_eq!(d(&ahead, HOME, APPLY, Some(300)), Realm::PresenceRequired);
+    }
+
+    #[test]
+    fn a_clone_opens_to_a_person_with_a_fresh_touch_alone() {
+        let fresh = person(Some(NOW - 10));
+        let stale = person(Some(NOW - TENANT_REACH_SECS - 10));
+        let mut machine = person(None);
+        machine.kind = Kind::Machine;
+        assert_eq!(clone_realm(&fresh, NOW), Realm::Allow);
+        assert_eq!(clone_realm(&stale, NOW), Realm::PresenceRequired);
+        assert_eq!(clone_realm(&machine, NOW), Realm::Deny);
+    }
+
+    /// **Break-glass is a named person's act** (§3.2 item 6): a machine key
+    /// with the `deployment` grant reaches every other platform op, and
+    /// not this one. A person does.
+    #[test]
+    fn a_machine_key_never_breaks_glass() {
+        let glass = crate::rehearsals::BREAK_GLASS;
+        let mut machine = person(None);
+        machine.kind = Kind::Machine;
+        machine.grants = vec![ordo_identity::deployment_token::GRANT_DEPLOYMENT.into()];
+        assert!(is_platform_op(glass));
+        assert_eq!(
+            decide(&machine, Some(HOME), HOME, glass, None, NOW),
+            Realm::Deny
+        );
+        assert_eq!(
+            decide(&machine, Some(HOME), HOME, APPLY, None, NOW),
+            Realm::Allow
+        );
+        let fresh = person(Some(NOW - 10));
+        assert_eq!(
+            decide(&fresh, Some(HOME), HOME, glass, None, NOW),
+            Realm::Allow
+        );
     }
 
     /// **A system importing into a tenant** (owner, 2026-11-05): only with

@@ -1142,6 +1142,7 @@ async fn the_command_log_travels_with_the_hashes_that_verify_it() {
                 // byte of the body is recoverable from the line, and the
                 // flag is one of them.
                 owner_administration: i == 1,
+                backfill: None,
                 restored_unverified: false,
                 restore: None,
             })
@@ -1164,6 +1165,7 @@ async fn the_command_log_travels_with_the_hashes_that_verify_it() {
                 at: ordo_commandlog::Timestamp(9),
             }],
             owner_administration: false,
+            backfill: None,
             restored_unverified: false,
             restore: None,
         })

@@ -156,8 +156,21 @@ pub enum IdentityError {
     /// OIDC: the token request sent a client secret. This service's
     /// clients are public (PKCE only).
     ClientSecretRefused,
-    /// OIDC: a `grant_type` other than `authorization_code`.
+    /// OIDC: a `grant_type` this service does not serve.
     UnsupportedGrant(String),
+    /// Federation (`crate::exchange`): the consumer did not prove itself.
+    /// Its client assertion is missing, malformed, expired, too long-lived,
+    /// for another audience, spent before, or not signed by the consumer
+    /// key registered for it; or it has none registered. One answer for
+    /// all, naming the client the request claimed.
+    ClientAssertionRefused(String),
+    /// Federation: the person's token is not one this consumer may
+    /// exchange: unknown, expired, foreign, not an ID token, issued to
+    /// another client, or its person is no longer a member. One answer.
+    SubjectRefused,
+    /// Federation: `audience` is not a live deployment registered here
+    /// that the consumer may call. RFC 8693's `invalid_target`.
+    TargetRefused(String),
     /// The request body or a field in it is malformed.
     BadRequest(String),
     /// Something that should not happen; the log has the detail.
@@ -266,6 +279,9 @@ impl IdentityError {
             IdentityError::AuthorizeRefused { error, .. } => error,
             IdentityError::GrantRefused => "invalid_grant",
             IdentityError::UnsupportedGrant(_) => "unsupported_grant_type",
+            IdentityError::ClientAssertionRefused(_) => "invalid_client",
+            IdentityError::SubjectRefused => "invalid_grant",
+            IdentityError::TargetRefused(_) => "invalid_target",
             IdentityError::BadRequest(_) => "bad_request",
             IdentityError::Internal(_) => "internal",
         }
@@ -316,10 +332,12 @@ impl IdentityError {
             | IdentityError::RedirectRefused { .. }
             | IdentityError::AuthorizeRefused { .. }
             | IdentityError::GrantRefused
+            | IdentityError::SubjectRefused
+            | IdentityError::TargetRefused(_)
             | IdentityError::UnsupportedGrant(_) => StatusCode::BAD_REQUEST,
-            IdentityError::UnknownClient(_) | IdentityError::ClientSecretRefused => {
-                StatusCode::UNAUTHORIZED
-            }
+            IdentityError::UnknownClient(_)
+            | IdentityError::ClientSecretRefused
+            | IdentityError::ClientAssertionRefused(_) => StatusCode::UNAUTHORIZED,
         }
     }
 }
@@ -484,8 +502,22 @@ impl fmt::Display for IdentityError {
             ),
             IdentityError::UnsupportedGrant(g) => write!(
                 f,
-                "grant_type `{g}` is not served here; use `authorization_code`"
+                "grant_type `{g}` is not served here; use `authorization_code`, \
+                 `urn:ietf:params:oauth:grant-type:token-exchange` or `client_credentials`"
             ),
+            IdentityError::ClientAssertionRefused(client) => write!(
+                f,
+                "`{client}` did not prove itself: send a client assertion signed with its \
+                 consumer key, made just now, for this token endpoint, used once. If it has \
+                 no consumer key registered, or a different one, register its public half \
+                 (`ordo-identity-service deployment consumer-key {client} <key>`)"
+            ),
+            IdentityError::SubjectRefused => f.write_str(
+                "this subject token does not work: send the person's ID token this service \
+                 issued to the calling deployment, before it expires; a person who is no longer \
+                 a member of it signs in again",
+            ),
+            IdentityError::TargetRefused(why) => write!(f, "this audience is refused: {why}"),
             IdentityError::BadRequest(why) => write!(f, "bad request: {why}"),
             IdentityError::Internal(why) => write!(f, "internal: {why}"),
         }
@@ -559,6 +591,9 @@ impl IntoResponse for IdentityError {
             | IdentityError::ClientSecretRefused
             | IdentityError::GrantRefused
             | IdentityError::UnsupportedGrant(_)
+            | IdentityError::ClientAssertionRefused(_)
+            | IdentityError::SubjectRefused
+            | IdentityError::TargetRefused(_)
             | IdentityError::AuthorizeRefused { .. } => {
                 body["error_description"] = body["message"].clone();
             }

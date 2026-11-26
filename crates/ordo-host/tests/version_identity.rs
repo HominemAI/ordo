@@ -92,7 +92,7 @@ async fn apply(pool: &Pool, source: &str) -> Report {
 
 async fn try_apply(pool: &Pool, source: &str) -> Result<Report, ApplyRefused> {
     let program = Program::compile(source).expect("compiles");
-    apply_op::run_program(
+    run_all_at_once(
         pool,
         &SinglePool::new(pool.clone()),
         &program,
@@ -252,7 +252,13 @@ async fn a_program_with_no_declared_version_is_named_by_its_compiled_digest() {
     let linted = apply(&pool, &format!("# tasks\n\n{bare}")).await;
     assert_eq!(linted.version, first.version);
     assert_eq!(linted.stored, Stored::AlreadyPresent);
-    assert!(linted.notes.is_empty(), "said once: {:?}", linted.notes);
+    // The naming note is said once. Going back to `bare` orphans the fields
+    // the last version added (`plan-versions.md` §2.7), and that is said.
+    assert!(
+        linted.notes.iter().all(|n| n.starts_with("orphaned ")),
+        "said once: {:?}",
+        linted.notes
+    );
     let changed = apply(&pool, &V020_CHANGED.replace("domain tasks @ 0.2.0\n", "")).await;
     assert_ne!(changed.version, first.version);
 }
@@ -377,4 +383,30 @@ async fn a_different_program_stored_under_a_taken_name_is_refused() {
         registry::store(&pool, &artifact(&other, "0.2.0")).await,
         Err(RegistryRefusal::VersionCollision { .. })
     ));
+}
+
+/// `apply_op::run_program` with `rollout.strategy` set to `all` first. With
+/// it unset, a deployment that is not dev rolls an apply out a batch at a
+/// time (ruled 2026-11-25); these tests apply and expect every tenant on
+/// the new version at once.
+async fn run_all_at_once(
+    pool: &ordo_exec::Pool,
+    pools: &dyn ordo_exec::route::PoolResolver,
+    program: &ordo_host::schema_apply::Program,
+    notes: Vec<String>,
+    actor: &str,
+    op: &str,
+    activate: bool,
+) -> Result<ordo_host::apply_op::Report, ordo_host::apply_op::ApplyRefused> {
+    ordo_host::rollouts::Rollouts::on(pool)
+        .set_setting(
+            "rollout.strategy",
+            Some("all"),
+            "test",
+            "every tenant at once",
+            0,
+        )
+        .await
+        .expect("rollout.strategy all");
+    ordo_host::apply_op::run_program(pool, pools, program, notes, actor, op, activate).await
 }

@@ -177,6 +177,19 @@ pub enum ErrorCode {
     /// you learn a row exists only if you may read it (SH-5 / X-032).
     NotFound,
     VersionSkew,
+    /// The op exists in another program version this deployment serves, and
+    /// not in the one serving this tenant (`plan-versions.md` §1.9). Said
+    /// only to a caller the door would let call the op, so it maps nothing
+    /// a stranger could not see. Distinct from `access_denied` and
+    /// `version_skew`: the app is newer or older than the tenant, and
+    /// reloading it, or waiting for the tenant to move, is the fix.
+    OpNotInVersion,
+    /// A share or grant pinned under one program version, called in a
+    /// tenant now served by another, and the two disagree on what the op
+    /// reads or on its guards (`plan-versions.md` §1.7, ruled D7). Said only
+    /// to the grant's holder, whose grant is otherwise good here. The
+    /// sharer shares again, or the tenants move to one version.
+    VersionsDisagree,
     /// The write asserted `rev: null` — create-once — and the unique key
     /// already matches a row (spec §6 rule 9). Nothing applied. Distinct from
     /// `Duplicate`, which is a constraint violation the caller did not
@@ -432,6 +445,18 @@ pub enum ErrorCode {
     /// and the fix. Like `schema_drift`, it is not `internal`, so nobody goes
     /// looking for a panic.
     ExternalChanged,
+    /// Another Ordo deployment this op reads through its door did not
+    /// answer: unreachable, slower than `ORDO_PEER_TIMEOUT_SECS`, or busy
+    /// (`plan-federation-grants.md` §4, step G5). **503**: nothing ran here,
+    /// and the identical call lands once the holder answers. The message
+    /// names the peer, its address and the setting.
+    PeerUnavailable,
+    /// Another Ordo deployment this op reads through its door refused the
+    /// read, or the read cannot be sent to it as written (step G5).
+    /// **403**: the holder decides what this deployment and the person may
+    /// read. The message names the peer, the holder's op and the line or
+    /// setting that would allow it.
+    PeerRefused,
     /// An irreversible act was refused because the space still owes
     /// something: an archive that has not received the history it is the
     /// copy of record for, a client-first device that is the authoritative
@@ -735,7 +760,7 @@ pub enum ErrorCode {
     /// in the message, each with its diff code.
     ///
     /// **409**: nothing is wrong with the request, and it lands unchanged
-    /// once the schema is moved (`ordo migrate --apply`). Its own class
+    /// once the schema is moved (`ordo evolve --run`). Its own class
     /// rather than `apply_refused`, because the outcomes differ in the one
     /// way an operator cares about — here the artifact *is* stored, so the
     /// next step is a migration and not a recompile.
@@ -765,6 +790,8 @@ impl ErrorCode {
             ErrorCode::HumanCheckFailed => "human_check_failed",
             ErrorCode::NotFound => "not_found",
             ErrorCode::VersionSkew => "version_skew",
+            ErrorCode::OpNotInVersion => "op_not_in_version",
+            ErrorCode::VersionsDisagree => "versions_disagree",
             ErrorCode::ExpectedAbsent => "expected_absent",
             ErrorCode::NullKeyAddress => "null_key_address",
             ErrorCode::ConflictingIdentity => "conflicting_identity",
@@ -796,6 +823,8 @@ impl ErrorCode {
             ErrorCode::SealedUnsupported => "sealed_unsupported",
             ErrorCode::SchemaDrift => "schema_drift",
             ErrorCode::ExternalChanged => "external_changed",
+            ErrorCode::PeerUnavailable => "peer_unavailable",
+            ErrorCode::PeerRefused => "peer_refused",
             ErrorCode::SpacePinned => "space_pinned",
             ErrorCode::NotConfirmed => "not_confirmed",
             ErrorCode::EgressRefused => "egress_refused",
@@ -844,6 +873,8 @@ impl ErrorCode {
         ErrorCode::HumanCheckFailed,
         ErrorCode::NotFound,
         ErrorCode::VersionSkew,
+        ErrorCode::OpNotInVersion,
+        ErrorCode::VersionsDisagree,
         ErrorCode::ExpectedAbsent,
         ErrorCode::NullKeyAddress,
         ErrorCode::ConflictingIdentity,
@@ -875,6 +906,8 @@ impl ErrorCode {
         ErrorCode::SealedUnsupported,
         ErrorCode::SchemaDrift,
         ErrorCode::ExternalChanged,
+        ErrorCode::PeerUnavailable,
+        ErrorCode::PeerRefused,
         ErrorCode::SpacePinned,
         ErrorCode::NotConfirmed,
         ErrorCode::EgressRefused,
@@ -953,6 +986,9 @@ impl ErrorCode {
             // The door's, after the access check: only the door knows who
             // is calling and what the app developer requires.
             | ErrorCode::EmailRequired
+            // The door's: only it knows which version serves the tenant.
+            | ErrorCode::OpNotInVersion
+            | ErrorCode::VersionsDisagree
             | ErrorCode::PresenceRequired => false,
             // `invalid_cursor` IS the executor's to say as well as the
             // door's: a cursor presented against a plan with no total order
@@ -995,6 +1031,10 @@ impl ErrorCode {
             | ErrorCode::SealedUnsupported
             | ErrorCode::SchemaDrift
             | ErrorCode::ExternalChanged
+            // A read through another deployment's door (step G5): only the
+            // executor's call to the holder knows how it went.
+            | ErrorCode::PeerUnavailable
+            | ErrorCode::PeerRefused
             | ErrorCode::SpacePinned
             | ErrorCode::NotConfirmed
             // Both are a platform op's, and a platform op runs as an
@@ -1087,6 +1127,8 @@ impl ErrorCode {
             ErrorCode::QuotaExceeded => StatusCode::TOO_MANY_REQUESTS,
             ErrorCode::NotFound => StatusCode::NOT_FOUND,
             ErrorCode::VersionSkew
+            | ErrorCode::OpNotInVersion
+            | ErrorCode::VersionsDisagree
             | ErrorCode::ExpectedAbsent
             | ErrorCode::ConflictingIdentity
             | ErrorCode::Duplicate
@@ -1148,7 +1190,9 @@ impl ErrorCode {
             ErrorCode::StatementTimeout
             | ErrorCode::SpaceUnavailable
             | ErrorCode::ServerBusy
+            | ErrorCode::PeerUnavailable
             | ErrorCode::TenantNotReady => StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::PeerRefused => StatusCode::FORBIDDEN,
             ErrorCode::UnknownSource
             | ErrorCode::SealedOpenFailed
             | ErrorCode::SealedUnreadable
@@ -1199,6 +1243,10 @@ impl ErrorCode {
     }
 }
 
+/// The frame name a live feed ends with when its tenant's version changed
+/// ([`ApiError::version_changed`]).
+pub const VERSION_CHANGED_EVENT: &str = "version_changed";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApiError {
     pub code: ErrorCode,
@@ -1214,6 +1262,10 @@ pub struct ApiError {
     /// `Retry-After`, in seconds, for a refusal whose wait is a setting
     /// rather than the class's own (`tenant_not_ready`).
     pub retry_after: Option<u64>,
+    /// The tenant's program version moved under a live feed: the feed
+    /// ends with a [`VERSION_CHANGED_EVENT`] frame rather than `error`.
+    /// Set only by [`ApiError::version_changed`].
+    pub version_moved: bool,
 }
 
 impl ApiError {
@@ -1226,6 +1278,7 @@ impl ApiError {
             allow: None,
             status: None,
             retry_after: None,
+            version_moved: false,
         }
     }
 
@@ -1238,7 +1291,23 @@ impl ApiError {
             allow: None,
             status: None,
             retry_after: None,
+            version_moved: false,
         }
+    }
+
+    /// **A live feed's tenant moved to another version** (`plan-versions.md`
+    /// §1.4: a pin switch closes the tenant's streams with a reconnect
+    /// signal). The feed ends with an `event: version_changed` frame. The
+    /// class is `space_unavailable`, retryable: the client opens the feed
+    /// again and is served the new version. No version is named, so an end
+    /// user learns nothing about the deployment's versions.
+    pub fn version_changed() -> Self {
+        let mut e = ApiError::new(
+            ErrorCode::SpaceUnavailable,
+            "this tenant's program version changed while the feed was open; open it again",
+        );
+        e.version_moved = true;
+        e
     }
 
     /// Name the op on an error built without a spec — the door's denial for
@@ -1273,6 +1342,7 @@ impl ApiError {
             allow: None,
             status: None,
             retry_after: None,
+            version_moved: false,
         }
     }
 

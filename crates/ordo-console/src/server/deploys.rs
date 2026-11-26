@@ -12,7 +12,7 @@
 //! | `POST deploys/revoke` | `std.deployment.revoke` | both touches |
 //! | `POST deploys/unrevoke` | `std.deployment.unrevoke` | both touches |
 //! | `GET deploys/settings` | `std.deployment.versionSettings` | signed in |
-//! | `POST deploys/setting` | `std.deployment.setVersionSetting` | the console's touch; the deployment's only at `ORDO_SECURITY_LEVEL=high` |
+//! | `POST deploys/setting` | `std.deployment.setVersionSetting`, also for the `rollout.*` and `backfill.*` settings (the Rollouts screen) | the console's touch; the deployment's only at `ORDO_SECURITY_LEVEL=high` |
 //! | `POST deploys/pin` | `std.deployment.pin` | the console's touch; no touch at the deployment |
 //! | `POST deploys/move` | `std.deployment.moveOffRevoked` | the console's touch; no touch at the deployment |
 //! | `POST deploys/target` | `std.deployment.setMoveTarget` | the console's touch; no touch at the deployment |
@@ -504,12 +504,22 @@ async fn deploys_setting(
 ) -> Result<Reply, ConsoleError> {
     let who = c.who(call, headers, Need::Touch).await?;
     let req: SettingBody = parse(body)?;
-    let setting = match req.setting.trim() {
+    // The rollout and backfill settings go through the same op (ruled
+    // 2026-11-23, Q15); which of them exist is the door's to say.
+    let named = req.setting.trim();
+    let rollout_or_backfill = (named.starts_with("rollout.") || named.starts_with("backfill."))
+        && named.len() <= 64
+        && named
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c == '.' || c == '_');
+    let setting = match named {
         s @ ("versions.served" | "versions.minimum" | "versions.new_tenant") => s.to_string(),
+        s if rollout_or_backfill => s.to_string(),
         other => {
             return Err(ConsoleError::BadRequest(format!(
                 "`{other}` is not a version setting; there are versions.served, \
-                 versions.minimum and versions.new_tenant"
+                 versions.minimum and versions.new_tenant, and the rollout.* and backfill.* \
+                 settings"
             )))
         }
     };

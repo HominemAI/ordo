@@ -96,6 +96,7 @@ fn group_at(n: usize, at: u64) -> CommandGroup {
             at: Timestamp(at),
         }],
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: None,
     }

@@ -48,6 +48,18 @@ if ! "$pgbin/pg_isready" -h "$socket" -p "$pgport" -q; then
   until "$pgbin/pg_isready" -h "$socket" -p "$pgport" -q; do sleep 0.2; done
 fi
 "$pgbin/createdb" -h "$socket" -p "$pgport" -U ordo notes 2>/dev/null || true
+# This deployment is dev (owner, 2026-11-25). With `rollout.strategy` unset a
+# deployment that is not dev rolls each apply out a batch at a time, and a
+# script that applies again over an existing database expects every tenant
+# on the new version at once. Declared only when no environment is declared,
+# so a chain the deployment owner made is left as it is, and a second run
+# changes nothing. `ordo environments set-own` changes it later.
+"$pgbin/psql" -h "$socket" -p "$pgport" -U ordo -d notes -qc \
+  "CREATE TABLE IF NOT EXISTS \"\$environments\" (\"name\" text PRIMARY KEY, \"pos\" integer NOT NULL, \
+     \"own\" boolean NOT NULL, \"actor\" text NOT NULL, \"reason\" text NOT NULL, \"at\" bigint NOT NULL); \
+   INSERT INTO \"\$environments\" (\"name\", \"pos\", \"own\", \"actor\", \"reason\", \"at\") \
+     SELECT 'dev', 1, true, 'notes-dev', 'this deployment is dev', extract(epoch from now())::bigint \
+     WHERE NOT EXISTS (SELECT 1 FROM \"\$environments\")"
 # Notes v2's `reader note_viewer` line names a role to grant two tables to.
 # It only has to exist here (examples/note-viewer/README.md runs the pair).
 "$pgbin/psql" -h "$socket" -p "$pgport" -U ordo -d notes -qc \
@@ -79,7 +91,7 @@ export ORDO_BLOB_STORE="${ORDO_BLOB_STORE:-fs:$data/blobs}" ORDO_DEV_UNSAFE_BLOB
 # examples/notes/e2e/stand-ins.mjs`, mail listed at http://localhost:4626/messages).
 # With nothing listening, mail is retried and then dropped. A real deployment
 # sets ORDO_MAIL_* for its relay over TLS (../README.md §6).
-export ORDO_MAIL_KIND=smtp ORDO_MAIL_FROM=notes@localhost ORDO_MAIL_HOST=localhost
+export ORDO_MAIL_KIND=smtp ORDO_MAIL_FROM=notes@example.com ORDO_MAIL_HOST=localhost
 export ORDO_MAIL_PORT="${NOTES_DEV_SMTP_PORT:-4625}" ORDO_MAIL_TLS=none ORDO_MAIL_SEND_SECS=1
 export ORDO_EGRESS_PRIVATE_HOSTS=localhost
 

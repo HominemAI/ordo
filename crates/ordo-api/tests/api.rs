@@ -597,6 +597,8 @@ fn cond_holds(row: &Value, cond: &RefineCond) -> bool {
             .as_array()
             .is_some_and(|arr| arr.contains(actual)),
         RefineOp::IsNull => actual.is_null(),
+        // This stand-in executor has no caller to compare with.
+        RefineOp::Caller => false,
     }
 }
 

@@ -60,7 +60,7 @@ async fn fresh(stem: &str) -> Pool {
 
 async fn apply(pool: &Pool, source: &str, activate: bool) -> apply_op::Report {
     let program = Program::compile(source).expect("compiles");
-    apply_op::run_program(
+    run_all_at_once(
         pool,
         &SinglePool::new(pool.clone()),
         &program,
@@ -364,4 +364,30 @@ async fn a_tenant_made_during_an_activation_gets_the_new_version() {
 
     assert_eq!(pinning.await.expect("joined").as_deref(), Some("0.2.0"));
     assert_eq!(pin(&pool, "spc_mid").await, (Some("0.2.0".into()), 1));
+}
+
+/// `apply_op::run_program` with `rollout.strategy` set to `all` first. With
+/// it unset, a deployment that is not dev rolls an apply out a batch at a
+/// time (ruled 2026-11-25); these tests apply and expect every tenant on
+/// the new version at once.
+async fn run_all_at_once(
+    pool: &ordo_exec::Pool,
+    pools: &dyn ordo_exec::route::PoolResolver,
+    program: &ordo_host::schema_apply::Program,
+    notes: Vec<String>,
+    actor: &str,
+    op: &str,
+    activate: bool,
+) -> Result<ordo_host::apply_op::Report, ordo_host::apply_op::ApplyRefused> {
+    ordo_host::rollouts::Rollouts::on(pool)
+        .set_setting(
+            "rollout.strategy",
+            Some("all"),
+            "test",
+            "every tenant at once",
+            0,
+        )
+        .await
+        .expect("rollout.strategy all");
+    ordo_host::apply_op::run_program(pool, pools, program, notes, actor, op, activate).await
 }

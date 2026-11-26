@@ -875,6 +875,63 @@ A read-only review of PRs 26 and 27 found 4 faults. Tests:
   doors check it against `ORDO_IDENTITY_ORIGIN`; so under a base path
   the two differ. With no base path nothing changed.
 
+### 11.5 Tokens between deployments, built 2026-11-26
+
+Step G2 of `plan-federation-grants.md`: one Ordo deployment (the
+consumer) calls another's door (the holder). This service says who is
+calling. The holder decides what they may do (G3). Code:
+`src/exchange.rs`, `ordo-identity/src/peer_token.rs`; tests:
+`tests/federation_exchange.rs`; how to: `howto-identity.md` section 14,
+"Let one deployment call another".
+
+- **How a consumer proves itself.** A client assertion (RFC 7523,
+  `private_key_jwt`): an EdDSA JWT with `iss` and `sub` its handle, `aud`
+  the token endpoint or the issuer, a `jti`, and an `exp` at most
+  `ORDO_IDENTITY_CLIENT_ASSERTION_SECS` (120) from now. Each `jti` works
+  once; migration 7 keeps its tagged hash in `client_assertions` until
+  the assertion expires, and the minute tick deletes it.
+- **The consumer key.** Ed25519, derived from the deployment's master key
+  and its handle (`peer_token::consumer_key`). No person makes, copies or
+  stores a private key. Only the public half is registered here: the
+  `consumerKey` of `POST /deployments`, `deployment add --consumer-key`,
+  or later `POST /deployments/{handle}/consumer-key` and `deployment
+  consumer-key`. The route also takes that deployment's own admin token,
+  so a deployment can register its key with a token it already holds.
+  Replacing the key rotates it; `null` or `--none` removes it.
+- **On behalf of a person.** RFC 8693 token exchange at
+  `/oidc/token`: the person's ID token this service issued to the
+  consumer (`subject_token_type` `id_token`), the assertion, and
+  `audience`, the holder's handle. The token: `sub` the person, `aud`
+  `ordo-peer:<holder>`, `act.sub` the consumer, `client_id`, `kind`
+  `person`, header `typ` `ordo-peer+jwt`.
+- **As itself.** `client_credentials` with the same assertion and
+  `audience`. The token: `sub` the consumer, `kind` `client`, no `act`,
+  header `typ` `ordo-client+jwt`. A verifier that wants a person refuses
+  it by its `typ`.
+- **Lifetimes.** `ORDO_IDENTITY_PEER_TOKEN_SECS`, 300 by default, 30 to
+  3600. A token on behalf of a person never outlives the ID token it was
+  exchanged for.
+- **Neither is another token.** `aud` `ordo-peer:<handle>` is neither a
+  deployment token's `ordo-deployment:<handle>` nor an ID token's bare
+  handle, and each `typ` is its own. Door, console, app and the
+  service's admin routes refuse both, and an exchanged token is not a
+  subject token in turn.
+- **Refusals.** A consumer that did not prove itself: `invalid_client`,
+  401, no audit row, so a stranger cannot grow the log. An audience
+  that is not a live registered deployment, or is the consumer:
+  `invalid_target`. A subject token expired, foreign, not an ID token,
+  issued to another client, or for a person no longer a member of the
+  consumer: `invalid_grant`.
+- **Audit.** `oidc.exchange` (actor the person) and `oidc.client-token`
+  (actor the consumer), `ok` or `refused` with the reason and the
+  holder.
+- **Not built.** The host side: deriving the key from the master key in
+  `ordo-host`, registering it, and signing assertions (G4, G5). The
+  holder's check (G3). A subject token lives as long as the ID token, so
+  a consumer acts on behalf of a person only shortly after they signed
+  in; how a consumer keeps acting later is open (owner question, G2
+  report).
+
 - An identity origin outside the console's RP ID without re-enrolment.
   WebAuthn Related Origin Requests could allow it (the SDK's `related`
   origins, as the console link uses today); not in v1.

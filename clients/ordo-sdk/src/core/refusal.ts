@@ -38,6 +38,8 @@ export const REFUSAL_CLASSES = [
   'idempotency_in_flight',
   'idempotency_applied',
   'version_skew',
+  'op_not_in_version',
+  'versions_disagree',
   'expected_absent',
   'conflicting_identity',
   'duplicate',
@@ -85,6 +87,8 @@ export const REFUSAL_CLASSES = [
   'function_oom',
   'function_busy',
   'space_unavailable',
+  'peer_unavailable',
+  'peer_refused',
   'statement_timeout',
   'tenant_refused',
   'tenant_not_ready',
@@ -202,6 +206,11 @@ const DISPOSITIONS: Partial<Record<DoorCode, Disposition>> = {
 
   // Stale cursor, stale pin: start over from page one.
   version_skew: 'restart',
+  // The app is newer or older than the tenant's version: reload it.
+  op_not_in_version: 'restart',
+  // A share pinned under another program version than the tenant now
+  // runs: the sharer shares again (`plan-versions.md` §1.7).
+  versions_disagree: 'denied',
   invalid_cursor: 'restart',
 
   idempotency_in_flight: 'retry',
@@ -210,12 +219,16 @@ const DISPOSITIONS: Partial<Record<DoorCode, Disposition>> = {
   // Nothing ran; the client already waited out its retries.
   server_busy: 'retry',
   tenant_not_ready: 'retry',
+  // Another deployment this read reaches through its door did not answer.
+  peer_unavailable: 'retry',
 
   idempotency_applied: 'terminal',
   idempotency_mismatch: 'terminal',
 
   access_denied: 'denied',
   access_guard: 'denied',
+  // The other deployment refused the read; it decides what it opens.
+  peer_refused: 'denied',
   delegation_required: 'denied',
   caller_supplied: 'denied',
   // The app developer requires a verified email address and the person has

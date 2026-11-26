@@ -208,6 +208,27 @@ impl GrantRegistry for PgGrantRegistry {
         self.query(&sql).await.map(|_| ())
     }
 
+    async fn repin(
+        &self,
+        space: &SpaceId,
+        id: &GrantId,
+        op: &str,
+        pin: &ordo_identity::OpPin,
+    ) -> Result<(), GrantError> {
+        // The manifest hash is unchanged: only sealing and release are
+        // added, so the row keeps meaning what was consented to.
+        let one = std::collections::BTreeMap::from([(op.to_string(), pin.clone())]);
+        let sql = format!(
+            "UPDATE \"$capabilitygrant\" SET \"pin\" = {} \
+             WHERE \"$space\" = {} AND \"grant_id\" = {} AND \"op\" = {}",
+            lit(&ordo_identity::encode_pins(&one)),
+            lit(&space.0),
+            lit(&id.0),
+            lit(op),
+        );
+        self.query(&sql).await.map(|_| ())
+    }
+
     async fn callers_of(
         &self,
         space: &SpaceId,

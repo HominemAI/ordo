@@ -194,8 +194,14 @@ async fn the_owner_reads_every_setting_with_its_value_default_range_and_source()
     let (status, body) = read(&h, HOME, DEPLOYMENT_OWNER).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let rows = body["rows"].as_array().unwrap();
+    // A family (`ORDO_PEER_<NAME>_URL`) has a row only for each variable
+    // set, so only the plain settings are counted.
+    let plain = settings::REGISTRY
+        .iter()
+        .filter(|s| !s.name.contains('<'))
+        .count();
     assert!(
-        rows.len() >= settings::REGISTRY.len() - 30,
+        rows.len() >= plain,
         "every registered setting has a row: {}",
         rows.len()
     );

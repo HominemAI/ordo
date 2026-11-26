@@ -58,6 +58,7 @@ const IMPORTABLE: &[&str] = &[
     "decLit",
     "desc",
     "asc",
+    "auth",
     "domain",
     "durationLit",
     "each",
@@ -66,6 +67,8 @@ const IMPORTABLE: &[&str] = &[
     "external",
     "peer",
     "reader",
+    "grant",
+    "grantProvider",
     "f",
     "fn",
     "g",
@@ -110,6 +113,8 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
     let mut needs_key = false;
     let needs_peer = !program.peers.is_empty();
     let needs_reader = !program.readers.is_empty();
+    let needs_grant = program.grants.iter().any(|g| !g.provider);
+    let needs_grant_provider = program.grants.iter().any(|g| g.provider);
 
     if let Some(d) = &program.domain {
         synth_args.push(match &d.version {
@@ -117,11 +122,25 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
             None => format!("domain({})", ts::str_lit(&d.name.name)),
         });
     }
+    if let Some(a) = &program.auth {
+        synth_args.push(auth_call(a));
+    }
     // Peers print before the externals that read them, as `synth` requires.
     for p in &program.peers {
         let bind = e.bind(&p.name.name);
+        // A block lists the holder's ops this deployment calls (step G4).
+        let uses = match &p.uses {
+            None => String::new(),
+            Some(uses) => format!(
+                ", [{}]",
+                uses.iter()
+                    .map(|u| ts::str_lit(&u.op))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
         body.push_str(&format!(
-            "const {bind} = peer({});\n\n",
+            "const {bind} = peer({}{uses});\n\n",
             ts::str_lit(&p.name.name)
         ));
         e.peers.insert(p.name.name.clone(), bind.clone());
@@ -136,6 +155,24 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
             .collect::<Vec<_>>()
             .join(", ");
         synth_args.push(format!("reader({}, [{tables}])", ts::str_lit(&r.name.name)));
+    }
+    // A grant's lines are strings, as written; what they match is the
+    // apply's question.
+    for g in &program.grants {
+        let lines = g
+            .lines
+            .iter()
+            .map(|l| ts::str_lit(&l.text()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let name = ts::str_lit(&g.name.name);
+        synth_args.push(if g.provider {
+            format!("grantProvider({name}, [{lines}])")
+        } else if g.as_itself {
+            format!("grant({name}, [{lines}], {{ asItself: true }})")
+        } else {
+            format!("grant({name}, [{lines}])")
+        });
     }
     for ent in &program.entities {
         let bind = e.bind(&ent.name.name);
@@ -180,6 +217,10 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
                 needs_peer
             } else if *n == "reader" {
                 needs_reader
+            } else if *n == "grant" {
+                needs_grant
+            } else if *n == "grantProvider" {
+                needs_grant_provider
             } else {
                 mentioned
             }
@@ -204,6 +245,108 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
             .collect::<Vec<_>>()
             .join("\n"),
     ))
+}
+
+/// `auth({ … })`: one key per clause written, in `AUTH_CLAUSES` order.
+/// A clause not written is left out, so the compiler fills its default on
+/// both sides of the round trip.
+fn auth_call(a: &ordo_syntax::AuthDecl) -> String {
+    use ordo_syntax::{ProviderSource, Provisioning, RememberMax};
+    let s = |t: &str| ts::str_lit(t);
+    let d = |x: &ordo_syntax::AuthDuration| ts::str_lit(&x.spelled());
+    let mut keys: Vec<String> = Vec::new();
+    if let Some(m) = &a.methods {
+        let names: Vec<String> = m.names.iter().map(|n| s(&n.name)).collect();
+        keys.push(format!("methods: [{}]", names.join(", ")));
+    }
+    if !a.providers.is_empty() {
+        let ps: Vec<String> = a
+            .providers
+            .iter()
+            .map(|p| {
+                let how = match &p.source {
+                    ProviderSource::Preset(i) => format!("preset: {}", s(&i.name)),
+                    ProviderSource::Kind(k) => format!("kind: {}", s(k.as_str())),
+                };
+                let label = p
+                    .label
+                    .as_ref()
+                    .map(|l| format!(", label: {}", s(l)))
+                    .unwrap_or_default();
+                format!("{}: {{ {how}{label} }}", p.name.name)
+            })
+            .collect();
+        keys.push(format!("providers: {{ {} }}", ps.join(", ")));
+    }
+    if let Some(t) = &a.passkey_name {
+        keys.push(format!("passkeyName: {}", s(&t.text)));
+    }
+    if let Some(p) = &a.provisioning {
+        keys.push(match &p.mode {
+            Provisioning::Domains(ds) => format!(
+                "provisioning: {{ domains: [{}] }}",
+                ds.iter().map(|h| s(&h.name)).collect::<Vec<_>>().join(", ")
+            ),
+            other => format!("provisioning: {}", s(other.mode())),
+        });
+    }
+    if let Some(x) = &a.self_serve {
+        keys.push(format!("selfServe: {}", x.on));
+    }
+    if let Some(g) = &a.guest {
+        let keep = g
+            .keep
+            .as_ref()
+            .map(|k| format!(", keep: {}", d(k)))
+            .unwrap_or_default();
+        keys.push(format!("guest: {{ on: {}{keep} }}", g.on));
+    }
+    if let Some(l) = &a.linking {
+        let window = l
+            .window
+            .as_ref()
+            .map(|w| format!(", window: {}", d(w)))
+            .unwrap_or_default();
+        keys.push(format!("linking: {{ on: {}{window} }}", l.on));
+    }
+    if let Some(x) = &a.second_factor {
+        keys.push(format!("secondFactor: {}", s(x.level.as_str())));
+    }
+    if let Some(x) = &a.user_verification {
+        keys.push(format!("userVerification: {}", s(x.level.as_str())));
+    }
+    if let Some(x) = &a.session {
+        let mut v = format!("token: {}", d(&x.token));
+        if let Some(m) = &x.max {
+            v.push_str(&format!(", max: {}", d(m)));
+        }
+        if let Some(t) = &x.tenants {
+            v.push_str(&format!(", tenants: [{}, {}]", d(&t.min), d(&t.max)));
+        }
+        keys.push(format!("session: {{ {v} }}"));
+    }
+    if let Some(r) = &a.remember {
+        let mut v = format!("on: {}", r.on);
+        if let Some(i) = &r.idle {
+            v.push_str(&format!(", idle: {}", d(i)));
+        }
+        match &r.max {
+            None => {}
+            Some(RememberMax::Unbounded { .. }) => v.push_str(", max: 'none'"),
+            Some(RememberMax::After(m)) => v.push_str(&format!(", max: {}", d(m))),
+        }
+        keys.push(format!("remember: {{ {v} }}"));
+    }
+    if keys.is_empty() {
+        return "auth({})".to_string();
+    }
+    format!(
+        "auth({{\n{}\n  }})",
+        keys.iter()
+            .map(|k| format!("    {k},"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
 }
 
 /// Whole-word mention, so `not` does not match inside `notes`.

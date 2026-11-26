@@ -14,7 +14,7 @@
 //! |---|---|
 //! | `GET /.well-known/openid-configuration` | the discovery document |
 //! | `GET /oidc/authorize` | the authorization code flow, PKCE `S256` required |
-//! | `POST /oidc/token` | a code and its PKCE verifier for an ID token |
+//! | `POST /oidc/token` | a code and its PKCE verifier for an ID token; a deployment's token exchange and client credentials grants ([`crate::exchange`]) |
 //!
 //! The rules:
 //!
@@ -45,7 +45,9 @@
 //! - Clients are public: PKCE proves the exchange, and there is no client
 //!   secret to manage. The code only ever reaches a return URL the
 //!   deployment owner registered, and only the app that began the sign-in
-//!   holds the verifier.
+//!   holds the verifier. A deployment calling another proves itself
+//!   with a client assertion instead ([`crate::exchange`]); that is the
+//!   one place a client authenticates.
 //! - The ID token is EdDSA under the service's token keys, `typ` `JWT`.
 //!   Its `aud` is the bare handle and it carries none of a deployment
 //!   token's claims, so a deployment token verifier refuses it.
@@ -62,6 +64,7 @@ use ed25519_dalek::Signer as _;
 use ordo_exec::sql_lit;
 use ordo_identity::federation::{form_encode, percent, percent_decode};
 use ordo_identity::origin::plain_url_text;
+use ordo_identity::peer_token;
 use ordo_identity::webauthn::b64url_encode;
 use serde_json::{json, Value};
 
@@ -151,13 +154,20 @@ impl Service {
             "jwks_uri": self.endpoint("/.well-known/jwks.json"),
             "response_types_supported": ["code"],
             "response_modes_supported": ["query"],
-            "grant_types_supported": ["authorization_code"],
+            "grant_types_supported": [
+                "authorization_code",
+                peer_token::GRANT_TOKEN_EXCHANGE,
+                peer_token::GRANT_CLIENT_CREDENTIALS,
+            ],
             "subject_types_supported": ["public"],
             "id_token_signing_alg_values_supported": ["EdDSA"],
             "scopes_supported": SCOPES,
             "claims_supported": ["iss", "sub", "aud", "exp", "iat", "auth_time", "nonce", "name"],
             "code_challenge_methods_supported": ["S256"],
-            "token_endpoint_auth_methods_supported": ["none"],
+            // `none` for an app signing a person in; `private_key_jwt` for a
+            // deployment calling another ([`crate::exchange`]).
+            "token_endpoint_auth_methods_supported": ["none", "private_key_jwt"],
+            "token_endpoint_auth_signing_alg_values_supported": ["EdDSA"],
             "authorization_response_iss_parameter_supported": true,
         })
     }
@@ -348,6 +358,8 @@ impl Service {
         }
         match get("grant_type") {
             Some("authorization_code") => {}
+            Some(peer_token::GRANT_TOKEN_EXCHANGE) => return self.token_exchange(&f).await,
+            Some(peer_token::GRANT_CLIENT_CREDENTIALS) => return self.client_token(&f).await,
             other => {
                 return Err(IdentityError::UnsupportedGrant(
                     other.unwrap_or_default().to_string(),

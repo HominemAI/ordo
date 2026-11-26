@@ -173,6 +173,10 @@ pub enum SpaceRefusal {
     /// (`plan-versions.md` §1.4). Retryable: a node loads every pinned
     /// version at boot and when the pin stream names one.
     Unserved { space: String, version: String },
+    /// The tenant's version was unloaded for idleness and is loading again,
+    /// and did not land within `versions.wake_wait`. Retryable, as
+    /// `server_busy`.
+    Waking { space: String, version: String },
     /// **The tenant's database is not the shape of the version it is
     /// pinned to** (§1.4 step 6, the shape fingerprint). Only asked of a
     /// tenant pinned to a version other than the active one: the active
@@ -211,6 +215,11 @@ impl std::fmt::Display for SpaceRefusal {
             SpaceRefusal::Unfit { space, reason, .. } => {
                 write!(f, "space `{space}` is not served: {reason}")
             }
+            SpaceRefusal::Waking { space, version } => write!(
+                f,
+                "space `{space}`'s version `{version}` is loading again after it was idle; \
+                 the same request lands once it has"
+            ),
         }
     }
 }
@@ -225,6 +234,9 @@ impl SpaceRefusal {
         match self {
             SpaceRefusal::Unroutable { class, .. } => *class,
             SpaceRefusal::Unserved { .. } => ordo_exec::FaultClass::Retryable,
+            // Answered `server_busy` with `Retry-After`, which the SDK
+            // retries by itself.
+            SpaceRefusal::Waking { .. } => ordo_exec::FaultClass::Busy,
             _ => ordo_exec::FaultClass::Broken,
         }
     }
@@ -406,6 +418,15 @@ pub struct Spaces {
     /// fingerprint on this node (§1.4 step 6). Asked once per pair per
     /// process, like continuity.
     fits: Mutex<HashSet<(String, String)>>,
+    /// `(space, version, pin epoch)` whose kept blind indexes were asked
+    /// about on this node ([`Spaces::kept_indexes`]).
+    kept: Mutex<HashSet<(String, String, i64)>>,
+    /// `(serving, recorded)` pairs and whether the database is ahead by a
+    /// reindex only ([`Spaces::ahead_by_reindex`]).
+    ahead: Mutex<HashMap<(String, String), bool>>,
+    /// Told the name of an evicted version a signed-in request woke
+    /// ([`Spaces::wake`]); the node's pin stream loads it.
+    waker: std::sync::OnceLock<Arc<dyn Fn(String) + Send + Sync>>,
 }
 
 impl Spaces {
@@ -437,7 +458,58 @@ impl Spaces {
             paused: Mutex::new(BTreeMap::new()),
             pause_answers: Mutex::new(crate::pause::PauseAnswers::default()),
             fits: Mutex::new(HashSet::new()),
+            kept: Mutex::new(HashSet::new()),
+            ahead: Mutex::new(HashMap::new()),
+            waker: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Set what [`Spaces::wake`] tells. Once; a second call is ignored.
+    pub fn set_waker(&self, waker: Arc<dyn Fn(String) + Send + Sync>) {
+        let _ = self.waker.set(waker);
+    }
+
+    /// **A signed-in request met a tenant whose version was unloaded for
+    /// idleness** (`versions.idle_evict_after`): mark it wanted and tell
+    /// the pin stream, which loads it under `versions.max_concurrent_loads`.
+    /// The request waits for it in [`Spaces::resolve_waking`]. Never
+    /// called for an anonymous caller (V-29).
+    pub fn wake(&self, version: &str) {
+        if self.deployment.wake(version) {
+            if let Some(w) = self.waker.get() {
+                w(version.to_string());
+            }
+        }
+    }
+
+    /// **[`Spaces::resolve`] for a signed-in caller, waiting for a woken
+    /// version** (`versions.idle_evict_after`, `plan-versions.md` §1.5).
+    /// A tenant whose version was unloaded for idleness wakes it, and the
+    /// request waits up to `versions.wake_wait` (default 5 seconds; a load
+    /// measured well under a second in `tests/versions_background.rs`) for
+    /// the load, so the person sees
+    /// an ordinary answer. Past it, [`SpaceRefusal::Waking`], which the
+    /// door answers `server_busy` with `Retry-After`, a class the SDK
+    /// retries. A version that is not loading (refused, or never named)
+    /// answers at once, as [`Spaces::resolve`] does.
+    pub async fn resolve_waking(&self, space: &str) -> Result<Bound, SpaceRefusal> {
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(self.deployment.guards().wake_wait);
+        loop {
+            match self.resolve(space).await {
+                Err(SpaceRefusal::Unserved { space, version }) => {
+                    self.wake(&version);
+                    if !self.deployment.waking(&version) {
+                        return Err(SpaceRefusal::Unserved { space, version });
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(SpaceRefusal::Waking { space, version });
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                other => return other,
+            }
+        }
     }
 
     /// Whether this tenant is paused, and how. `None` serves.
@@ -592,9 +664,25 @@ impl Spaces {
             Ok(p) => p,
             Err(e) => return Err(self.note(e)),
         };
+        // A blind index B10 kept for the version this tenant is pinned to
+        // is traded in before anything is read or written under it.
+        match self.kept_indexes(space, &pool, &live, epoch).await {
+            Ok(()) => {}
+            Err(e) if e.is_busy() => return Err(e),
+            Err(e) => return Err(self.note(e)),
+        }
         // Every write on this handle checks the pin fence (§1.3).
         let pool = match epoch {
             Some(e) => pool.with_pin_epoch(e),
+            None => pool,
+        };
+        // A tenant moving with dual writes (increment 11a): its writes run
+        // the overlay of the version they are served, keeping the other
+        // version's shape current in the same transaction. A rename outside
+        // a move needs nothing here: every write reads `$renames` from its
+        // own database (`ordo_exec::overlay::RENAMES_DDL`).
+        let pool = match self.deployment.overlay_for(space, &live.version) {
+            Some(o) => pool.with_overlay(Some(o)),
             None => pool,
         };
 
@@ -733,6 +821,11 @@ impl Spaces {
                 return None;
             }
         }
+        // A move with dual writes (increment 11a): its database records
+        // the move's `from` until the soak closes, and serves both.
+        if self.deployment.move_of(space).is_some() {
+            return None;
+        }
         // **A deployment that cannot name its own version has no basis to
         // call anything behind**, and there are two ways to be in that
         // state rather than the one this first checked for.
@@ -754,6 +847,9 @@ impl Spaces {
         }
         match ordo_exec::spacedb::recorded_version(pool).await {
             Ok(ordo_exec::spacedb::TargetVersion::At(at)) if at != serving => {
+                if self.ahead_by_reindex(&serving, &at).await {
+                    return None;
+                }
                 Some(Reconciled::SchemaBehind {
                     space: space.to_string(),
                     at,
@@ -769,6 +865,28 @@ impl Spaces {
             // verdict out of an error.
             Err(_) => None,
         }
+    }
+
+    /// **A database one reindex ahead of the serving version serves it**
+    /// (increment 13). `ordo evolve --run` of a step that only computes a
+    /// blind index again (B10) records the step's version on the
+    /// deployment's database before the activation, and keeps the serving
+    /// version's index the field's own until then (`sa::reindex_end`), so
+    /// every space there keeps serving through the step. Read from the
+    /// stored plans, once per pair per node.
+    async fn ahead_by_reindex(&self, serving: &str, at: &str) -> bool {
+        let key = (serving.to_string(), at.to_string());
+        if let Some(ok) = self.ahead.lock().expect("ahead cache").get(&key) {
+            return *ok;
+        }
+        let Ok(plans) = crate::evolve::Plans::on(self.witness.pool()).all().await else {
+            return false;
+        };
+        let ok = plans
+            .iter()
+            .any(|p| p.from == serving && p.to == at && crate::evolve::reindex_only(p));
+        self.ahead.lock().expect("ahead cache").insert(key, ok);
+        ok
     }
 
     /// **Write a failing resolve into the quarantine register, and hand
@@ -795,7 +913,7 @@ impl Spaces {
             SpaceRefusal::Rewound { space, .. } => space.clone(),
             SpaceRefusal::Unfit { space, .. } => space.clone(),
             // Passing: the node is loading the version.
-            SpaceRefusal::Unserved { .. } => return refusal,
+            SpaceRefusal::Unserved { .. } | SpaceRefusal::Waking { .. } => return refusal,
             // Written by the site that made it, which knows the reason and
             // that it belongs in the catch-up's list as well.
             SpaceRefusal::SchemaBehind { .. } => return refusal,
@@ -1029,6 +1147,16 @@ impl Spaces {
         if self.fits.lock().expect("fit cache").contains(&key) {
             return Ok(());
         }
+        // A move with dual writes (increment 11a) keeps both its versions'
+        // shapes in its database until the soak closes. Not cached: the
+        // close makes the database one version again.
+        if self
+            .deployment
+            .move_of(space)
+            .is_some_and(|(from, to)| live.version == from || live.version == to)
+        {
+            return Ok(());
+        }
         if let Ok(ordo_exec::spacedb::TargetVersion::At(at)) =
             ordo_exec::spacedb::recorded_version(pool).await
         {
@@ -1058,11 +1186,139 @@ impl Spaces {
         Ok(())
     }
 
+    /// **A tenant's blind indexes follow its pin across B10** (increment
+    /// 13, PR 80's gap). B10 keeps the index it replaced as
+    /// `<field>$bidx$prev`, and every write keeps both current. A tenant
+    /// with a database of its own moves back across the step by `ordo
+    /// versions pin`, a move off a revoked version, a tenant build, a
+    /// restore, or a catch-up, and forward again by a rollout. Whatever
+    /// moved it, the node trades the kept index in here before it serves
+    /// the tenant on the version that declares its normalization
+    /// ([`crate::schema_apply::restore_kept_indexes`]), so `==` finds every
+    /// row. Asked once per `(space, version, epoch)`: every pin move raises
+    /// the epoch.
+    ///
+    /// The deployment's own database is traded by the activation
+    /// (`crate::apply_op`), which every space there follows. A tenant there
+    /// pinned to a version whose normalization only the kept index holds is
+    /// refused, naming the fix: trading it would take the index from every
+    /// other space there. A database
+    /// shared with a tenant pinned to another version cannot hold both
+    /// indexes under one name, so this tenant is refused, naming the fix.
+    async fn kept_indexes(
+        &self,
+        space: &str,
+        pool: &Pool,
+        live: &Loaded,
+        epoch: Option<i64>,
+    ) -> Result<(), SpaceRefusal> {
+        let key = (space.to_string(), live.version.clone(), epoch.unwrap_or(-1));
+        if self.kept.lock().expect("kept cache").contains(&key) {
+            return Ok(());
+        }
+        let unfit = |reason: String| SpaceRefusal::Unfit {
+            space: space.to_string(),
+            version: live.version.clone(),
+            reason,
+        };
+        let control = self.witness.pool();
+        let schema = &live.fixture.schema;
+        // A read that failed is the database's fault, told as one: a full
+        // pool answers busy, as every other read here does (25z).
+        let due = crate::schema_apply::kept_indexes_due(pool, schema)
+            .await
+            .map_err(|e| SpaceRefusal::Unroutable {
+                space: space.to_string(),
+                reason: format!("its kept blind indexes could not be read: {e}"),
+                class: e.class(),
+            })?;
+        if crate::dual_writes::same_database(pool, control) {
+            if let Some(k) = due.first() {
+                return Err(unfit(kept_on_shared(
+                    &k.entity,
+                    &k.field,
+                    &live.version,
+                    space,
+                )));
+            }
+        } else if !due.is_empty() {
+            self.alone_on_its_database(space, pool, &live.version)
+                .await
+                .map_err(unfit)?;
+            let fence = epoch.map(|e| (space, e));
+            let traded = crate::schema_apply::restore_kept_indexes(pool, schema, None, fence)
+                .await
+                .map_err(unfit)?;
+            if !traded.is_empty() {
+                println!(
+                    "space {space}: the blind index kept for version {} traded in on its \
+                     database ({})",
+                    live.version,
+                    traded.join(", ")
+                );
+            }
+        }
+        self.kept.lock().expect("kept cache").insert(key);
+        Ok(())
+    }
+
+    /// Refused when another tenant on `space`'s database is pinned to a
+    /// version other than `version`.
+    async fn alone_on_its_database(
+        &self,
+        space: &str,
+        pool: &Pool,
+        version: &str,
+    ) -> Result<(), String> {
+        let control = self.witness.pool();
+        let all = match ordo_exec::spacedb::all(control).await {
+            Ok(a) => a,
+            Err(e) if e.is_missing_table() => return Ok(()),
+            Err(e) => return Err(format!("the tenant databases could not be read: {e}")),
+        };
+        let c = pool.config();
+        let v = crate::versions::Versions::on(control);
+        for (other, a) in all {
+            if other.0 == space || a.host != c.host || a.port != c.port || a.db != c.db {
+                continue;
+            }
+            let on = v
+                .pin_of(&other.0)
+                .await
+                .map_err(|e| format!("the pin of `{}` could not be read: {e}", other.0))?
+                .and_then(|p| p.version);
+            if let Some(on) = on.filter(|on| on != version) {
+                return Err(format!(
+                    "its database keeps a blind index for version `{version}`, and tenant `{}` \
+                     on the same database is pinned to `{on}`, which reads the other one. Pin \
+                     both to one version (`ordo versions pin <tenant> <version>`)",
+                    other.0
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Read one tenant's pin from the control database again and take it.
     /// The door calls this when a write was refused because the pin moved
     /// ([`ordo_exec::PoolError::PinMoved`]). Whether the pin this node
     /// holds changed.
     pub async fn reload_pin(&self, space: &str) -> bool {
+        // The tenant's move with dual writes rides its pin (increment 11a):
+        // read first, so a write under the new pin carries its overlay.
+        match crate::versions::Versions::on(self.witness.pool())
+            .dual_move(space)
+            .await
+        {
+            Ok(m) => self
+                .deployment
+                .set_move(space, m.as_ref().and_then(crate::dual_writes::overlays_of)),
+            Err(e) => eprintln!("space {space}: its move could not be read again ({e})"),
+        }
+        match crate::grant_kills::read_all(self.witness.pool()).await {
+            Ok(k) => self.deployment.set_grant_kills(k),
+            Err(e) => eprintln!("space {space}: the grants moves killed were not read ({e})"),
+        }
         match crate::versions::Versions::on(self.witness.pool())
             .pin_of(space)
             .await
@@ -1118,5 +1374,19 @@ fn serving_log() -> WriteLog {
                 .map(|d| d.as_secs())
                 .unwrap_or(0)
         }),
+    )
+}
+
+/// Why a tenant on the deployment's own database is not served, or not
+/// pinned, on `version`: only B10's kept index holds `version`'s
+/// normalization of `entity.field` there, and the activation trades it
+/// for every space at once.
+pub(crate) fn kept_on_shared(entity: &str, field: &str, version: &str, space: &str) -> String {
+    format!(
+        "`{entity}.{field}` on the deployment's own database is indexed under the active \
+         version's normalization; version `{version}` reads the index kept beside it, which \
+         only an activation trades in for every space there. Pin the tenant to the active \
+         version (`ordo versions pin {space} <active>`), or activate `{version}` (`ordo \
+         rollback {version}`)"
     )
 }

@@ -74,6 +74,7 @@ fn group_in(space: &SpaceId, n: usize) -> CommandGroup {
             at: Timestamp(1_000 + n as u64),
         }],
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: None,
     }

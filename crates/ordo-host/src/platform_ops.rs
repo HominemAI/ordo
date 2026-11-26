@@ -389,6 +389,9 @@ pub fn specs() -> Vec<OpSpec> {
                 FieldSpec::new("objectsLeft"),
                 // E7: what deleting the tenant did to the identities it made.
                 FieldSpec::new("identities"),
+                // What versions left behind that the erasure reached
+                // (`$orphans`, plan-versions.md §2.7).
+                FieldSpec::new("orphans"),
             ],
             live_capable: false,
             reads_external: false,
@@ -809,6 +812,18 @@ pub fn specs() -> Vec<OpSpec> {
                     bounds: None,
                 },
                 ParamSpec {
+                    // `ordo apply --branch <name>` (`plan-versions.md`
+                    // §3.3): store without activating, and serve the
+                    // version to the branch's own tenant alone
+                    // (`crate::branches`). The name is checked there.
+                    name: crate::branches::BRANCH_PARAM.to_string(),
+                    ty: ParamTy::Text {
+                        max_len: Some(crate::branches::MAX_BRANCH_CHARS as u32 * 4),
+                    },
+                    required: false,
+                    bounds: None,
+                },
+                ParamSpec {
                     // The git commit the CLI read where the source lives,
                     // `-dirty` when the applied files had changes not in
                     // it. Asserted by the caller, as `--as` is on the
@@ -1056,7 +1071,12 @@ pub fn specs() -> Vec<OpSpec> {
     .chain(crate::secrets::specs())
     .chain(crate::fn_runs::specs())
     .chain(crate::deploy_ops::specs())
+    .chain(crate::peer_ops::specs())
+    .chain(crate::clones::specs())
+    .chain(crate::branches::specs())
+    .chain(crate::rehearsals::specs())
     .chain(crate::window_ops::specs())
+    .chain(crate::tenant_builds::specs())
     .chain(crate::revoked_moves::specs())
     .chain(crate::fleet::specs())
     .chain(crate::settings::specs())
@@ -1869,10 +1889,28 @@ pub fn owner_only(name: &str) -> bool {
         // G1 to G3: the program's history, its rollback and its preview
         // are the deployment's, on `APPLY`'s terms.
         || crate::deploy_ops::OPS.contains(&name)
+        // Between Ordo deployments (`plan-federation-grants.md` §4): the
+        // deployment's, on `APPLY`'s terms. Another deployment reaches the
+        // two it calls only through the door for other deployments
+        // (`crate::peer_door`), as itself, never through a role.
+        || crate::peer_ops::OPS.contains(&name)
+        // Staging clones (`plan-versions.md` §3.4): the deployment's, on
+        // `APPLY`'s terms. A clone discloses a tenant, masked.
+        || crate::clones::OPS.contains(&name)
+        // Dev branches (`plan-versions.md` §3.3): the deployment's, on
+        // `APPLY`'s terms. Deleting one drops its tenant's database.
+        || crate::branches::OPS.contains(&name)
+        // The signed rehearsal (§3.2, 12b): the deployment's, on `APPLY`'s
+        // terms. A `clone.readers` person may also rehearse (Q12): the
+        // door lets them, not a role.
+        || crate::rehearsals::OPS.contains(&name)
         // Maintenance windows (owner, 2026-11-04): the app developer's
         // contract with each tenant, set by the deployment owner on
         // `APPLY`'s terms. A tenant has no say in them through Ordo.
         || crate::window_ops::OPS.contains(&name)
+        // Tenant builds (versions increment 16): the deployment's, on
+        // `APPLY`'s terms.
+        || crate::tenant_builds::OPS.contains(&name)
         // 17aa. Owner, and then narrower still for `APPLY`'s exact reason:
         // `TenantOps::create` refuses unless the bound space is the
         // platform's own. Creating the next tenant decides who the
@@ -2229,6 +2267,13 @@ pub struct PlatformOps {
     /// wires nothing for it is a bug in the deployment, not a state a
     /// caller reaches on a correct one.
     pub apply: Option<Arc<crate::apply_op::ApplyOps>>,
+    /// The ops between Ordo deployments (`plan-federation-grants.md` §4,
+    /// step G4): a holder's grant and recorded uses, and registering this
+    /// deployment's consumer key.
+    pub peer: Option<Arc<crate::peer_ops::PeerOps>>,
+    /// The clone ops' state (`plan-versions.md` §3.4): the deploy door's,
+    /// the deployment's keys, and who opens a clone.
+    pub clones: Option<Arc<crate::clones::CloneOps>>,
     /// `std.space.create`'s state. Separate from [`Self::apply`] and not
     /// folded into it, though both are deployment-scoped and both are
     /// owner-only: applying a program needs a pool, and minting a tenant
@@ -2340,6 +2385,8 @@ impl PlatformOps {
             identities: None,
             credentials: None,
             apply: None,
+            peer: None,
+            clones: None,
             tenants: None,
             pause: None,
             engine_source: None,
@@ -2433,6 +2480,18 @@ impl PlatformOps {
     /// serves no control plane needs no change.
     pub fn with_apply(mut self, apply: Arc<crate::apply_op::ApplyOps>) -> PlatformOps {
         self.apply = Some(apply);
+        self
+    }
+
+    /// Wire the ops between Ordo deployments (step G4).
+    pub fn with_peer(mut self, peer: Arc<crate::peer_ops::PeerOps>) -> PlatformOps {
+        self.peer = Some(peer);
+        self
+    }
+
+    /// Wire the clone ops (`plan-versions.md` §3.4).
+    pub fn with_clones(mut self, clones: Arc<crate::clones::CloneOps>) -> PlatformOps {
+        self.clones = Some(clones);
         self
     }
 
@@ -2677,6 +2736,16 @@ impl PlatformOps {
         })
     }
 
+    /// The door reads which tenants are dev branches, so a deployment admin
+    /// opens one (`crate::branches`, `clones::CloneAccess`).
+    async fn refresh_branch_access(&self) {
+        if let (Some(clones), Some(apply)) = (&self.clones, &self.apply) {
+            if let Err(e) = clones.access.refresh(&apply.pool).await {
+                eprintln!("branches: the door's register was not read again ({e})");
+            }
+        }
+    }
+
     fn tenant_ops(&self) -> Result<&crate::tenant_ops::TenantOps, ExecError> {
         self.tenants.as_deref().ok_or_else(|| {
             ExecError::internal(
@@ -2708,7 +2777,44 @@ impl PlatformOps {
     }
 
     /// Run a platform op. `caller` is the principal the door proved.
-    pub async fn execute(
+    ///
+    /// A deploy op goes straight to `crate::deploy_ops::execute_boxed`,
+    /// past [`Self::execute_all`]'s poll: an unoptimized build gives that
+    /// poll a stack slot for every arm's future, hundreds of KiB, and a
+    /// stored step's door op is deep enough without it (Reported fix,
+    /// 2026-11-25: `ordo evolve --run` overflowed a door task's 2 MiB worker
+    /// stack on CI).
+    pub fn execute<'a>(
+        &'a self,
+        op: &'a OpSpec,
+        space: &'a str,
+        bound: &'a BoundParams,
+        caller: &'a str,
+    ) -> futures::future::BoxFuture<'a, Result<ExecResult, ExecError>> {
+        let name = op.name.as_str();
+        if crate::deploy_ops::OPS.contains(&name)
+            && name != crate::apply_op::APPLY
+            && !crate::branches::OPS.contains(&name)
+        {
+            return match self.apply_ops() {
+                Ok(ops) => crate::deploy_ops::execute_boxed(ops, name, space, bound, caller),
+                Err(e) => Box::pin(async move { Err(e) }),
+            };
+        }
+        Box::pin(self.execute_all(op, space, bound, caller))
+    }
+
+    /// Put the stored input caps (`limits.*`, 2026-11-25) in force before an
+    /// evolution op checks a reason or a name. A deployment with no apply
+    /// state holds the defaults.
+    async fn refresh_input_caps(&self) {
+        if let Ok(ops) = self.apply_ops() {
+            let _ = crate::input_caps::refresh(&ops.pool).await;
+        }
+    }
+
+    /// Every platform op but the deploy ops [`Self::execute`] sends on.
+    async fn execute_all(
         &self,
         op: &OpSpec,
         space: &str,
@@ -2752,17 +2858,81 @@ impl PlatformOps {
             }
             crate::bucket_ops::ATTACH_BUCKET => self.buckets()?.attach(space, bound, caller).await,
             crate::bucket_ops::DETACH_BUCKET => self.buckets()?.detach(space, caller).await,
+            // `ordo apply --branch` (`plan-versions.md` §3.3): the apply's
+            // own op, with the tenant ops to make the branch's tenant.
+            crate::apply_op::APPLY if crate::branches::names_branch(bound) => {
+                let out = crate::branches::apply_op(
+                    self.apply_ops()?,
+                    self.tenant_ops()?,
+                    space,
+                    bound,
+                    caller,
+                )
+                .await;
+                self.refresh_branch_access().await;
+                out
+            }
             crate::apply_op::APPLY => self.apply_ops()?.apply(space, bound, caller).await,
+            name if crate::peer_ops::OPS.contains(&name) => {
+                let peer = self.peer.as_deref().ok_or_else(|| {
+                    ExecError::internal(
+                        "this deployment registered the ops between deployments and wired no \
+                         state for them",
+                    )
+                })?;
+                peer.execute(name, space, bound, caller).await
+            }
+            name if crate::branches::OPS.contains(&name) => {
+                let out = crate::branches::execute(
+                    self.apply_ops()?,
+                    self.reap.as_deref(),
+                    name,
+                    space,
+                    bound,
+                    caller,
+                )
+                .await;
+                self.refresh_branch_access().await;
+                out
+            }
             name if crate::deploy_ops::OPS.contains(&name) => {
-                crate::deploy_ops::execute(self.apply_ops()?, name, space, bound, caller).await
+                crate::deploy_ops::execute_boxed(self.apply_ops()?, name, space, bound, caller)
+                    .await
+            }
+            name if crate::clones::OPS.contains(&name) => {
+                self.refresh_input_caps().await;
+                let clones = self.clones.as_deref().ok_or_else(|| {
+                    ExecError::internal(
+                        "this deployment registered the clone ops and wired no state for them",
+                    )
+                })?;
+                clones.execute(name, space, bound, caller).await
+            }
+            name if crate::rehearsals::OPS.contains(&name) => {
+                self.refresh_input_caps().await;
+                let clones = self.clones.as_deref().ok_or_else(|| {
+                    ExecError::internal(
+                        "this deployment registered the rehearsal ops and wired no state for them",
+                    )
+                })?;
+                crate::rehearsals::execute(clones, name, space, bound, caller).await
+            }
+            name if crate::tenant_builds::OPS.contains(&name) => {
+                self.refresh_input_caps().await;
+                crate::tenant_builds::execute(self.apply_ops()?, name, space, bound, caller).await
             }
             name if crate::window_ops::OPS.contains(&name) => {
+                self.refresh_input_caps().await;
                 crate::window_ops::execute(self.apply_ops()?, name, space, bound, caller).await
             }
             // The tenant moves itself off a revoked version: bound to the
             // tenant, granted to the roles the app developer names.
             crate::revoked_moves::MOVE_SELF => {
                 crate::revoked_moves::execute(self.apply_ops()?, space, bound, caller).await
+            }
+            // The tenant admin reads its own version and label (§1.9).
+            crate::revoked_moves::VERSION_SELF => {
+                crate::revoked_moves::version(self.apply_ops()?, space).await
             }
             crate::tenant_ops::CREATE => self.tenant_ops()?.create(space, bound, caller).await,
             crate::reap_op::REAP => self.reap_ops()?.reap(space, bound, caller).await,

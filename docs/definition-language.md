@@ -2533,8 +2533,9 @@ at `ORDO_PEER_<NAME>_URL`, never its tables (`plan-federation-grants.md`
 - A native entity's ref to it (`note.title`, a guard that walks into it)
   is one call with the refs of the rows read, never one call per row.
 - `field == $caller` on it is the holder's `$caller`: the holder decides it
-  for the person the call is made for. Under `or` or `not` it is refused
-  (`peer_refused`). With nobody signed in it matches nothing, and the holder
+  for the person the call is made for. Only `==` and `!=` compare a peer's
+  field with `$caller` (`peer_caller_compare`, at compile). Under `or` or
+  `not` it is refused (`peer_refused`). With nobody signed in it matches nothing, and the holder
   is not asked.
 - Each call is made for the person signed in here, under the holder's rules
   for them, or as this deployment itself when nobody is. The holder's grant

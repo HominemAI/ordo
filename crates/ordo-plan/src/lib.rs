@@ -1808,19 +1808,14 @@ impl Planner {
     }
 
     /// `field == $caller` on a peer's table. The holder decides it: the
-    /// executor sends it as a `caller` condition and rewrites it before the
-    /// statement is planned (`ordo_exec::peer_reads`). One left standing
-    /// reached the planner without its rows served, and nothing here can
-    /// answer who `$caller` is in another deployment.
-    fn peer_caller(peer: &str) -> PlanError {
-        PlanError {
-            code: "peer_caller_unserved",
-            message: format!(
-                "`$caller` on a table of peer `{peer}` is decided by `{peer}` through its door, \
-                 and this statement was planned without asking it. Fix: read `{peer}`'s \
-                 entities through an op this deployment serves, which asks the holder first"
-            ),
-        }
+    /// executor sends it as a `caller` condition, and every row the holder
+    /// answers already meets it, so here it reads "the holder found one",
+    /// `field IS NOT NULL`, as the executor's own rewrite does
+    /// (`ordo_exec::peer_reads`). A statement nobody served reads no table:
+    /// its peer's source names a relation that cannot exist, and the read
+    /// paths refuse it by name before it runs.
+    fn peer_caller(&mut self, expr: &BExpr) -> Result<String, PlanError> {
+        Ok(format!("({} IS NOT NULL)", self.expr(expr)?))
     }
 
     /// The space value as SQL — a literal when the door bound one, the
@@ -2930,7 +2925,7 @@ impl Planner {
                     if *negated { "NOT " } else { "" }
                 )
             }
-            BCond::PeerCaller { peer, .. } => return Err(Self::peer_caller(peer)),
+            BCond::PeerCaller { expr, .. } => self.peer_caller(expr)?,
             BCond::TreeWalk {
                 expr,
                 tree,

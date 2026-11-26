@@ -8,8 +8,13 @@ export default defineConfig({
     { name: 'api', testMatch: /api\/.*\.spec\.ts/ },
     { name: 'browser', testMatch: /browser\/.*\.spec\.ts/, use: { ...devices['Desktop Chrome'] } },
   ],
-  webServer: {
+  webServer: [{
     command: 'bash stack.sh', url: page, reuseExistingServer: false, timeout: 300_000,
     stdout: 'pipe', stderr: 'pipe', gracefulShutdown: { signal: 'SIGTERM', timeout: 15_000 },
-  },
+  }, {
+    command: 'bash console-stack.sh',
+    url: `http://localhost:${process.env['E2E_REAL_CONSOLE_PORT'] ?? '5392'}/health/ready`,
+    reuseExistingServer: false, timeout: 180_000, stdout: 'pipe', stderr: 'pipe',
+    gracefulShutdown: { signal: 'SIGTERM', timeout: 15_000 },
+  }],
 });

@@ -163,15 +163,17 @@ jobs:
             echo "BASH_ENV=$GITHUB_WORKSPACE/coverage-out/env.sh"
             echo "ORDO=$bindir/ordo"
             echo "ORDO_HOST_BIN=$bindir/ordo-host"
+            echo "ORDO_CONSOLE_BIN=$bindir/ordo-console"
           } >> "$GITHUB_ENV"
 
       - name: Build ordo-host and ordo
         if: env.REACHED == 'true'
-        run: cargo build -p ordo-host -p ordo-cli
+        run: cargo build -p ordo-host -p ordo-cli -p ordo-console
 
       - name: Install the page and the tests
         if: env.REACHED == 'true'
         run: |
+          (cd clients/ordo-console-web && npm ci)
           (cd examples/marketing-site/web && npm ci)
           (cd examples/marketing-site/e2e && npm ci && npm run typecheck)
 

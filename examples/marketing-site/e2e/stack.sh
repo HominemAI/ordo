@@ -36,7 +36,8 @@ export ORDO_PAGE_KEY=22222222222222222222222222222222222222222222222222222222222
 export ORDO_REPLICA_ID=marketing-a
 export ORDO_HOST_ADDR="127.0.0.1:$door_port"
 export ORDO_AUTH_METHODS=passkey ORDO_AUTH_GUEST=on ORDO_APEX_DOMAIN=localhost
-export ORDO_AUTH_ORIGINS="$page,$bootstrap_page" ORDO_CORS_ORIGINS="$page,$bootstrap_page" ORDO_PUBLIC_URL="$door"
+console_page="http://localhost:${E2E_REAL_CONSOLE_PORT:-5392}"
+export ORDO_AUTH_ORIGINS="$page,$bootstrap_page,$console_page" ORDO_CORS_ORIGINS="$page,$bootstrap_page,$console_page" ORDO_PUBLIC_URL="$door"
 export ORDO_AUTH_PROVISIONING=auto-onboard ORDO_PROVISION_SELF_SERVE=on-signup
 export ORDO_PUBLIC_HUMAN_CHECK=off ORDO_PUBLIC_WRITES_PER_HOUR=1000
 export ORDO_PG_POOL_SIZE=3 ORDO_PG_IDLE_SECS=5

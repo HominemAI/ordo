@@ -223,11 +223,22 @@ pub fn situation_of(op: &str) -> Option<Situation> {
     let (family, name) = op.rsplit_once('.')?;
     Some(match (family, name) {
         ("std.deployment", "addConsoleKey" | "revokeConsoleKey") => ConsoleKeys,
+        // Breaking glass on the rehearsal gate always asks the deployment
+        // owner to reauth, at every level (owner, 2026-11-25).
+        ("std.deployment", "breakGlassRehearsal") => ConsoleKeys,
         // Every other act on the deployment is deploying, versions or the
         // deployment's settings, the ruling's first row. Moving a tenant's
         // version (`pin`) asks no touch at any level
         // (`deploy_ops::NO_PRESENCE`).
         ("std.deployment", _) => Deploying,
+        // A rollout's controls (`plan-versions.md` §3.7): moves, no touch
+        // (`NO_PRESENCE`).
+        ("std.deployment.rollout", _) => Deploying,
+        // Between Ordo deployments (`plan-federation-grants.md` §4):
+        // registering this deployment's consumer key, and a holder keeping
+        // what a consumer calls. The second is reached only through the door
+        // for other deployments, which asks no person to touch.
+        ("std.peer", _) => Deploying,
         // A tenant's own move off a revoked version, when the developer
         // grants it. Like every move it asks no touch (`NO_PRESENCE`).
         ("std.space", "moveOffRevoked") => Deploying,

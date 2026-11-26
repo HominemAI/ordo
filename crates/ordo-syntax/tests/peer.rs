@@ -2,7 +2,7 @@
 //! asks 5 and 10): a local nickname for another Ordo deployment, and the
 //! refusals the parser can decide on its own.
 
-use ordo_syntax::{parse_program, PARSE_ERROR, PEER_NAME};
+use ordo_syntax::{parse_program, PARSE_ERROR, PEER_BLOCK, PEER_NAME};
 
 const VIEWER: &str = r#"
 peer journal
@@ -60,6 +60,38 @@ fn a_peer_name_is_lowercase_letters_and_digits() {
         e.message
     );
     parse_program("peer notes2\n").expect("digits are fine");
+}
+
+#[test]
+fn a_peer_block_lists_the_holder_ops_it_calls() {
+    // `plan-federation-grants.md` §4, step G4: no external needed.
+    let p = parse_program("peer notes {\n  std.notes.list\n  addComment\n}\n").expect("parses");
+    let uses = p.peers[0].uses.as_ref().expect("a block");
+    let ops: Vec<&str> = uses.iter().map(|u| u.op.as_str()).collect();
+    assert_eq!(ops, ["std.notes.list", "addComment"]);
+    // The one-line form keeps working, with no block.
+    let p = parse_program(VIEWER).expect("parses");
+    assert!(p.peers[0].uses.is_none());
+}
+
+#[test]
+fn a_peer_block_refuses_what_is_not_one_exact_op_per_line() {
+    let cases = [
+        ("peer notes {\n}\n", "names no op"),
+        ("peer notes {\n  addComment addNote\n}\n", "one op per line"),
+        ("peer notes {\n  addComment\n  addComment\n}\n", "twice"),
+        ("peer notes {\n  /add.*/\n}\n", "patterns and `!` belong"),
+        ("peer notes {\n  *\n}\n", "patterns and `!` belong"),
+    ];
+    for (src, want) in cases {
+        let e = parse_program(src).expect_err(src);
+        assert_eq!(e.code, PEER_BLOCK, "{src}: {}", e.message);
+        assert!(e.message.contains(want), "{src}: {}", e.message);
+    }
+    // `!` outside a grant is the lexer's refusal.
+    parse_program("peer notes {\n  !addComment\n}\n").expect_err("a negation");
+    let e = parse_program("peer notes {\n  addComment\n").expect_err("unclosed");
+    assert!(e.message.contains("not closed"), "{}", e.message);
 }
 
 #[test]

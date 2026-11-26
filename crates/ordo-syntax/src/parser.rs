@@ -46,19 +46,32 @@ pub const INVALID_GUARD_WALK: &str = "invalid_guard_walk";
 pub const BARE_FIELD_IN_GROUP: &str = "bare_field_in_group";
 /// A second `release member` line. One rule per program (27aq).
 pub const DUPLICATE_RELEASE: &str = "duplicate_release";
+/// A second `edition` line (`plan-versions.md` §2.6).
+pub const DUPLICATE_EDITION: &str = "duplicate_edition";
 /// A `secret` bound to something other than an exact host name: a URL, a
 /// port or a wildcard (`plan-backend-functions.md` §5).
 pub const INVALID_SECRET_HOST: &str = "invalid_secret_host";
+/// A second `auth` block. One per program (`plan-configuration-in-the-file.md` §2.2).
+pub const DUPLICATE_AUTH: &str = "duplicate_auth";
 /// `$caller` inside a release rule. The seat being released is `$member`,
 /// and the rule is about that seat whoever asks (27aq).
 pub const RELEASE_SUBJECT: &str = "release_subject";
 /// A `peer` line that cannot be one: a name that is not lowercase letters
 /// and digits, or a second line with the same name.
 pub const PEER_NAME: &str = "peer_name";
+/// A `peer` block that cannot be one: no line, two ops on one line, an op
+/// named twice, or a line that is not an exact op name
+/// (`plan-federation-grants.md` §4).
+pub const PEER_BLOCK: &str = "peer_block";
 /// A `reader` line that cannot be one: a name that is not lowercase
 /// letters, digits and underscores, a second line with the same name, no
 /// table, or a table named twice.
 pub const READER_LINE: &str = "reader_line";
+/// A `grant` block that cannot be one: a name that is not lowercase
+/// letters, digits and underscores, a second block with the same name, no
+/// line, two patterns on one line, or `grant provider … as itself`
+/// (`plan-federation-grants.md` §3).
+pub const GRANT_BLOCK: &str = "grant_block";
 /// An `external` declaration without `shared` (ruled 2026-11-15,
 /// `external-entities`): who reads the rows must be written down.
 pub const EXTERNAL_NOT_SHARED: &str = "external_not_shared";
@@ -76,6 +89,13 @@ pub const EXTERNAL_SEALED: &str = "external_sealed";
 /// Any other clause or modifier an external entity cannot carry: `unique`,
 /// `index`, `check`, `public`, `std sealed`, `tree`, a default.
 pub const EXTERNAL_UNSUPPORTED: &str = "external_unsupported";
+/// `prev` naming the field's or entity's own name (`plan-syntax-additions.md`
+/// §5).
+pub const PREV_SELF: &str = "prev_self";
+/// `prev(name)` while `name` is still a field of the entity.
+pub const PREV_STILL_DECLARED: &str = "prev_still_declared";
+/// Two fields of one entity with the same `prev` target.
+pub const PREV_DUPLICATE: &str = "prev_duplicate";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
@@ -191,6 +211,23 @@ const FUNCTIONS: &[(&str, usize, usize)] = &[
     ("lower", 1, 1),
     ("length", 1, 1),
     ("trim", 1, 1),
+    // A text's part before or after the first separator, null when the
+    // separator is not in it: a field split's mapping (`plan-versions.md`
+    // increment 15b), and legal anywhere fields are.
+    ("before", 2, 2),
+    ("after", 2, 2),
+    // Conversions, null where the value does not convert: a type cast on a
+    // rename (`prev`), and legal anywhere fields are. `text(x)` is the
+    // value's canonical text; `int(t)` the whole number `t` spells;
+    // `bool(t)` `true` or `false` as `t` spells it.
+    ("text", 1, 1),
+    ("int", 1, 1),
+    ("bool", 1, 1),
+    // `date(t)` the date `t` spells as `YYYY-MM-DD`, or in the format named
+    // second (`date(t, "DD/MM/YYYY")`); `datetime(t)` the ISO 8601 instant
+    // `t` spells, UTC where it names no offset. Null where it does not.
+    ("date", 1, 2),
+    ("datetime", 1, 1),
 ];
 
 /// The expression-function *names*, for readers outside the parser that must
@@ -285,6 +322,8 @@ pub(crate) fn describe(kind: &TokenKind) -> String {
         Slash => "`/`".into(),
         Question => "`?`".into(),
         At => "`@`".into(),
+        Bang => "`!`".into(),
+        Regex(r) => format!("`/{r}/`"),
         Newline => "end of line".into(),
         Eof => "end of input".into(),
     }
@@ -347,6 +386,15 @@ impl<'t> Parser<'t> {
         match self.pos.checked_sub(1).and_then(|i| self.toks.get(i)) {
             Some(prev) => self.tok().span.line > prev.span.line,
             None => false,
+        }
+    }
+
+    /// The span of the token just consumed. A clause that ends on its last
+    /// value reads its end here.
+    pub(crate) fn prev_span(&self) -> Span {
+        match self.pos.checked_sub(1).and_then(|i| self.toks.get(i)) {
+            Some(prev) => prev.span,
+            None => self.tok().span,
         }
     }
 

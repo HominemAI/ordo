@@ -8,7 +8,7 @@
 //! a run from the client to the database."* So this module takes a
 //! [`Pool`] and a compiled [`Program`] and returns structured outcomes; it
 //! reads no environment, prints nothing, prompts for nothing, and shells
-//! out to nothing. `ordo migrate --apply` and `ordo apply` are thin callers
+//! out to nothing. `ordo apply` and `ordo evolve` (through the door) are callers
 //! that parse arguments, render what comes back and set an exit code, and
 //! they exist to confirm the logic and to test it. A hosted control plane
 //! (checklist 18l) calls the same functions from behind an owner-gated
@@ -172,8 +172,11 @@ impl Program {
 
     fn identify(&mut self) {
         use ordo_plan::artifact as a;
-        self.source_id =
-            a::source_identity(&self.source, a::FIRST_EDITION, &a::code_hashes(&self.doc));
+        self.source_id = a::source_identity(
+            &self.source,
+            ordo_plan::edition::of_source(&self.source),
+            &a::code_hashes(&self.doc),
+        );
         self.build_id = a::build_identity(&self.doc, &self.ddl, a::ORDO_RELEASE);
         self.declared = a::declared_version(&self.source);
         self.version = match &self.declared {
@@ -342,6 +345,22 @@ impl NameRefusal {
 /// by the 16-hex digest of what it compiles to, with a note saying how to
 /// declare one (ask 10).
 pub async fn name_version(pool: &Pool, program: &Program) -> Result<Naming, NameRefusal> {
+    name_version_with(pool, program, true).await
+}
+
+/// [`name_version`] for a version that arrived with a staging clone
+/// (`plan-versions.md` §3.4): its number was settled where it was applied,
+/// so a number lower than the highest stored here is taken as it is. A
+/// used number holding other content is still refused.
+pub async fn name_arrival(pool: &Pool, program: &Program) -> Result<Naming, NameRefusal> {
+    name_version_with(pool, program, false).await
+}
+
+async fn name_version_with(
+    pool: &Pool,
+    program: &Program,
+    rising: bool,
+) -> Result<Naming, NameRefusal> {
     let versions = crate::versions::Versions::on(pool);
     let registry_err = |e: crate::versions::VersionRefusal| NameRefusal::Registry(e.to_string());
     let declared = program.declared.as_deref();
@@ -361,6 +380,22 @@ pub async fn name_version(pool: &Pool, program: &Program) -> Result<Naming, Name
                 note: None,
             });
         }
+    }
+    // **A removed version applied again** (`plan-versions.md` §1.6) keeps
+    // its name and number: the store brings its tombstone back, and
+    // refuses another program under the name as a collision.
+    let own_name = declared.unwrap_or(&program.version);
+    if ordo_exec::registry::is_removed(pool, own_name)
+        .await
+        .map_err(|e| NameRefusal::Registry(e.to_string()))?
+    {
+        return Ok(Naming {
+            version: own_name.to_string(),
+            existing: false,
+            note: Some(format!(
+                "`{own_name}` was removed here, and is stored again under its number"
+            )),
+        });
     }
     let Some(d) = declared else {
         // The digest names one compiled program, so a row stored under it
@@ -400,7 +435,18 @@ pub async fn name_version(pool: &Pool, program: &Program) -> Result<Naming, Name
             next,
         });
     }
-    if let Some(highest) = ordo_plan::artifact::highest_above(d, numbers.iter().map(String::as_str))
+    // **Numbers rise on main's line alone.** A version stored only for a dev
+    // branch and never activated does not count, so a branch at 0.5.x never
+    // refuses main's 0.4.0 (`crate::branches`, owner 2026-11-24).
+    let mains = if rising {
+        crate::branches::main_declared_versions(pool)
+            .await
+            .map_err(|e| NameRefusal::Registry(e.to_string()))?
+    } else {
+        Vec::new()
+    };
+    if let Some(highest) =
+        ordo_plan::artifact::highest_above(d, mains.iter().map(String::as_str)).filter(|_| rising)
     {
         return Err(NameRefusal::Behind {
             version: d.to_string(),
@@ -427,6 +473,161 @@ pub async fn deployed_artifact(pool: &Pool) -> Option<crate::versions::Artifact>
     versions.get(&v).await.ok()?
 }
 
+/// The schema of the version the deployment is serving, or `None`.
+pub async fn active_schema(pool: &Pool) -> Option<Schema> {
+    deployed_artifact(pool).await.as_ref().and_then(recompile)
+}
+
+/// **Record what a version left behind on this database** (`$orphans`,
+/// `plan-versions.md` §2.7, increment 14).
+///
+/// `prior` is the version the database held before, `program` the one it
+/// holds now. Every field or entity `prior` declared, `program` does not,
+/// and the live database still holds is an orphan: kept, never written.
+/// Each is recorded once, with its columns, its sealed flag and a drop date.
+/// An orphan `program` declares again is removed, because it is written
+/// again. Answers the names newly recorded.
+///
+/// Called wherever a database is brought to a version: the deployment's own
+/// apply, each tenant's database brought forward, and each stored step run.
+pub async fn record_orphans(
+    pool: &Pool,
+    prior: &Schema,
+    program: &Program,
+    from: Option<&str>,
+    actor: &str,
+) -> Result<Vec<String>, String> {
+    let live = migrate::live_shape(pool, pool.schema())
+        .await
+        .map_err(|e| format!("reading the live schema: {e}"))?;
+    let mut left: Vec<ordo_exec::orphans::Left> = Vec::new();
+    for c in ordo_schema::diff(&live, Some(prior), &program.schema) {
+        match c {
+            Change::DropField { entity, field } => {
+                let Some(f) = prior.native(&entity).and_then(|e| e.field(&field)) else {
+                    continue;
+                };
+                let table = live.table(&entity);
+                let mut columns = vec![f.column()];
+                if f.indexed && table.is_some_and(|t| t.columns.contains_key(&f.index_column())) {
+                    columns.push(f.index_column());
+                }
+                left.push(ordo_exec::orphans::Left {
+                    entity,
+                    field: Some(field),
+                    columns,
+                    sealed: f.sealed || f.private,
+                });
+            }
+            Change::DropEntity { entity } => {
+                let sealed = prior
+                    .native(&entity)
+                    .is_some_and(|e| e.fields.iter().any(|f| f.sealed || f.private));
+                left.push(ordo_exec::orphans::Left {
+                    entity,
+                    field: None,
+                    columns: Vec::new(),
+                    sealed,
+                });
+            }
+            _ => {}
+        }
+    }
+    // **A rename that has landed** (`plan-evolution-federation.md` §2): a
+    // rename's old column is written while a version declares the `prev`
+    // mark (`crate::dual_writes::rename_overlay`). A version that drops the
+    // mark stops writing it, so it is an orphan from here, and a reader
+    // loses it (Q1) instead of reading it frozen. A move's soak records
+    // its own at the close; this is the same column on the apply path.
+    for m in &prior.prev {
+        let (Some(_), [old]) = (m.field.as_deref(), m.prev.as_slice()) else {
+            continue;
+        };
+        let still = program
+            .schema
+            .prev
+            .iter()
+            .any(|n| n.entity == m.entity && n.prev.as_slice() == [old.clone()]);
+        let declared = program
+            .schema
+            .native(&m.entity)
+            .is_some_and(|e| e.field(old).is_some() || e.fields.iter().any(|f| f.column() == *old));
+        let held = live
+            .table(&m.entity)
+            .is_some_and(|t| t.columns.contains_key(old.as_str()));
+        if still || declared || !held || old.contains('.') {
+            continue;
+        }
+        if left
+            .iter()
+            .any(|l| l.entity == m.entity && l.field.as_deref() == Some(old.as_str()))
+        {
+            continue;
+        }
+        left.push(ordo_exec::orphans::Left {
+            entity: m.entity.clone(),
+            field: Some(old.clone()),
+            columns: vec![old.clone()],
+            sealed: false,
+        });
+    }
+    // **An entity rename that has landed**: a version that drops the
+    // `(prev: old)` mark stops writing the old table. The rename lands
+    // ([`land_entity_rename`]) and the old table is an orphan from here.
+    // A move's soak lands its own at the close.
+    for m in &prior.prev {
+        let (None, [old]) = (m.field.as_deref(), m.prev.as_slice()) else {
+            continue;
+        };
+        let still = program
+            .schema
+            .prev
+            .iter()
+            .any(|n| n.entity == m.entity && n.field.is_none());
+        if still
+            || program.schema.native(old).is_some()
+            || program.schema.native(&m.entity).is_none()
+            || live.table(old).is_none()
+        {
+            continue;
+        }
+        if land_entity_rename(pool, &program.schema, &m.entity, old).await? {
+            left.push(ordo_exec::orphans::Left {
+                entity: old.clone(),
+                field: None,
+                columns: Vec::new(),
+                sealed: false,
+            });
+        }
+    }
+    let schema = &program.schema;
+    ordo_exec::orphans::revive(pool, &|entity: &str, field: &str| {
+        schema
+            .native(entity)
+            .is_some_and(|e| field.is_empty() || e.field(field).is_some())
+    })
+    .await
+    .map_err(|e| format!("$orphans: {e}"))?;
+    let names: Vec<String> = left
+        .iter()
+        .map(|l| match &l.field {
+            Some(f) => format!("{}.{f}", l.entity),
+            None => l.entity.clone(),
+        })
+        .collect();
+    let written = ordo_exec::orphans::record(
+        pool,
+        &left,
+        from,
+        &program.version,
+        actor,
+        crate::runtime::now_secs(),
+    )
+    .await
+    .map_err(|e| format!("$orphans: {e}"))?;
+    Ok(if written == 0 { Vec::new() } else { names })
+}
+
 fn recompile(a: &crate::versions::Artifact) -> Option<Schema> {
     crate::Fixture::from_source(&a.source, "")
         .ok()
@@ -439,7 +640,7 @@ fn recompile(a: &crate::versions::Artifact) -> Option<Schema> {
 /// Today one kind: what happens to a stored money or decimal field's
 /// amounts when its places change (25aa, ruled 2026-10-05).
 ///
-/// Carried by the call (`ordo migrate --apply --places`), because the
+/// Carried by the call (`ordo evolve --places`, `ordo plan --places`), because the
 /// stored plan that should hold every choice (`plan-evolution-plans.md`
 /// §3.1 and §3.2) is not built. Once applied, each choice is written to
 /// `$places` with the change, and a tenant's database brought forward later
@@ -448,9 +649,459 @@ fn recompile(a: &crate::versions::Artifact) -> Option<Schema> {
 pub struct Choices {
     /// `(entity, field)` to the stated choice.
     pub places: BTreeMap<(String, String), PlacesChoice>,
+    /// `(entity, field)` to the backfill that fills it (`plan-versions.md`
+    /// increment 10b): a new required field with no default (B2), or an
+    /// optional field made required (B5). Only a stored plan carries these
+    /// (`crate::evolve`); the apply path never states one, so there B2 and
+    /// B5 stay refused as before.
+    pub fills: BTreeMap<(String, String), Fill>,
+    /// A declared rename (`prev`, §5 B4) is copied by the backfill worker,
+    /// in chunks, rather than by one `UPDATE` in the step (increment 11a).
+    /// Set by a stored plan (`crate::evolve`), whose step can run with live
+    /// writes beside it: the new column lands open to nulls, the worker
+    /// fills it, and its `NOT NULL` waits for the move's close. Never
+    /// stated by a person, so outside the options text.
+    pub renames_backfill: bool,
+    /// A stored plan renders or runs this step (`crate::evolve`). Only then
+    /// is a field that becomes sealed (B7) sealed, through the backfill
+    /// worker with a key lease per space (`plan-versions.md` increment 13).
+    /// The apply path leaves it `false`, and B7 stays refused there. Not
+    /// part of the stored options: every stored plan has it.
+    pub stored: bool,
+    /// `seal.keep_plaintext` (`plan-versions.md` §2.2, D9): the fields
+    /// whose plaintext column a seal keeps, renamed
+    /// `<column>$plaintext` and orphaned, instead of dropping it. Off by
+    /// default; stated by name with `--keep-plaintext <entity>.<field>`.
+    pub keep_plaintext: std::collections::BTreeSet<(String, String)>,
+    /// The uniques and checks, by constraint name, a stored step holds to
+    /// its close ([`Triaged::held`]), as its receipt says. A run again of
+    /// the step, which finds its new columns there and so no backfill,
+    /// still holds them. Not part of the stored options.
+    pub held: std::collections::BTreeSet<String>,
+    /// The blind-index backfills (B8, B10) the database being planned is
+    /// in the middle of, `(entity, field)`, read from its `$seals` by a
+    /// stored step's run. A run again after the expand no longer sees the
+    /// index column arrive, and a `unique` over it still lands at the
+    /// backfill's end. Never stated by a person; not in the options.
+    pub indexing_live: std::collections::BTreeSet<(String, String)>,
+    /// `--reverse <entity>.<old field>=<expression>` (increment 15b): for a
+    /// split or a merge (B12), each old field's value from the new
+    /// version's fields. With one for every old field, the step is two-way:
+    /// the soak keeps the old columns current and a revert loses nothing.
+    pub reverses: BTreeMap<(String, String), String>,
+    /// `--one-way`: the developer accepts a split or a merge with an old
+    /// field that has no reverse (`forward-gaps` ask 18). Its soak cannot
+    /// be reverted; the old columns are kept, orphaned, for a revert by
+    /// hand.
+    pub one_way: bool,
+    /// `--correspond <part>.<link>` (entity splits, `forward-gaps` ask 8):
+    /// part to the link field naming the whole row each of its rows comes
+    /// from. One part row per whole row.
+    pub correspond: BTreeMap<String, String>,
+    /// The rules that name more than a link (`forward-gaps` ask 7): a pick
+    /// (`first`, `latest`, `all`), its field, a condition. In the order
+    /// written: a row is in the first rule whose condition it meets. Each
+    /// rule's entity and link are in [`Choices::correspond`] too.
+    pub rules: Vec<CorrespondRule>,
+}
+
+/// **A named correspondence rule** (`forward-gaps` ask 7, owner: *"dev
+/// named"*): `<entity>.<link> [first|latest|all] [by <field>] [where
+/// <condition>]`. `entity` holds the link; the condition is an Ordo
+/// condition over its fields, in the version serving now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorrespondRule {
+    pub entity: String,
+    pub link: String,
+    pub pick: Option<ordo_exec::pick::Pick>,
+    pub by: Option<String>,
+    pub condition: Option<String>,
+}
+
+impl CorrespondRule {
+    /// The rule as it is written, and stored.
+    pub fn text(&self) -> String {
+        let mut s = format!("{}.{}", self.entity, self.link);
+        if let Some(p) = self.pick {
+            s.push_str(&format!(" {}", p.as_str()));
+        }
+        if let Some(b) = &self.by {
+            s.push_str(&format!(" by {b}"));
+        }
+        if let Some(c) = &self.condition {
+            s.push_str(&format!(" where {c}"));
+        }
+        s
+    }
+
+    /// Read one rule. The words are `first`, `latest`, `all`, `by` and
+    /// `where`, in that order; everything after `where` is the condition.
+    pub fn parse(rule: &str) -> Result<CorrespondRule, String> {
+        let rule = rule.trim();
+        let form = "write `<entity>.<link> [first|latest|all] [by <field>] [where <condition>]`";
+        let (head, rest) = match rule.split_once(char::is_whitespace) {
+            Some((h, r)) => (h, r.trim_start()),
+            None => (rule, ""),
+        };
+        let (entity, link) = head
+            .split_once('.')
+            .ok_or_else(|| format!("`{rule}`: name the link as `<entity>.<link>`; {form}"))?;
+        let word = |w: &str| !w.is_empty() && w.chars().all(|c| c.is_alphanumeric() || c == '_');
+        if !word(entity) || !word(link) {
+            return Err(format!("`{rule}`: {form}"));
+        }
+        // `where` as a word of its own: everything after it is the
+        // condition.
+        let at = rest.match_indices("where").map(|(i, _)| i).find(|&i| {
+            (i == 0 || rest[..i].ends_with(char::is_whitespace))
+                && rest[i + 5..].starts_with(char::is_whitespace)
+        });
+        let (before, condition) = match at {
+            Some(i) => (rest[..i].trim(), Some(rest[i + 5..].trim().to_string())),
+            None => (rest.trim(), None),
+        };
+        if condition.as_deref() == Some("") {
+            return Err(format!("`{rule}`: `where` takes a condition; {form}"));
+        }
+        let mut words = before.split_whitespace();
+        let mut pick = None;
+        let mut by = None;
+        let mut next = words.next();
+        if let Some(w) = next {
+            if let Some(p) = ordo_exec::pick::Pick::parse(w) {
+                pick = Some(p);
+                next = words.next();
+            }
+        }
+        if let Some(w) = next {
+            if w != "by" {
+                return Err(format!("`{rule}`: `{w}` is not a word of a rule; {form}"));
+            }
+            let f = words
+                .next()
+                .filter(|f| word(f))
+                .ok_or_else(|| format!("`{rule}`: `by` names a field; {form}"))?;
+            by = Some(f.to_string());
+            if let Some(w) = words.next() {
+                return Err(format!("`{rule}`: `{w}` is not a word of a rule; {form}"));
+            }
+        }
+        Ok(CorrespondRule {
+            entity: entity.to_string(),
+            link: link.to_string(),
+            pick,
+            by,
+            condition,
+        })
+    }
+
+    /// A rule that names only its link: the one row per row rule.
+    pub fn is_plain(&self) -> bool {
+        self.pick.is_none() && self.by.is_none() && self.condition.is_none()
+    }
+}
+
+/// One backfill as the plan states it (`plan-backfill-dual-writes.md` §2,
+/// §5, §6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fill {
+    pub mapping: FillMapping,
+    /// Summarised by default (ruled 2026-09-08); full images on request.
+    pub audit: ordo_commandlog::BackfillAudit,
+}
+
+/// What computes the new value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FillMapping {
+    /// An Ordo expression over the row's own fields (`title`, `price * 2`).
+    Expr(String),
+    /// A backend function of the version the step goes to (D16), called
+    /// once per chunk, rows in and values out. `secrets` and `hosts` are
+    /// what it may use (ruled 2026-11-23, Q14): anything else is refused,
+    /// and the plan shows both.
+    Function {
+        name: String,
+        secrets: Vec<String>,
+        hosts: Vec<String>,
+    },
+    /// A sealed backfill (B7, increment 13): each row's plaintext sealed
+    /// under its space's key, at its row. No mapping: the value is the
+    /// same, only its custody changes.
+    Seal,
+    /// A blind-index backfill (B8, increment 13): each row's sealed value
+    /// opened under its space's key and its blind index written.
+    BlindIndex,
+    /// An entity rename's copy (B4 on an entity): every row of the old
+    /// table, named here, copied whole into the new one, in chunks.
+    Copy(String),
+    /// An entity split's copy (B13): one part row per row of the whole,
+    /// its link naming that row, its id `<key>_<whole id>`, the moved
+    /// columns copied.
+    Part {
+        whole: String,
+        link: String,
+        key: String,
+    },
+    /// A move from another entity, or an entity merge (B14): each row of
+    /// `from` gives its moved columns to the row its link names. `key` is
+    /// `from`'s id prefix, for a row the new version gives back to it.
+    Merge {
+        from: String,
+        link: String,
+        key: String,
+        columns: Vec<String>,
+        /// `from` is gone in the new version.
+        merge: bool,
+        /// A move through a link that is not unique: its rule, as
+        /// [`ordo_exec::pick::PickMove`] JSON. `None` pairs rows one to one.
+        pick: Option<String>,
+    },
+}
+
+impl FillMapping {
+    /// The mapping as the plan stores it and the audit record names it.
+    pub fn text(&self) -> String {
+        match self {
+            FillMapping::Expr(e) => e.clone(),
+            FillMapping::Function {
+                name,
+                secrets,
+                hosts,
+            } => {
+                let mut s = format!("fn {name}");
+                if !secrets.is_empty() {
+                    s.push_str(&format!(" secrets {}", secrets.join(",")));
+                }
+                if !hosts.is_empty() {
+                    s.push_str(&format!(" hosts {}", hosts.join(",")));
+                }
+                s
+            }
+            FillMapping::Seal => "seal".into(),
+            FillMapping::BlindIndex => "blind index".into(),
+            FillMapping::Copy(from) => format!("every row of {from}"),
+            FillMapping::Part { whole, link, .. } => {
+                format!("one row per row of {whole}, by {link}")
+            }
+            FillMapping::Merge {
+                from,
+                link,
+                pick: None,
+                ..
+            } => {
+                format!("each row of {from}, into the row its {link} names")
+            }
+            FillMapping::Merge {
+                from,
+                pick: Some(_),
+                ..
+            } => match self.pick() {
+                Some(p) => format!(
+                    "the values of {from}, by the rule over {}.{} ({})",
+                    p.many,
+                    p.link,
+                    p.rules
+                        .iter()
+                        .map(|r| r.pick.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                None => format!("the values of {from}, by a rule"),
+            },
+        }
+    }
+
+    /// A move through a link that is not unique: its rule.
+    pub fn pick(&self) -> Option<ordo_exec::pick::PickMove> {
+        match self {
+            FillMapping::Merge { pick: Some(p), .. } => {
+                ordo_exec::pick::PickMove::from_json(&serde_json::from_str(p).ok()?)
+            }
+            _ => None,
+        }
+    }
+
+    /// Read a mapping back: `fn <name> [secrets a,b] [hosts h,i]`, or an
+    /// expression.
+    pub fn parse(text: &str) -> Result<FillMapping, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(
+                "the mapping is empty: write an expression, `title`, or `fn <name>`".into(),
+            );
+        }
+        if text.contains(';') || text.contains('\n') {
+            return Err(format!(
+                "`{text}`: a mapping holds no `;` and no line break; `;` separates fills"
+            ));
+        }
+        let Some(rest) = text.strip_prefix("fn ") else {
+            return Ok(FillMapping::Expr(text.to_string()));
+        };
+        let mut words = rest.split_whitespace();
+        let name = words
+            .next()
+            .ok_or("`fn` names a function: `fn <name>`")?
+            .to_string();
+        let (mut secrets, mut hosts) = (Vec::new(), Vec::new());
+        while let Some(w) = words.next() {
+            let list = words
+                .next()
+                .ok_or_else(|| format!("`{w}` needs a comma-separated list after it"))?;
+            let items: Vec<String> = list
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+            match w {
+                "secrets" => secrets = items,
+                "hosts" => hosts = items,
+                other => {
+                    return Err(format!(
+                        "`{other}`: after `fn {name}` come only `secrets <a,b>` and `hosts <h,i>`"
+                    ))
+                }
+            }
+        }
+        Ok(FillMapping::Function {
+            name,
+            secrets,
+            hosts,
+        })
+    }
 }
 
 impl Choices {
+    /// Parse `notes.heading=title;notes.words=fn count`, adding to these
+    /// choices. `images` names the fills whose audit is full per-row
+    /// images, `notes.heading,notes.words`.
+    pub fn parse_fills(&mut self, spec: &str, images: &str) -> Result<(), String> {
+        for part in spec.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+            let (target, mapping) = part
+                .split_once('=')
+                .ok_or_else(|| format!("`{part}`: write `<entity>.<field>=<expression>`"))?;
+            let (entity, field) = target
+                .trim()
+                .split_once('.')
+                .ok_or_else(|| format!("`{target}`: name the field as `<entity>.<field>`"))?;
+            self.fills.insert(
+                (entity.trim().to_string(), field.trim().to_string()),
+                Fill {
+                    mapping: FillMapping::parse(mapping)?,
+                    audit: ordo_commandlog::BackfillAudit::Summarised,
+                },
+            );
+        }
+        for target in images.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            let key = target
+                .split_once('.')
+                .map(|(e, f)| (e.trim().to_string(), f.trim().to_string()))
+                .ok_or_else(|| format!("`{target}`: name the field as `<entity>.<field>`"))?;
+            let fill = self.fills.get_mut(&key).ok_or_else(|| {
+                format!("`{target}` has no fill; images are chosen for a field the step fills")
+            })?;
+            fill.audit = ordo_commandlog::BackfillAudit::Images;
+        }
+        Ok(())
+    }
+
+    /// Parse `person.fullName=first + " " + last;...` into
+    /// [`Choices::reverses`] (increment 15b).
+    pub fn parse_reverses(&mut self, spec: &str) -> Result<(), String> {
+        for part in spec.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+            let (target, mapping) = part
+                .split_once('=')
+                .ok_or_else(|| format!("`{part}`: write `<entity>.<old field>=<expression>`"))?;
+            let (entity, field) = target
+                .trim()
+                .split_once('.')
+                .ok_or_else(|| format!("`{target}`: name the field as `<entity>.<field>`"))?;
+            let mapping = mapping.trim();
+            if mapping.is_empty() || mapping.contains('\n') {
+                return Err(format!(
+                    "`{part}`: the reverse is one expression on one line"
+                ));
+            }
+            self.reverses.insert(
+                (entity.trim().to_string(), field.trim().to_string()),
+                mapping.to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Parse `--correspond` into [`Choices::correspond`] and
+    /// [`Choices::rules`]. Rules are separated by `;`; a list of plain
+    /// rules may also be separated by `,` (`stars.note,address.person`).
+    /// A plain rule names a link: one row per row. A rule with a pick, a
+    /// field or a condition is a named rule (`forward-gaps` ask 7).
+    pub fn parse_correspond(&mut self, spec: &str) -> Result<(), String> {
+        let parts: Vec<&str> = if spec.contains(';') || spec.trim().contains(char::is_whitespace) {
+            spec.split(';').collect()
+        } else {
+            spec.split(',').collect()
+        };
+        for part in parts.into_iter().map(str::trim).filter(|p| !p.is_empty()) {
+            self.add_correspond_rule(part)?;
+        }
+        Ok(())
+    }
+
+    /// Add one rule, as a stored plan holds it: the whole line, so a
+    /// condition may hold any character.
+    pub fn add_correspond_rule(&mut self, part: &str) -> Result<(), String> {
+        let rule = CorrespondRule::parse(part)?;
+        match self.correspond.get(&rule.entity) {
+            Some(l) if *l != rule.link => {
+                return Err(format!(
+                    "`{part}`: the rules for `{}` name one link, and an earlier rule names `{l}`",
+                    rule.entity
+                ))
+            }
+            Some(_) if rule.is_plain() != self.rules_for(&rule.entity).is_empty() => {
+                return Err(format!(
+                    "`{part}`: `{}` has a plain rule and a named one. Write every rule for it \
+                     with its pick (`first`, `latest`, `all`), or one plain rule",
+                    rule.entity
+                ))
+            }
+            _ => {}
+        }
+        self.correspond
+            .insert(rule.entity.clone(), rule.link.clone());
+        if !rule.is_plain() {
+            self.rules.push(rule);
+        }
+        Ok(())
+    }
+
+    /// The named rules for `entity`, in the order written.
+    pub fn rules_for(&self, entity: &str) -> Vec<&CorrespondRule> {
+        self.rules.iter().filter(|r| r.entity == entity).collect()
+    }
+
+    /// Parse `notes.body,notes.title` into [`Choices::keep_plaintext`].
+    pub fn parse_keep_plaintext(&mut self, spec: &str) -> Result<(), String> {
+        for target in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            let (e, f) = target
+                .split_once('.')
+                .ok_or_else(|| format!("`{target}`: name the field as `<entity>.<field>`"))?;
+            self.keep_plaintext
+                .insert((e.trim().to_string(), f.trim().to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn keeps_plaintext(&self, entity: &str, field: &str) -> bool {
+        self.keep_plaintext
+            .contains(&(entity.to_string(), field.to_string()))
+    }
+
+    pub fn fill_for(&self, entity: &str, field: &str) -> Option<&Fill> {
+        self.fills.get(&(entity.to_string(), field.to_string()))
+    }
+
     /// Parse `invoices.total=rescale,fees.rate=keep`.
     pub fn parse_places(spec: &str) -> Result<Choices, String> {
         let mut out = Choices::default();
@@ -599,6 +1250,18 @@ pub async fn plan_with_external(
         None => crate::external_check::check(pool, &program.schema).await?,
     };
     let mut refusals = external.refusals();
+    // The `prev` marks against the version the data was written under
+    // (`plan-syntax-additions.md` §5): one the step cannot make refuses it.
+    for i in ordo_schema::prev::check(prior.as_ref().or(written), &program.schema).errors {
+        refusals.push(format!(
+            "{} on `{}` — `{}`: {}. Fix: {}",
+            i.class,
+            i.mark.entity,
+            i.mark.text(),
+            i.message,
+            i.fix
+        ));
+    }
     let mut destructive = 0usize;
     for a in &mut assessed {
         // §5 D3, which only a deployed artifact can raise: a drop of
@@ -656,6 +1319,15 @@ pub async fn assess_with(
     // Per-entity numbers are read once each: a schema with nine changes to
     // one entity must not count its rows nine times.
     let mut extents: BTreeMap<String, (migrate::Extent, Option<f64>)> = BTreeMap::new();
+    // The sealed fields whose indexes a stored step computes (B8, B10): a
+    // `unique` they gain is asked over those indexes at the backfill's end.
+    let indexing: BTreeSet<(String, String)> = if choices.stored {
+        let mut s = choices.indexing_live.clone();
+        s.extend(changes.iter().filter_map(|c| indexed_by(schema, live, c)));
+        s
+    } else {
+        BTreeSet::new()
+    };
     for c in changes {
         let mut a = Assessed {
             refused: Vec::new(),
@@ -688,6 +1360,121 @@ pub async fn assess_with(
             }
             out.push(a);
             continue;
+        }
+        // A required field the plan fills (10b): every row gets the mapping's
+        // value, so the nulls the probe would count are what the backfill
+        // is for. The probe still runs, and its count is reported.
+        if let Change::AddRequiredField { entity, field } | Change::RequireField { entity, field } =
+            &a.change
+        {
+            if let Some(fill) = choices.fill_for(entity, field) {
+                let probed = probe(pool, schema, live, &a.change).await;
+                a.probe = Some(match probed {
+                    Ok(Probe::Dirty { what, .. }) => Ok(Probe::Clean(format!(
+                        "{what}; the backfill fills them with `{}`",
+                        fill.mapping.text()
+                    ))),
+                    other => other.map_err(|e| e.to_string()),
+                });
+                if let Some(Err(e)) = &a.probe {
+                    a.refused.push(format!("probe_unavailable — {e}"));
+                }
+                out.push(a);
+                continue;
+            }
+        }
+        // A split or a merge in a stored plan (15b): every row the mapping
+        // of a required new field does not parse is listed, by row, and the
+        // step waits for them (`forward-gaps` ask 18).
+        if let (Change::MapFields { entity, from, to }, true) = (&a.change, choices.stored) {
+            if let Some(e) = schema.native(entity) {
+                if let Ok((_, bfs, _, _)) = map_step(&a.change, e, live, from, to, choices) {
+                    let probed = Box::pin(unparsed(pool, schema, &bfs)).await;
+                    if matches!(probed, Ok(Probe::Dirty { .. })) {
+                        a.refused.push("probe_not_empty".into());
+                    }
+                    if let Err(e) = &probed {
+                        a.refused.push(format!("probe_unavailable — {e}"));
+                    }
+                    a.probe = Some(probed.map_err(|e| e.to_string()));
+                }
+            }
+            out.push(a);
+            continue;
+        }
+        // A move through a link that is not unique in a stored plan: every
+        // row of the many side that meets no rule is listed, by row, and
+        // the step waits for them (`forward-gaps` ask 7).
+        if let (Change::MoveFields { .. }, true) = (&a.change, choices.stored) {
+            // A database that holds no such table (a control database
+            // whose tenants have their own) has no rows to list.
+            if let Some(p) = move_pick(&a.change, schema, live, choices)
+                .filter(|p| live.table(&p.many).is_some())
+            {
+                let probed = Box::pin(unmatched(pool, &p)).await;
+                if matches!(probed, Ok(Probe::Dirty { .. })) {
+                    a.refused.push("probe_not_empty".into());
+                }
+                if let Err(e) = &probed {
+                    a.refused.push(format!("probe_unavailable — {e}"));
+                }
+                a.probe = Some(probed.map_err(|e| e.to_string()));
+                out.push(a);
+                continue;
+            }
+        }
+        // B8 in a stored plan (increment 13): the worker opens every sealed
+        // value under custody, so a destroyed epoch refuses the backfill
+        // naming its row, rather than the plan, which holds no keys.
+        if let (Change::IndexSealedField { .. }, false) = (&a.change, choices.stored) {
+            a.refused.push(
+                "index_needs_stored_plan — a blind index is computed for every row by the \
+                 backfill worker; store the version with `ordo apply --no-activate`, then run \
+                 the step with `ordo evolve --from <version> --to <version> --run`"
+                    .into(),
+            );
+        }
+        if let (Change::IndexSealedField { entity, field }, true) = (&a.change, choices.stored) {
+            let extent = migrate::extent(pool, entity).await;
+            a.probe = Some(match extent {
+                Ok(x) => Ok(Probe::Clean(format!(
+                    "sealed `{entity}`.`{field}` to index: {} row(s) in {} space(s), one key \
+                     lease per space; a value under a destroyed epoch stops the backfill, \
+                     naming its row",
+                    x.rows, x.spaces
+                ))),
+                Err(e) => {
+                    a.refused.push(format!("probe_unavailable — {e}"));
+                    Err(e.to_string())
+                }
+            });
+            out.push(a);
+            continue;
+        }
+        if let Change::AddUnique { entity, field, .. } = &a.change {
+            if indexing.contains(&(entity.clone(), field.clone())) {
+                a.probe = Some(Ok(Probe::Clean(format!(
+                    "duplicates over `{entity}`.`{field}`: found over the blind indexes the \
+                     backfill computes, before its end; a space holding two rows with one \
+                     value refuses the end, naming them"
+                ))));
+                out.push(a);
+                continue;
+            }
+        }
+        if let Change::Normalize { entity, field, .. } = &a.change {
+            let reindexed = schema
+                .native(entity)
+                .is_some_and(|e| reindexes(e, live, field));
+            if reindexed && !choices.stored {
+                a.refused.push(
+                    "reindex_needs_stored_plan — every row's blind index is computed again \
+                     under the new normalization by the backfill worker; store the version \
+                     with `ordo apply --no-activate`, then run the step with `ordo evolve \
+                     --from <version> --to <version> --run`"
+                        .into(),
+                );
+            }
         }
         let probed = probe(pool, schema, live, &a.change).await;
         match &probed {
@@ -1000,11 +1787,18 @@ pub async fn probe(
             to: Some(norm),
             ..
         } => {
-            let unique = schema
-                .native(entity)
-                .and_then(|e| e.field(field))
-                .is_some_and(|f| f.unique);
+            let declared = schema.native(entity).and_then(|e| e.field(field));
+            let unique = declared.is_some_and(|f| f.unique);
             let what = format!("collisions under `normalize({norm})` on `{entity}`.`{field}`");
+            // A sealed value is ciphertext, which SQL cannot fold. Its
+            // collisions are equal blind indexes, found by the backfill
+            // that computes them, at its end (B10).
+            if declared.is_some_and(|f| f.sealed) {
+                return Ok(Probe::Clean(format!(
+                    "{what}: the values are sealed, so collisions are found over the blind \
+                     indexes the backfill computes, before its end"
+                )));
+            }
             if !unique {
                 return Ok(Probe::Clean(format!(
                     "{what}: the column carries no unique, so a merge loses no row"
@@ -1030,6 +1824,16 @@ pub async fn probe(
         }
         // B7/B8 — a sealed transform. The epochs must be checked before a
         // plan is offered, and a plan holds no key custody.
+        // B7 from plaintext: nothing sealed yet, so no epoch to check. A
+        // stored plan seals every row through the worker (increment 13).
+        Change::SealField { entity, field } if live_has(entity, std::slice::from_ref(field)) => {
+            let extent = migrate::extent(pool, entity).await?;
+            Ok(Probe::Clean(format!(
+                "`{entity}`.`{field}` to seal: {} row(s) in {} space(s), one key lease per \
+                 space; the plaintext column is dropped once the seal verifies",
+                extent.rows, extent.spaces
+            )))
+        }
         Change::SealField { entity, field } | Change::IndexSealedField { entity, field } => {
             let epochs = migrate::sealed_epochs(pool, entity, field).await.ok();
             let mut lines = vec![
@@ -1690,6 +2494,1385 @@ pub struct Refused {
 pub struct Triaged {
     pub steps: Vec<Step>,
     pub refused: Vec<Refused>,
+    /// The backfills the step runs after `steps` commit (10b): only a
+    /// stored plan's fills make one. Empty on the apply path.
+    pub backfills: Vec<BackfillStep>,
+    /// What lands once every backfill has verified: the `NOT NULL` each
+    /// filled field declares. Never sent by [`execute`]; the backfill's
+    /// caller sends it ([`crate::backfill`]).
+    pub after: Vec<Step>,
+    /// The uniques and checks the new version adds, held to `after` in a
+    /// step with dual writes (increment 11b part 4): the version before
+    /// still writes until the step's soaks close, so the database cannot
+    /// hold them yet. The host holds them on the moving versions' writes,
+    /// and the rows are checked against them before they land.
+    pub held: Vec<Held>,
+    /// The splits and merges (B12, increment 15b): what keeps each old
+    /// column current while the new version writes, and whether the step
+    /// is one way.
+    pub maps: Vec<MapStep>,
+}
+
+/// **A split or merge in a stored step** (B12, `plan-versions.md`
+/// increment 15b). Its new fields are backfills ([`BackfillStep`], code
+/// `B12`); this is the rest: the old fields, and the reverse rule for each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapStep {
+    pub entity: String,
+    /// The old fields.
+    pub from: Vec<String>,
+    /// The new fields.
+    pub to: Vec<String>,
+    /// Each old field's reverse, where one was given.
+    pub reverse: Vec<ReverseSet>,
+    /// An old field has no reverse, and `--one-way` accepted it.
+    pub one_way: bool,
+}
+
+/// One old field kept current from the new ones while the new version
+/// writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReverseSet {
+    pub field: String,
+    pub column: String,
+    /// The expression as written.
+    pub mapping: String,
+    /// It lowered to SQL over the new version's columns.
+    pub sql: String,
+    /// The version before requires it, so a write the reverse leaves
+    /// empty is refused by name.
+    pub required: bool,
+}
+
+impl MapStep {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "entity": self.entity,
+            "from": self.from,
+            "to": self.to,
+            "reverse": self.reverse.iter().map(|r| serde_json::json!({
+                "field": r.field, "column": r.column, "mapping": r.mapping,
+                "sql": r.sql, "required": r.required,
+            })).collect::<Vec<_>>(),
+            "oneWay": self.one_way,
+        })
+    }
+
+    pub fn from_json(v: &serde_json::Value) -> Option<MapStep> {
+        let names = |k: &str| -> Option<Vec<String>> {
+            v[k].as_array()?
+                .iter()
+                .map(|x| x.as_str().map(String::from))
+                .collect()
+        };
+        Some(MapStep {
+            entity: v["entity"].as_str()?.to_string(),
+            from: names("from")?,
+            to: names("to")?,
+            reverse: v["reverse"]
+                .as_array()?
+                .iter()
+                .map(|r| {
+                    Some(ReverseSet {
+                        field: r["field"].as_str()?.to_string(),
+                        column: r["column"].as_str()?.to_string(),
+                        mapping: r["mapping"].as_str()?.to_string(),
+                        sql: r["sql"].as_str()?.to_string(),
+                        required: r["required"].as_bool()?,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?,
+            one_way: v["oneWay"].as_bool()?,
+        })
+    }
+
+    /// Every map of a stored receipt.
+    pub fn all_of(receipt: &serde_json::Value) -> Vec<MapStep> {
+        receipt["maps"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(MapStep::from_json)
+            .collect()
+    }
+}
+
+/// One unique or check held to a step's close ([`Triaged::held`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Held {
+    pub entity: String,
+    /// The constraint's name in the database.
+    pub name: String,
+    pub kind: HeldKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeldKind {
+    /// A unique over `columns`, within a space. `distinct_nulls`: two nulls
+    /// do not collide (a blind index); otherwise they do.
+    Unique {
+        fields: Vec<String>,
+        columns: Vec<String>,
+        distinct_nulls: bool,
+    },
+    /// A row invariant: `sql` over the row's own columns.
+    Check { source: String, sql: String },
+}
+
+impl Held {
+    pub fn to_json(&self) -> serde_json::Value {
+        match &self.kind {
+            HeldKind::Unique {
+                fields,
+                columns,
+                distinct_nulls,
+            } => serde_json::json!({
+                "entity": self.entity, "name": self.name, "kind": "unique",
+                "fields": fields, "columns": columns, "distinctNulls": distinct_nulls,
+            }),
+            HeldKind::Check { source, sql } => serde_json::json!({
+                "entity": self.entity, "name": self.name, "kind": "check",
+                "source": source, "sql": sql,
+            }),
+        }
+    }
+
+    pub fn from_json(v: &serde_json::Value) -> Option<Held> {
+        let strings = |k: &str| -> Option<Vec<String>> {
+            v[k].as_array()?
+                .iter()
+                .map(|c| c.as_str().map(String::from))
+                .collect()
+        };
+        let kind = match v["kind"].as_str()? {
+            "unique" => HeldKind::Unique {
+                fields: strings("fields")?,
+                columns: strings("columns")?,
+                distinct_nulls: v["distinctNulls"].as_bool()?,
+            },
+            "check" => HeldKind::Check {
+                source: v["source"].as_str()?.to_string(),
+                sql: v["sql"].as_str()?.to_string(),
+            },
+            _ => return None,
+        };
+        Some(Held {
+            entity: v["entity"].as_str()?.to_string(),
+            name: v["name"].as_str()?.to_string(),
+            kind,
+        })
+    }
+
+    /// What a written row must hold, as SQL over its own table
+    /// (`"<entity>"`): the guard the host runs on each row a moving version
+    /// writes while the constraint is held.
+    pub fn holds(&self) -> String {
+        let t = ordo_schema::ddl::q(&self.entity);
+        match &self.kind {
+            HeldKind::Unique {
+                columns,
+                distinct_nulls,
+                ..
+            } => {
+                let cols: Vec<String> = columns.iter().map(|c| ordo_schema::ddl::q(c)).collect();
+                let join = |op: &dyn Fn(&str) -> String| {
+                    cols.iter().map(|c| op(c)).collect::<Vec<_>>().join(" AND ")
+                };
+                let other = |same: String| {
+                    format!(
+                        "EXISTS (SELECT 1 FROM {t} AS o WHERE o.\"$space\" = {t}.\"$space\" \
+                         AND o.\"id\" <> {t}.\"id\" AND {same})"
+                    )
+                };
+                // Spelled with `=` so the held index ([`Held::index`]) is
+                // read: `IS NOT DISTINCT FROM`, or an `OR` for the nulls, is
+                // not indexable, and the table would be read for each row.
+                let equal = other(join(&|c| format!("o.{c} = {t}.{c}")));
+                if *distinct_nulls {
+                    format!("NOT {equal}")
+                } else {
+                    // Two nulls collide too. Asked only of a row that holds
+                    // a null there, which a required field never does.
+                    let present = join(&|c| format!("{t}.{c} IS NOT NULL"));
+                    let alike = other(join(&|c| format!("o.{c} IS NOT DISTINCT FROM {t}.{c}")));
+                    format!("NOT {equal} AND ({present} OR NOT {alike})")
+                }
+            }
+            // Postgres passes a check whose result is null.
+            HeldKind::Check { sql, .. } => format!("coalesce(({sql}), true)"),
+        }
+    }
+
+    /// **The plain index a held unique's guard reads** (11b part 5):
+    /// `(index name, CREATE INDEX CONCURRENTLY …)` over the space and the
+    /// unique's columns, made once the expand has made them and dropped at
+    /// the close. Without it the guard reads the whole table for each row
+    /// written. `None` for a check, whose guard reads the row alone.
+    pub fn index(&self) -> Option<(String, String)> {
+        let HeldKind::Unique { columns, .. } = &self.kind else {
+            return None;
+        };
+        let mut name = format!("{}$held", self.name);
+        if name.len() > 63 {
+            let mut cut = 63;
+            while !name.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            name.truncate(cut);
+        }
+        let cols = std::iter::once(ordo_schema::ddl::q(ordo_schema::SPACE_COLUMN))
+            .chain(columns.iter().map(|c| ordo_schema::ddl::q(c)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({cols});\n",
+            ordo_schema::ddl::q(&name),
+            ordo_schema::ddl::q(&self.entity)
+        );
+        Some((name, sql))
+    }
+
+    /// The guard's rule, and what it asks, in words. `to` is the version
+    /// that adds it.
+    pub fn rule(&self, to: &str) -> (String, String) {
+        match &self.kind {
+            HeldKind::Unique { fields, .. } => (
+                format!("holds the unique `{}` that `{to}` adds", self.name),
+                format!("{} unique in its space", fields.join(", ")),
+            ),
+            HeldKind::Check { source, .. } => (
+                format!("holds the check `{}` that `{to}` adds", self.name),
+                format!("check {source}"),
+            ),
+        }
+    }
+
+    /// The rows that break it, `space/id`, at most `limit`: what a close
+    /// names when the constraint would not land.
+    pub async fn breaking(&self, pool: &Pool, limit: usize) -> Result<Vec<String>, String> {
+        let t = ordo_schema::ddl::q(&self.entity);
+        let sql = match &self.kind {
+            // One pass: the rows of each duplicated key, in a space.
+            HeldKind::Unique {
+                columns,
+                distinct_nulls,
+                ..
+            } => {
+                let cols = columns
+                    .iter()
+                    .map(|c| ordo_schema::ddl::q(c))
+                    .collect::<Vec<_>>();
+                let present = if *distinct_nulls {
+                    format!(
+                        "WHERE {}",
+                        cols.iter()
+                            .map(|c| format!("{c} IS NOT NULL"))
+                            .collect::<Vec<_>>()
+                            .join(" AND ")
+                    )
+                } else {
+                    String::new()
+                };
+                format!(
+                    "SELECT \"$space\", \"id\"::text FROM (SELECT \"$space\", \"id\", \
+                     count(*) OVER (PARTITION BY \"$space\", {k}) AS n FROM {t} {present}) d \
+                     WHERE n > 1 ORDER BY \"$space\", \"id\" LIMIT {limit}",
+                    k = cols.join(", ")
+                )
+            }
+            HeldKind::Check { sql, .. } => format!(
+                "SELECT \"$space\", \"id\"::text FROM {t} WHERE NOT coalesce(({sql}), true) \
+                 ORDER BY \"$space\", \"id\" LIMIT {limit}"
+            ),
+        };
+        let rows = pool.rows(&sql).await.map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                format!(
+                    "{}/{}",
+                    r.first().cloned().flatten().unwrap_or_default(),
+                    r.get(1).cloned().flatten().unwrap_or_default()
+                )
+            })
+            .collect())
+    }
+}
+
+/// A statement a stored receipt's `after` holds, as [`execute`] runs it: a
+/// `VALIDATE CONSTRAINT` runs after the transaction, on its own (§3.7).
+pub fn after_step(sql: &str) -> Step {
+    let sql = sql.trim_end();
+    let validate = sql
+        .strip_prefix("ALTER TABLE ")
+        .and_then(|rest| rest.split_once(" VALIDATE CONSTRAINT "))
+        .map(|(table, name)| {
+            let unq = |s: &str| {
+                s.trim()
+                    .trim_end_matches(';')
+                    .trim_matches('"')
+                    .replace("\"\"", "\"")
+            };
+            (unq(table), unq(name))
+        });
+    match validate {
+        Some((table, name)) => Step {
+            code: "C9",
+            phase: Phase::Validate,
+            sql: format!("{sql}\n"),
+            index: None,
+            constraint: Some(name),
+            table,
+        },
+        None => Step {
+            code: "B",
+            phase: Phase::Alter,
+            sql: format!("{sql}\n"),
+            index: None,
+            constraint: None,
+            table: String::new(),
+        },
+    }
+}
+
+/// One backfill a step runs, as rendered (`plan-backfill-dual-writes.md`
+/// §2). Everything in it is in the receipt, so in the plan digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackfillStep {
+    /// `B2` (a new required field) or `B5` (an optional field made
+    /// required).
+    pub code: &'static str,
+    pub entity: String,
+    pub field: String,
+    /// The physical column filled.
+    pub column: String,
+    /// Its Postgres type.
+    pub column_ty: String,
+    pub mapping: FillMapping,
+    /// The mapping lowered to SQL over the row's own columns. `None` for a
+    /// backfill function, which computes values outside the database.
+    pub sql: Option<String>,
+    pub audit: ordo_commandlog::BackfillAudit,
+    /// A sealed backfill (B7): the plaintext column the seal reads. The
+    /// filled `column` is a new `bytea` beside it; once verified, the
+    /// plaintext column is dropped and the sealed one takes its name.
+    pub sealing_from: Option<String>,
+    /// A blind-index backfill (B8): the sealed column each row's index is
+    /// computed from. The filled `column` is `<field>$bidx`, made
+    /// `NOT NULL` once verified.
+    pub indexing_from: Option<String>,
+    /// `seal.keep_plaintext`: the name the plaintext column is kept under,
+    /// orphaned, instead of being dropped.
+    pub kept_plaintext: Option<String>,
+}
+
+impl BackfillStep {
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut j = serde_json::json!({
+            "code": self.code,
+            "entity": self.entity,
+            "field": self.field,
+            "column": self.column,
+            "type": self.column_ty,
+            "mapping": self.mapping.text(),
+            "sql": self.sql,
+            "audit": self.audit.as_str(),
+        });
+        // Present only on a sealed backfill, so every plan stored before
+        // them keeps its digest.
+        if let Some(plain) = &self.sealing_from {
+            j["sealFrom"] = serde_json::json!(plain);
+        }
+        if let Some(kept) = &self.kept_plaintext {
+            j["keptAs"] = serde_json::json!(kept);
+        }
+        if let Some(from) = &self.indexing_from {
+            j["indexFrom"] = serde_json::json!(from);
+        }
+        // Present only on an entity rename's copy.
+        if let FillMapping::Copy(from) = &self.mapping {
+            j["copyFrom"] = serde_json::json!(from);
+        }
+        // Present only on an entity split's copy.
+        if let FillMapping::Part { whole, link, key } = &self.mapping {
+            j["partOf"] = serde_json::json!({ "whole": whole, "link": link, "key": key });
+        }
+        // Present only on a move's or a merge's copy.
+        if let FillMapping::Merge {
+            from,
+            link,
+            key,
+            columns,
+            merge,
+            pick,
+        } = &self.mapping
+        {
+            j["mergeFrom"] = serde_json::json!({
+                "from": from, "link": link, "key": key, "columns": columns, "merge": merge,
+            });
+            // Present only on a move through a link that is not unique.
+            if let Some(p) = pick {
+                j["mergeFrom"]["pick"] = serde_json::json!(p);
+            }
+        }
+        j
+    }
+
+    /// A move's or a merge's copy: the entity the rows come from, its link,
+    /// the moved columns, and whether it is a merge.
+    pub fn merge_from(&self) -> Option<(&str, &str, &[String], bool)> {
+        match &self.mapping {
+            FillMapping::Merge {
+                from,
+                link,
+                columns,
+                merge,
+                ..
+            } => Some((from, link, columns, *merge)),
+            _ => None,
+        }
+    }
+
+    /// A move through a link that is not unique: its rule.
+    pub fn pick(&self) -> Option<ordo_exec::pick::PickMove> {
+        self.mapping.pick()
+    }
+
+    /// An entity split's copy: the whole, its link and the part's key.
+    pub fn part_of(&self) -> Option<(&str, &str, &str)> {
+        match &self.mapping {
+            FillMapping::Part { whole, link, key } => Some((whole, link, key)),
+            _ => None,
+        }
+    }
+
+    /// An entity rename's copy: the old table, when this backfill is one.
+    pub fn copy_from(&self) -> Option<&str> {
+        match &self.mapping {
+            FillMapping::Copy(from) => Some(from),
+            _ => None,
+        }
+    }
+
+    /// Read one back from a stored receipt ([`BackfillStep::to_json`]).
+    pub fn from_json(v: &serde_json::Value) -> Option<BackfillStep> {
+        let code = match v["code"].as_str()? {
+            "B2" => "B2",
+            "B4" => "B4",
+            "B5" => "B5",
+            "B12" => "B12",
+            "B13" => "B13",
+            "B14" => "B14",
+            "B7" => "B7",
+            "B8" => "B8",
+            "B10" => "B10",
+            _ => return None,
+        };
+        Some(BackfillStep {
+            code,
+            entity: v["entity"].as_str()?.to_string(),
+            field: v["field"].as_str()?.to_string(),
+            column: v["column"].as_str()?.to_string(),
+            column_ty: v["type"].as_str()?.to_string(),
+            // A seal's mapping is `seal`, which reads back as no expression.
+            mapping: if v["sealFrom"].is_string() {
+                FillMapping::Seal
+            } else if v["indexFrom"].is_string() {
+                FillMapping::BlindIndex
+            } else if let Some(from) = v["copyFrom"].as_str() {
+                FillMapping::Copy(from.to_string())
+            } else if v["partOf"].is_object() {
+                FillMapping::Part {
+                    whole: v["partOf"]["whole"].as_str()?.to_string(),
+                    link: v["partOf"]["link"].as_str()?.to_string(),
+                    key: v["partOf"]["key"].as_str()?.to_string(),
+                }
+            } else if v["mergeFrom"].is_object() {
+                let m = &v["mergeFrom"];
+                FillMapping::Merge {
+                    from: m["from"].as_str()?.to_string(),
+                    link: m["link"].as_str()?.to_string(),
+                    key: m["key"].as_str()?.to_string(),
+                    columns: m["columns"]
+                        .as_array()?
+                        .iter()
+                        .map(|c| c.as_str().map(String::from))
+                        .collect::<Option<Vec<_>>>()?,
+                    merge: m["merge"].as_bool()?,
+                    pick: m["pick"].as_str().map(String::from),
+                }
+            } else {
+                FillMapping::parse(v["mapping"].as_str()?).ok()?
+            },
+            sql: v["sql"].as_str().map(String::from),
+            audit: match v["audit"].as_str()? {
+                "images" => ordo_commandlog::BackfillAudit::Images,
+                _ => ordo_commandlog::BackfillAudit::Summarised,
+            },
+            sealing_from: v["sealFrom"].as_str().map(String::from),
+            kept_plaintext: v["keptAs"].as_str().map(String::from),
+            indexing_from: v["indexFrom"].as_str().map(String::from),
+        })
+    }
+}
+
+/// The physical column a sealed backfill (B7) fills beside the plaintext
+/// one, until the plaintext is dropped and it takes the field's name.
+pub fn seal_column(field: &ordo_schema::Field) -> String {
+    format!("{}$seal", field.column())
+}
+
+/// The sealed backfill for a field a stored plan seals (B7), and the
+/// statements that land once it verifies: the plaintext column dropped,
+/// the sealed one renamed to the field's column, and its `NOT NULL`.
+fn seal_step(
+    c: &Change,
+    e: &ordo_schema::Entity,
+    live: &LiveShape,
+    field: &str,
+    version: &str,
+    keep_plaintext: bool,
+) -> Result<SealStep, Box<Refused>> {
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    let Some(f) = e.field(field) else {
+        return Err(refuse(
+            "mapping_invalid",
+            format!("`{}.{field}` is not declared", e.name),
+        ));
+    };
+    if f.indexed || f.unique {
+        return Err(refuse(
+            "seal_then_index",
+            format!(
+                "`{}.{field}` becomes `sealed indexed` or `sealed unique` in one step. Its \
+                 blind index is computed from the sealed value, so seal it plain in one version, \
+                 then add `indexed` in a later one (B8, §5 D5)",
+                e.name
+            ),
+        ));
+    }
+    if f.is_content() {
+        return Err(refuse(
+            "mapping_invalid",
+            format!(
+                "`{}.{field}` is a file: its bytes are sealed by the blob door",
+                e.name
+            ),
+        ));
+    }
+    let live_ty = live
+        .table(&e.name)
+        .and_then(|t| t.columns.get(&f.column()))
+        .map(|col| col.ty.clone())
+        .unwrap_or_default();
+    if live_ty != "text" {
+        return Err(refuse(
+            "seal_type_not_built",
+            format!(
+                "`{}.{field}` is `{live_ty}` before the step. A sealed backfill seals a `text` \
+                 field's value as it reads; another type is not built. Make it `text` in one \
+                 version, then seal it in a later one",
+                e.name
+            ),
+        ));
+    }
+    let table = ordo_schema::ddl::q(&e.name);
+    let plain = ordo_schema::ddl::q(&f.column());
+    let sealed = seal_column(f);
+    let not_null = ordo_schema::ddl::physical_columns(e)
+        .iter()
+        .any(|pc| pc.name == f.column() && pc.not_null);
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let kept = keep_plaintext.then(|| kept_plaintext_column(f));
+    // **The seal recorded where it runs** (`$seals`, live writes during
+    // the seal): the expand takes `"$renames"` exclusively, as a rename's
+    // does, so every write after it reads the row and seals what it wrote,
+    // and every write before it has committed.
+    let record = vec![
+        format!("{};\n", ordo_exec::overlay::RENAMES_DDL),
+        format!("{};\n", ordo_exec::overlay::SEALS_DDL),
+        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n".to_string(),
+        format!(
+            "INSERT INTO \"$seals\" (\"entity\", \"field\", \"kind\", \"source\", \"target\", \
+             \"version\") VALUES ({}, {}, 'seal', {}, {}, {}) ON CONFLICT (\"entity\", \"field\", \
+             \"kind\") DO UPDATE SET \"source\" = EXCLUDED.\"source\", \"target\" = \
+             EXCLUDED.\"target\", \"version\" = EXCLUDED.\"version\";\n",
+            lit(&e.name),
+            lit(field),
+            lit(&f.column()),
+            lit(&sealed),
+            lit(version),
+        ),
+    ];
+    // **The end, in one transaction under the same lock**: no write lands
+    // between its seal and the plaintext's drop. A row written outside the
+    // write path after verify, and left unsealed, refuses the end.
+    let gone = match &kept {
+        None => format!("ALTER TABLE {table} DROP COLUMN {plain};\n"),
+        Some(k) => format!(
+            "ALTER TABLE {table} RENAME COLUMN {plain} TO {};\n",
+            ordo_schema::ddl::q(k)
+        ),
+    };
+    let mut end = format!(
+        "{};\n\
+         LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n\
+         DO $ordo$ BEGIN IF EXISTS (SELECT 1 FROM {table} WHERE {sq} IS NULL AND {plain} IS NOT \
+         NULL) THEN RAISE EXCEPTION 'seal_unfinished: a row of {name}.{field} was written \
+         outside the write path after verify and is not sealed; run the step again'; END IF; \
+         END $ordo$;\n\
+         {gone}\
+         ALTER TABLE {table} RENAME COLUMN {sq} TO {plain};\n",
+        ordo_exec::overlay::RENAMES_DDL,
+        sq = ordo_schema::ddl::q(&sealed),
+        name = e.name,
+    );
+    if not_null {
+        end.push_str(&format!(
+            "ALTER TABLE {table} ALTER COLUMN {plain} SET NOT NULL;\n"
+        ));
+    }
+    end.push_str(&format!(
+        "DELETE FROM \"$seals\" WHERE \"entity\" = {} AND \"field\" = {} AND \"kind\" = 'seal';\n",
+        lit(&e.name),
+        lit(field)
+    ));
+    Ok(SealStep {
+        backfill: BackfillStep {
+            code: c.code(),
+            entity: e.name.clone(),
+            field: field.to_string(),
+            column: sealed,
+            column_ty: "bytea".into(),
+            mapping: FillMapping::Seal,
+            sql: None,
+            audit: ordo_commandlog::BackfillAudit::Summarised,
+            sealing_from: Some(f.column()),
+            kept_plaintext: kept,
+            indexing_from: None,
+        },
+        record,
+        after: vec![end],
+    })
+}
+
+/// The blind-index backfill for a sealed field that gains `indexed` (B8),
+/// and the end that lands once it verifies: the index made `NOT NULL`.
+/// Recorded in `$seals` as kind `index`, so a write by the version before,
+/// which seals the field and computes no index, writes the index too.
+fn index_step(
+    c: &Change,
+    e: &ordo_schema::Entity,
+    live: &LiveShape,
+    field: &str,
+    version: &str,
+) -> Result<SealStep, Box<Refused>> {
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    let Some(f) = e.field(field) else {
+        return Err(refuse(
+            "mapping_invalid",
+            format!("`{}.{field}` is not declared", e.name),
+        ));
+    };
+    let live_ty = live
+        .table(&e.name)
+        .and_then(|t| t.columns.get(&f.column()))
+        .map(|col| col.ty.clone())
+        .unwrap_or_default();
+    if live_ty != "bytea" {
+        return Err(refuse(
+            "seal_then_index",
+            format!(
+                "`{}.{field}` is not sealed before the step. Its blind index is computed from the \
+                 sealed value, so seal it plain in one version, then add `indexed` in a later \
+                 one (B8, §5 D5)",
+                e.name
+            ),
+        ));
+    }
+    let table = ordo_schema::ddl::q(&e.name);
+    let bidx = f.index_column();
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let record = index_record(e, f, "index", &bidx, version);
+    // `sealed indexed unique` (C1 over blind indexes): its duplicates are
+    // found over the indexes the backfill computed, under the end's lock,
+    // and the constraint lands in the same transaction.
+    let mut end = format!(
+        "{};\n\
+         LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n\
+         DO $ordo$ BEGIN IF EXISTS (SELECT 1 FROM {table} WHERE {b} IS NULL) THEN RAISE \
+         EXCEPTION 'index_unfinished: a row of {name}.{field} was written outside the write \
+         path after verify and has no blind index; run the step again'; END IF; END $ordo$;\n\
+         ALTER TABLE {table} ALTER COLUMN {b} SET NOT NULL;\n",
+        ordo_exec::overlay::RENAMES_DDL,
+        b = ordo_schema::ddl::q(&bidx),
+        name = e.name,
+    );
+    end.push_str(&sealed_unique_end(e, f, &bidx));
+    end.push_str(&format!(
+        "DELETE FROM \"$seals\" WHERE \"entity\" = {} AND \"field\" = {} AND \"kind\" = 'index';\n",
+        lit(&e.name),
+        lit(field),
+    ));
+    Ok(SealStep {
+        backfill: BackfillStep {
+            code: c.code(),
+            entity: e.name.clone(),
+            field: field.to_string(),
+            column: bidx,
+            column_ty: "bytea".into(),
+            mapping: FillMapping::BlindIndex,
+            sql: None,
+            audit: ordo_commandlog::BackfillAudit::Summarised,
+            sealing_from: None,
+            kept_plaintext: None,
+            indexing_from: Some(f.column()),
+        },
+        record,
+        after: vec![end],
+    })
+}
+
+/// The record of a blind-index backfill in `$seals` (`index`, B8, or
+/// `reindex`, B10), with the normalization its target is computed under,
+/// so a write by any version computes the same index the worker does.
+fn index_record(
+    e: &ordo_schema::Entity,
+    f: &ordo_schema::Field,
+    kind: &str,
+    target: &str,
+    version: &str,
+) -> Vec<String> {
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    vec![
+        format!("{};\n", ordo_exec::overlay::RENAMES_DDL),
+        format!("{};\n", ordo_exec::overlay::SEALS_DDL),
+        // After the lock: the `ALTER` locks `$seals`, which a write reads
+        // under `"$renames"`. Taken first, a write holding `"$renames"`
+        // and reading `$seals` would deadlock with it.
+        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n".to_string(),
+        format!("{};\n", ordo_exec::overlay::SEALS_NORMALIZE_DDL),
+        format!(
+            "INSERT INTO \"$seals\" (\"entity\", \"field\", \"kind\", \"source\", \"target\", \
+             \"version\", \"normalize\") VALUES ({}, {}, {}, {}, {}, {}, {}) ON CONFLICT \
+             (\"entity\", \"field\", \"kind\") DO UPDATE SET \"source\" = EXCLUDED.\"source\", \
+             \"target\" = EXCLUDED.\"target\", \"version\" = EXCLUDED.\"version\", \
+             \"normalize\" = EXCLUDED.\"normalize\";\n",
+            lit(&e.name),
+            lit(&f.name),
+            lit(kind),
+            lit(&f.column()),
+            lit(target),
+            lit(version),
+            lit(f.normalize.as_deref().unwrap_or("")),
+        ),
+    ]
+}
+
+/// The end of a blind index's backfill for a `sealed indexed unique` field
+/// (C1 over blind indexes, §7.3): two rows of one space with one index
+/// refuse the end by name, then the constraint lands, in the end's
+/// transaction under its lock. Nothing for a field that is not unique.
+/// The step's run names the rows first (`crate::evolve`); this is the
+/// guard for a write between that read and the lock.
+fn sealed_unique_end(e: &ordo_schema::Entity, f: &ordo_schema::Field, column: &str) -> String {
+    if !f.unique || f.implicit {
+        return String::new();
+    }
+    format!(
+        "DO $ordo$ BEGIN IF EXISTS (SELECT 1 FROM {t} GROUP BY \"$space\", {c} HAVING count(*) > \
+         1) THEN RAISE EXCEPTION 'sealed_unique_duplicates: two rows of one space hold the same \
+         {name}.{field}; change one of each, then run the step again'; END IF; END $ordo$;\n{}",
+        ordo_schema::ddl::unique(e, f).unwrap_or_default(),
+        t = ordo_schema::ddl::q(&e.name),
+        c = ordo_schema::ddl::q(column),
+        name = e.name,
+        field = f.name,
+    )
+}
+
+/// Whether a `normalize` change on `field` has blind indexes to compute
+/// again (B10): the field is sealed and indexed, and the database holds
+/// its index, computed under the old normalization.
+fn reindexes(e: &ordo_schema::Entity, live: &LiveShape, field: &str) -> bool {
+    e.field(field).is_some_and(|f| {
+        f.sealed
+            && f.indexed
+            && live
+                .table(&e.name)
+                .is_some_and(|t| t.columns.contains_key(&f.index_column()))
+    })
+}
+
+/// The `(entity, field)`s whose blind indexes a stored step computes by
+/// backfill: a sealed field gaining `indexed` (B8), and one whose
+/// `normalize` changes (B10). Empty outside a stored plan.
+fn indexed_by_backfill(
+    schema: &Schema,
+    live: &LiveShape,
+    assessed: &[Assessed],
+    choices: &Choices,
+) -> BTreeSet<(String, String)> {
+    if !choices.stored {
+        return BTreeSet::new();
+    }
+    let mut out = choices.indexing_live.clone();
+    out.extend(
+        assessed
+            .iter()
+            .filter(|a| a.refused.is_empty())
+            .filter_map(|a| indexed_by(schema, live, &a.change)),
+    );
+    out
+}
+
+/// The `(entity, field)` whose blind indexes change `c` computes by
+/// backfill, if it does.
+fn indexed_by(schema: &Schema, live: &LiveShape, c: &Change) -> Option<(String, String)> {
+    match c {
+        Change::IndexSealedField { entity, field } => Some((entity.clone(), field.clone())),
+        Change::Normalize { entity, field, .. }
+            if schema
+                .native(entity)
+                .is_some_and(|e| reindexes(e, live, field)) =>
+        {
+            Some((entity.clone(), field.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// The physical column a re-normalized blind index (B10) is computed into
+/// beside the one the version before reads, until it takes its name.
+pub fn reindex_column(field: &ordo_schema::Field) -> String {
+    format!("{}$next", field.index_column())
+}
+
+/// The physical column B10 keeps the old blind index in after its end,
+/// written by every write, until its orphan is pruned.
+pub fn kept_index_column(field: &ordo_schema::Field) -> String {
+    format!("{}$prev", field.index_column())
+}
+
+/// The statements that make `incoming` the field's blind index and keep
+/// the one it replaces as `outgoing`, open to nulls, under a lock the
+/// caller holds. The field's unique and indexes are made again over the
+/// new index: renamed, they would follow the old one. `incoming` and
+/// `outgoing` may be one name (a swap).
+fn swap_index_columns(
+    e: &ordo_schema::Entity,
+    f: &ordo_schema::Field,
+    incoming: &str,
+    outgoing: &str,
+) -> String {
+    let q = ordo_schema::ddl::q;
+    let table = q(&e.name);
+    let bidx = f.index_column();
+    let swap = format!("{bidx}$swap");
+    let keys: Vec<Vec<String>> = e
+        .all_indexes()
+        .into_iter()
+        .filter(|k| k.contains(&f.name))
+        .collect();
+    let mut out = format!(
+        "ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {};\n",
+        q(&ordo_schema::diff::unique_name(&e.name, &f.name))
+    );
+    for key in &keys {
+        out.push_str(&format!(
+            "DROP INDEX IF EXISTS {};\n",
+            q(&ordo_schema::diff::index_name(&e.name, key))
+        ));
+    }
+    out.push_str(&format!(
+        "ALTER TABLE {table} RENAME COLUMN {b} TO {s};\n\
+         ALTER TABLE {table} RENAME COLUMN {i} TO {b};\n\
+         ALTER TABLE {table} RENAME COLUMN {s} TO {o};\n\
+         ALTER TABLE {table} ALTER COLUMN {o} DROP NOT NULL;\n\
+         ALTER TABLE {table} ALTER COLUMN {b} SET NOT NULL;\n",
+        b = q(&bidx),
+        s = q(&swap),
+        i = q(incoming),
+        o = q(outgoing),
+    ));
+    out.push_str(&sealed_unique_end(e, f, &bidx));
+    for key in &keys {
+        if let Ok(Some(sql)) = ordo_schema::ddl::index(e, key, false) {
+            out.push_str(&sql);
+        }
+    }
+    out
+}
+
+/// **A rollback across B10 reads a whole index** (owner, 2026-11-24, PR
+/// 80). For every blind index B10 kept (`$seals` kind `kept`) whose
+/// normalization is the one `schema` declares, the kept index and the
+/// field's index trade places under the `"$renames"` lock, and the row
+/// records the normalization of the index now kept: `leaving`'s, the
+/// version that served before. Every write kept both current, so `==`
+/// under `schema` finds every row. Run before an activation's gate, and by
+/// a node before it serves a tenant with a database of its own on a pin
+/// (`crate::spaces::Spaces::resolve`), so every path that moves a tenant
+/// back across B10, or forward again, reads a whole index.
+///
+/// The kept row's `live` says what the field's own index is under, and so
+/// what the kept one becomes. A row recorded before that column takes
+/// `leaving`'s declaration; with neither it is refused, not guessed. The
+/// normalization is asked again under the lock, so two nodes trading at
+/// once trade once. With `fence`, `(space, epoch)`, the space's pin fence
+/// rises to the epoch in the trade's transaction, so a node still on the
+/// pin before writes nothing more into the index it no longer reads. The
+/// fields traded, `entity.field`.
+pub async fn restore_kept_indexes(
+    pool: &Pool,
+    schema: &Schema,
+    leaving: Option<&Schema>,
+    fence: Option<(&str, i64)>,
+) -> Result<Vec<String>, String> {
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let mut done = Vec::new();
+    for k in kept_indexes_due(pool, schema)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        let (Some(e), entity, field) = (schema.native(&k.entity), &k.entity, &k.field) else {
+            continue;
+        };
+        let Some(f) = e.field(field) else {
+            continue;
+        };
+        let norm = f.normalize.clone().unwrap_or_default();
+        let other = match k.live.clone().or_else(|| {
+            leaving
+                .and_then(|s| s.native(entity))
+                .and_then(|e| e.field(field))
+                .map(|f| f.normalize.clone().unwrap_or_default())
+        }) {
+            Some(o) => o,
+            None => {
+                return Err(format!(
+                    "the kept index of `{entity}.{field}` does not record the normalization \
+                     of the index it would replace, so it is not traded in. `ordo rollback` \
+                     on the deployment trades it, or `ordo evolve --prune` drops it"
+                ))
+            }
+        };
+        let tx = pool.begin().await.map_err(|e| e.to_string())?;
+        let traded = async {
+            tx.rows(&format!(
+                "{};\nLOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n{};\n",
+                ordo_exec::overlay::RENAMES_DDL,
+                ordo_exec::overlay::SEALS_LIVE_DDL,
+            ))
+            .await?;
+            let now = tx
+                .rows(&format!(
+                    "SELECT coalesce(to_jsonb(s) ->> 'normalize', '') FROM \"$seals\" s WHERE \
+                     s.\"entity\" = {} AND s.\"field\" = {} AND s.\"kind\" = 'kept'",
+                    lit(entity),
+                    lit(field),
+                ))
+                .await?;
+            if now.first().and_then(|r| r.first().cloned().flatten()) != Some(norm.clone()) {
+                return Ok(false); // traded by another node meanwhile
+            }
+            tx.rows(&format!(
+                "{}UPDATE \"$seals\" SET \"normalize\" = {}, \"live\" = {} WHERE \"entity\" = \
+                 {} AND \"field\" = {} AND \"kind\" = 'kept';\n",
+                swap_index_columns(e, f, &k.target, &k.target),
+                lit(&other),
+                lit(&norm),
+                lit(entity),
+                lit(field),
+            ))
+            .await?;
+            if let Some((space, epoch)) = fence {
+                tx.rows(&format!(
+                    "{};\nINSERT INTO \"$pin_fence\" (\"space\", \"epoch\") VALUES ({}, {epoch}) \
+                     ON CONFLICT (\"space\") DO UPDATE SET \"epoch\" = \
+                     GREATEST(\"$pin_fence\".\"epoch\", EXCLUDED.\"epoch\");\n",
+                    ordo_exec::PIN_FENCE_DDL,
+                    lit(space),
+                ))
+                .await?;
+            }
+            Ok::<bool, ordo_exec::PoolError>(true)
+        }
+        .await;
+        match traded {
+            Ok(true) => {
+                tx.commit().await.map_err(|e| e.to_string())?;
+                done.push(format!("{entity}.{field}"));
+            }
+            Ok(false) => {
+                let _ = tx.rollback().await;
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(format!("the kept index of `{entity}.{field}`: {e}"));
+            }
+        }
+    }
+    Ok(done)
+}
+
+/// `prior` with each field in `kept` declaring the normalization `program`
+/// does: what a database keeping that index whole holds, so a diff from
+/// `prior` to `program` sees no `normalize` change to compute again. The
+/// node trades the kept index in before it serves `program`.
+pub fn as_kept(prior: &Schema, program: &Schema, kept: &[KeptIndex]) -> Schema {
+    let mut out = prior.clone();
+    for k in kept {
+        let declared = program
+            .native(&k.entity)
+            .and_then(|e| e.field(&k.field))
+            .and_then(|f| f.normalize.clone());
+        if let Some(f) = out
+            .entities
+            .iter_mut()
+            .find(|e| e.name == k.entity)
+            .and_then(|e| e.fields.iter_mut().find(|f| f.name == k.field))
+        {
+            f.normalize = declared;
+        }
+    }
+    out
+}
+
+/// One blind index B10 kept that `schema` reads: its normalization is the
+/// one `schema` declares, and its column is still there.
+#[derive(Debug, Clone)]
+pub struct KeptIndex {
+    pub entity: String,
+    pub field: String,
+    /// `<field>$bidx$prev`.
+    pub target: String,
+    /// The normalization the field's own index is under, when the row
+    /// records it.
+    pub live: Option<String>,
+}
+
+/// The kept blind indexes [`restore_kept_indexes`] would trade in for
+/// `schema`. Reads; changes nothing. Empty on a database with no `$seals`.
+/// The database's own error, so a caller can tell a busy pool apart.
+pub async fn kept_indexes_due(
+    pool: &Pool,
+    schema: &Schema,
+) -> Result<Vec<KeptIndex>, ordo_exec::PoolError> {
+    Ok(kept_due_in(&kept_indexes(pool).await?, schema))
+}
+
+/// Of `held` ([`kept_indexes`]), those `schema` reads.
+pub fn kept_due_in(held: &[(KeptIndex, String)], schema: &Schema) -> Vec<KeptIndex> {
+    held.iter()
+        .filter(|(k, norm)| {
+            schema
+                .native(&k.entity)
+                .and_then(|e| e.field(&k.field))
+                .filter(|f| f.sealed && f.indexed)
+                .map(|f| f.normalize.clone().unwrap_or_default())
+                .as_deref()
+                == Some(norm.as_str())
+        })
+        .map(|(k, _)| k.clone())
+        .collect()
+}
+
+/// Every blind index B10 kept on this database whose column is still
+/// there, with the normalization it is under, due or not.
+pub async fn kept_indexes(pool: &Pool) -> Result<Vec<(KeptIndex, String)>, ordo_exec::PoolError> {
+    let rows = match pool
+        .rows(
+            "SELECT s.\"entity\", s.\"field\", s.\"target\", coalesce(to_jsonb(s) ->> \
+             'normalize', ''), to_jsonb(s) ->> 'live', EXISTS (SELECT 1 FROM \
+             information_schema.columns c WHERE c.table_schema = current_schema() AND \
+             c.table_name = s.\"entity\" AND c.column_name = s.\"target\") FROM \"$seals\" s \
+             WHERE s.\"kind\" = 'kept'",
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(e) if e.is_missing_table() => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut due = Vec::new();
+    for r in rows {
+        let (Some(entity), Some(field), Some(target), Some(norm)) = (
+            r.first().cloned().flatten(),
+            r.get(1).cloned().flatten(),
+            r.get(2).cloned().flatten(),
+            r.get(3).cloned().flatten(),
+        ) else {
+            continue;
+        };
+        // Pruned: the column is gone, and the version before with it.
+        if !matches!(r.get(5).cloned().flatten().as_deref(), Some("t" | "true")) {
+            continue;
+        }
+        due.push((
+            KeptIndex {
+                entity,
+                field,
+                target,
+                live: r.get(4).cloned().flatten(),
+            },
+            norm,
+        ));
+    }
+    Ok(due)
+}
+
+/// **B10: a sealed indexed field's `normalize` changes.** Every row's blind
+/// index is computed again under the new normalization into
+/// `<field>$bidx$next`, beside the index the version before reads and
+/// writes. Recorded in `$seals` as kind `reindex`, with the normalization,
+/// so every write fills it too. Once verified, the end, under the lock:
+/// a row left without one refuses it; under `unique`, two rows of one
+/// space with one index refuse it (C4's collisions, found over the indexes
+/// themselves since the values are sealed); then the old index is dropped,
+/// the new one takes its name, and the field's constraints and indexes
+/// are made again over it.
+fn reindex_step(
+    c: &Change,
+    e: &ordo_schema::Entity,
+    field: &str,
+    version: &str,
+    from_normalize: Option<&str>,
+) -> Result<SealStep, Box<Refused>> {
+    let Some(f) = e.field(field) else {
+        return Err(Box::new(Refused {
+            change: c.clone(),
+            class: "mapping_invalid",
+            why: format!("`{}.{field}` is not declared", e.name),
+            run: None,
+        }));
+    };
+    let next = reindex_column(f);
+    let record = index_record(e, f, "reindex", &next, version);
+    let end = reindex_end(e, f, version, from_normalize, false);
+    Ok(SealStep {
+        backfill: BackfillStep {
+            code: "B10",
+            entity: e.name.clone(),
+            field: field.to_string(),
+            column: next,
+            column_ty: "bytea".into(),
+            mapping: FillMapping::BlindIndex,
+            sql: None,
+            audit: ordo_commandlog::BackfillAudit::Summarised,
+            sealing_from: None,
+            kept_plaintext: None,
+            indexing_from: Some(f.column()),
+        },
+        record,
+        after: vec![end],
+    })
+}
+
+/// **B10's end** (increment 13), under the `"$renames"` lock, once every
+/// row has its index under the new normalization in `<field>$bidx$next`.
+///
+/// On a tenant's database the new index takes the field's name, and the
+/// old one is kept as `<field>$bidx$prev`, written by every write under its
+/// own normalization (`$seals` kind `kept`) until its orphan is pruned: a
+/// move back trades it in ([`restore_kept_indexes`]) and reads a whole
+/// index.
+///
+/// With `keep_live`, on the deployment's own database, every space there
+/// serves the active version until the activation: the old index stays the
+/// field's, and the new one is kept as `<field>$bidx$prev` under the new
+/// normalization. The activation of the version declaring it trades it in
+/// for every space at once, so no space there reads the other index
+/// meanwhile.
+pub fn reindex_end(
+    e: &ordo_schema::Entity,
+    f: &ordo_schema::Field,
+    version: &str,
+    from_normalize: Option<&str>,
+    keep_live: bool,
+) -> String {
+    let table = ordo_schema::ddl::q(&e.name);
+    let field = f.name.as_str();
+    let next = reindex_column(f);
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let prev = kept_index_column(f);
+    let old = from_normalize.unwrap_or("").to_string();
+    let new = f.normalize.clone().unwrap_or_default();
+    let (kept, live) = if keep_live { (new, old) } else { (old, new) };
+    let mut end = format!(
+        "{};\n\
+         LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n\
+         DO $ordo$ BEGIN IF EXISTS (SELECT 1 FROM {table} WHERE {n} IS NULL) THEN RAISE \
+         EXCEPTION 'index_unfinished: a row of {name}.{field} was written outside the write \
+         path after verify and has no blind index; run the step again'; END IF; END $ordo$;\n",
+        ordo_exec::overlay::RENAMES_DDL,
+        n = ordo_schema::ddl::q(&next),
+        name = e.name,
+    );
+    if keep_live {
+        end.push_str(&format!(
+            "ALTER TABLE {table} RENAME COLUMN {n} TO {p};\n",
+            n = ordo_schema::ddl::q(&next),
+            p = ordo_schema::ddl::q(&prev),
+        ));
+    } else {
+        end.push_str(&swap_index_columns(e, f, &next, &prev));
+    }
+    end.push_str(&format!(
+        "{live_ddl};\n\
+         DELETE FROM \"$seals\" WHERE \"entity\" = {e} AND \"field\" = {fl} AND \"kind\" = \
+         'reindex';\n\
+         INSERT INTO \"$seals\" (\"entity\", \"field\", \"kind\", \"source\", \"target\", \
+         \"version\", \"normalize\", \"live\") VALUES ({e}, {fl}, 'kept', {s}, {p}, {v}, {o}, \
+         {l}) ON CONFLICT (\"entity\", \"field\", \"kind\") DO UPDATE SET \"target\" = \
+         EXCLUDED.\"target\", \"version\" = EXCLUDED.\"version\", \"normalize\" = \
+         EXCLUDED.\"normalize\", \"live\" = EXCLUDED.\"live\";\n",
+        live_ddl = ordo_exec::overlay::SEALS_LIVE_DDL,
+        e = lit(&e.name),
+        fl = lit(field),
+        s = lit(&f.column()),
+        p = lit(&prev),
+        v = lit(version),
+        o = lit(&kept),
+        l = lit(&live),
+    ));
+    end
+}
+
+/// A seal's statements (increment 13): its record in `$seals`, the
+/// backfill, and the end that lands once it verifies.
+struct SealStep {
+    backfill: BackfillStep,
+    record: Vec<String>,
+    after: Vec<String>,
+}
+
+/// The name `seal.keep_plaintext` keeps a sealed field's plaintext column
+/// under, orphaned.
+pub fn kept_plaintext_column(field: &ordo_schema::Field) -> String {
+    format!("{}$plaintext", field.column())
+}
+
+/// The backfill for a B2 or B5 change the plan fills, or the refusal.
+fn backfill_step(
+    c: &Change,
+    e: &ordo_schema::Entity,
+    field: &str,
+    fill: &Fill,
+) -> Result<BackfillStep, Box<Refused>> {
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    let Some(f) = e.field(field) else {
+        return Err(refuse(
+            "mapping_invalid",
+            format!("`{}.{field}` is not declared", e.name),
+        ));
+    };
+    if f.sealed || f.indexed {
+        return Err(refuse(
+            "sealed_backfill_not_built",
+            format!(
+                "`{}.{field}` is sealed: a sealed backfill needs a key lease per space and no \
+                 plaintext dual write (plan-versions.md increment 13). Fill it in a version \
+                 before the one that seals it",
+                e.name
+            ),
+        ));
+    }
+    if f.is_content() {
+        return Err(refuse(
+            "mapping_invalid",
+            format!(
+                "`{}.{field}` is a file: a handle is minted by an upload, never computed",
+                e.name
+            ),
+        ));
+    }
+    let sql = match &fill.mapping {
+        FillMapping::Expr(src) => {
+            let expr = ordo_syntax::parse_expr(src).map_err(|err| {
+                refuse(
+                    "mapping_invalid",
+                    format!("the mapping `{src}` does not parse: {err}"),
+                )
+            })?;
+            // The row's own fields, without the one being filled: it holds
+            // nothing yet.
+            let fields: Vec<ordo_schema::Field> = e
+                .fields
+                .iter()
+                .filter(|x| x.name != field)
+                .cloned()
+                .collect();
+            let sql =
+                ordo_schema::check::render_mapping(&e.name, &fields, &expr).map_err(|err| {
+                    refuse("mapping_invalid", format!("{}: {}", err.code, err.message))
+                })?;
+            if money_places(f).is_some() {
+                if let Some((class, why)) = mapping_fits(&e.name, f, &fields, &expr, src, "") {
+                    return Err(refuse(class, why));
+                }
+            }
+            Some(stored_sql(f, &sql))
+        }
+        FillMapping::Function { .. } => None,
+        FillMapping::Seal
+        | FillMapping::BlindIndex
+        | FillMapping::Copy(_)
+        | FillMapping::Part { .. }
+        | FillMapping::Merge { .. } => {
+            return Err(refuse(
+                "mapping_invalid",
+                format!("`seal` is not a fill: a stored plan seals `{}.{field}` when the version declares it `sealed`", e.name),
+            ))
+        }
+    };
+    if fill.audit == ordo_commandlog::BackfillAudit::Images
+        && e.fields.iter().any(|x| x.sealed || x.is_content())
+    {
+        return Err(refuse(
+            "backfill_images_unsupported",
+            format!(
+                "`{}` has a sealed or file field, and full images of its rows need the custody \
+                 the write path uses. Leave `--audit-images` off for `{}.{field}`: the \
+                 summarised record is the default",
+                e.name, e.name
+            ),
+        ));
+    }
+    Ok(BackfillStep {
+        code: c.code(),
+        entity: e.name.clone(),
+        field: field.to_string(),
+        column: f.column(),
+        column_ty: ordo_schema::ddl::column_ty(f),
+        mapping: fill.mapping.clone(),
+        sql,
+        audit: fill.audit,
+        sealing_from: None,
+        kept_plaintext: None,
+        indexing_from: None,
+    })
 }
 
 /// Decide, for every assessed change, the statements to send or the
@@ -1713,12 +3896,44 @@ pub async fn triage_with(
     choices: &Choices,
     version: &str,
 ) -> Result<Triaged, String> {
+    // Rows in each live table a change touches, read once per entity. A
+    // table this apply creates holds none.
+    let mut rows: BTreeMap<String, i64> = BTreeMap::new();
+    for a in assessed.iter().filter(|a| a.refused.is_empty()) {
+        let Some(e) = schema.native(a.change.entity()) else {
+            continue;
+        };
+        if live.table(&e.name).is_some() && !rows.contains_key(&e.name) {
+            let n = migrate::extent(pool, &e.name)
+                .await
+                .map_err(|x| format!("counting `{}`: {x}", e.name))?
+                .rows;
+            rows.insert(e.name.clone(), n);
+        }
+    }
+    triage_counted(schema, live, assessed, choices, version, &rows)
+}
+
+/// [`triage_with`], given the rows each live table holds (`rows`; a table
+/// not named holds none). Reads nothing. A stored plan renders its step
+/// with this against an empty database of the version it starts from
+/// (`crate::evolve`), so the rendering is the same in every environment.
+pub fn triage_counted(
+    schema: &Schema,
+    live: &LiveShape,
+    assessed: &[Assessed],
+    choices: &Choices,
+    version: &str,
+    rows: &BTreeMap<String, i64>,
+) -> Result<Triaged, String> {
     // The columns this apply brings into existence, `(entity, column)`.
     // A constraint over only these constrains no existing data.
     let mut arriving: BTreeSet<(String, String)> = BTreeSet::new();
     for a in assessed {
         match &a.change {
-            Change::AddEntity { entity } => {
+            Change::AddEntity { entity }
+            | Change::RenameEntity { entity, .. }
+            | Change::SplitEntity { entity, .. } => {
                 if let Some(e) = schema.native(entity) {
                     for pc in ordo_schema::ddl::physical_columns(e) {
                         arriving.insert((entity.clone(), pc.name));
@@ -1726,7 +3941,8 @@ pub async fn triage_with(
                 }
             }
             Change::AddOptionalField { entity, field }
-            | Change::AddConstantField { entity, field, .. } => {
+            | Change::AddConstantField { entity, field, .. }
+            | Change::RenameField { entity, field, .. } => {
                 if let Some(f) = schema.native(entity).and_then(|e| e.field(field)) {
                     arriving.insert((entity.clone(), f.column()));
                     if f.indexed {
@@ -1734,12 +3950,50 @@ pub async fn triage_with(
                     }
                 }
             }
+            // A new required field a stored step fills by an expression:
+            // its column arrives empty, and a unique over it is held to the
+            // close and checked against the filled rows then (11b part 4).
+            // A split's or a merge's new columns arrive empty too.
+            Change::MoveFields { entity, fields, .. } => {
+                if let Some(e) = schema.native(entity) {
+                    for f in fields {
+                        if let Some(f) = e.field(&f.name) {
+                            arriving.insert((entity.clone(), f.column()));
+                        }
+                    }
+                }
+            }
+            Change::MapFields { entity, to, .. } => {
+                if let Some(e) = schema.native(entity) {
+                    for t in to {
+                        if let Some(f) = e.field(t) {
+                            arriving.insert((entity.clone(), f.column()));
+                        }
+                    }
+                }
+            }
+            Change::AddRequiredField { entity, field }
+                if matches!(
+                    choices.fill_for(entity, field).map(|f| &f.mapping),
+                    Some(FillMapping::Expr(_))
+                ) =>
+            {
+                if let Some(f) = schema.native(entity).and_then(|e| e.field(field)) {
+                    arriving.insert((entity.clone(), f.column()));
+                }
+            }
             _ => {}
         }
     }
-    let mut rows: BTreeMap<String, i64> = BTreeMap::new();
+    // The sealed fields whose blind index a stored step computes (B8) or
+    // computes again (B10): a `unique` they gain lands at that backfill's
+    // end, over the indexes it computed (C1 over blind indexes).
+    let indexing = indexed_by_backfill(schema, live, assessed, choices);
     let mut steps = Vec::new();
     let mut refused = Vec::new();
+    let mut backfills = Vec::new();
+    let mut after = Vec::new();
+    let mut maps = Vec::new();
     let ddl_err = |x: ordo_schema::SchemaError| format!("{}: {}", x.code, x.message);
 
     for a in assessed {
@@ -1759,20 +4013,9 @@ pub async fn triage_with(
             refused.push(not_built(c));
             continue;
         };
-        // Rows in the live table, read once per entity. A table this apply
-        // creates holds none.
+        // Rows in the live table. A table this apply creates holds none.
         let live_rows = if live.table(&e.name).is_some() {
-            match rows.get(&e.name) {
-                Some(n) => *n,
-                None => {
-                    let n = migrate::extent(pool, &e.name)
-                        .await
-                        .map_err(|x| format!("counting `{}`: {x}", e.name))?
-                        .rows;
-                    rows.insert(e.name.clone(), n);
-                    n
-                }
-            }
+            rows.get(&e.name).copied().unwrap_or(0)
         } else {
             0
         };
@@ -1875,6 +4118,9 @@ pub async fn triage_with(
                     ordo_schema::ddl::q(object)
                 )),
             }),
+            // Folded into the backfill's end that computes its indexes.
+            Change::AddUnique { field, .. }
+                if indexing.contains(&(e.name.clone(), field.clone())) => {}
             Change::AddUnique { field, column, .. } => {
                 let Some(f) = e.field(field) else {
                     return Err(format!("`{}.{field}` is not declared", e.name));
@@ -1945,6 +4191,83 @@ pub async fn triage_with(
                     steps.extend(places_steps(c, e, choice, version)?.into_iter().map(alter));
                 }
             },
+            Change::RenameField { from, field, .. } if choices.renames_backfill => {
+                match rename_backfill(c, e, live, from, field, version) {
+                    Err(r) => refused.push(*r),
+                    Ok((expand, b, close)) => {
+                        steps.extend(expand.into_iter().map(alter));
+                        if let Some(sql) = close {
+                            after.push(Step {
+                                code: c.code(),
+                                phase: Phase::Alter,
+                                sql,
+                                index: None,
+                                constraint: None,
+                                table: e.name.clone(),
+                            });
+                        }
+                        backfills.push(b);
+                    }
+                }
+            }
+            Change::RenameField { from, field, .. } => {
+                steps.extend(
+                    rename_field_steps(e, live, from, field, version)?
+                        .into_iter()
+                        .map(alter),
+                );
+            }
+            Change::MapFields { from, to, .. } => match map_step(c, e, live, from, to, choices) {
+                Err(r) => refused.push(*r),
+                Ok((expand, bfs, close, m)) => {
+                    steps.extend(expand.into_iter().map(alter));
+                    for sql in close {
+                        after.push(Step {
+                            code: c.code(),
+                            phase: Phase::Alter,
+                            sql,
+                            index: None,
+                            constraint: None,
+                            table: e.name.clone(),
+                        });
+                    }
+                    backfills.extend(bfs);
+                    maps.push(m);
+                }
+            },
+            Change::RenameEntity { from, .. } => {
+                match rename_entity_steps(c, schema, e, live, from, version, choices) {
+                    Err(r) => refused.push(*r),
+                    Ok((s, b, a)) => {
+                        steps.extend(s);
+                        backfills.extend(b);
+                        after.extend(a);
+                    }
+                }
+            }
+            Change::SplitEntity { from, fields, .. } => {
+                match split_entity_steps(c, schema, e, from, fields, version, choices) {
+                    Err(r) => refused.push(*r),
+                    Ok((s, b, a)) => {
+                        steps.extend(s);
+                        backfills.extend(b);
+                        after.extend(a);
+                    }
+                }
+            }
+            Change::MoveFields {
+                fields,
+                merge,
+                source,
+                ..
+            } => match move_steps(c, schema, e, live, source, fields, *merge, version, choices) {
+                Err(r) => refused.push(*r),
+                Ok((s, b, a)) => {
+                    steps.extend(s);
+                    backfills.extend(b);
+                    after.extend(a);
+                }
+            },
             Change::AddCheck { object, .. } => {
                 let Some(chk) = e.checks.iter().find(|k| k.name == *object) else {
                     return Err(format!("`{object}` is not a check `{}` declares", e.name));
@@ -1956,11 +4279,2388 @@ pub async fn triage_with(
                 );
                 steps.extend(not_valid_then_validate(c, e, object, &sql));
             }
+            // A required field a stored plan fills (10b): expand with the
+            // column nullable, backfill, then `SET NOT NULL` once verified.
+            Change::AddRequiredField { field, .. } | Change::RequireField { field, .. }
+                if choices.fill_for(&e.name, field).is_some() =>
+            {
+                let fill = choices
+                    .fill_for(&e.name, field)
+                    .expect("matched just above");
+                match backfill_step(c, e, field, fill) {
+                    Err(r) => refused.push(*r),
+                    Ok(b) => {
+                        if matches!(c, Change::AddRequiredField { .. }) {
+                            steps.push(alter(format!(
+                                "ALTER TABLE {} ADD COLUMN {} {};\n",
+                                ordo_schema::ddl::q(&e.name),
+                                ordo_schema::ddl::q(&b.column),
+                                b.column_ty
+                            )));
+                        }
+                        after.push(Step {
+                            code: c.code(),
+                            phase: Phase::Alter,
+                            sql: format!(
+                                "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL;\n",
+                                ordo_schema::ddl::q(&e.name),
+                                ordo_schema::ddl::q(&b.column)
+                            ),
+                            index: None,
+                            constraint: None,
+                            table: e.name.clone(),
+                        });
+                        backfills.push(b);
+                    }
+                }
+            }
+            // A field that becomes sealed, in a stored plan (increment 13):
+            // expand with a `bytea` beside the plaintext, seal every row
+            // through the worker, then drop the plaintext once it verifies
+            // (D9). No plaintext dual write.
+            Change::SealField { field, .. } if choices.stored => {
+                let keep = choices.keeps_plaintext(&e.name, field);
+                match seal_step(c, e, live, field, version, keep) {
+                    Err(r) => refused.push(*r),
+                    Ok(SealStep {
+                        backfill: b,
+                        record,
+                        after: contract,
+                    }) => {
+                        steps.extend(record.into_iter().map(alter));
+                        steps.push(alter(format!(
+                            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} bytea;\n",
+                            ordo_schema::ddl::q(&e.name),
+                            ordo_schema::ddl::q(&b.column),
+                        )));
+                        after.extend(contract.into_iter().map(|sql| Step {
+                            code: c.code(),
+                            phase: Phase::Alter,
+                            sql,
+                            index: None,
+                            constraint: None,
+                            table: e.name.clone(),
+                        }));
+                        backfills.push(b);
+                    }
+                }
+            }
+            // A sealed field that gains its blind index, in a stored plan
+            // (B8, increment 13): expand the index column open to nulls,
+            // compute every row's index through the worker, then make it
+            // required once it verifies.
+            Change::IndexSealedField { field, .. } if choices.stored => {
+                match index_step(c, e, live, field, version) {
+                    Err(r) => refused.push(*r),
+                    Ok(SealStep {
+                        backfill: b,
+                        record,
+                        after: contract,
+                    }) => {
+                        steps.extend(record.into_iter().map(alter));
+                        steps.push(alter(format!(
+                            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} bytea;\n",
+                            ordo_schema::ddl::q(&e.name),
+                            ordo_schema::ddl::q(&b.column),
+                        )));
+                        after.extend(contract.into_iter().map(|sql| Step {
+                            code: c.code(),
+                            phase: Phase::Alter,
+                            sql,
+                            index: None,
+                            constraint: None,
+                            table: e.name.clone(),
+                        }));
+                        backfills.push(b);
+                    }
+                }
+            }
+            // B10 in a stored plan (increment 13): every row's blind index
+            // is computed again under the new normalization.
+            Change::Normalize { field, from, .. }
+                if choices.stored && reindexes(e, live, field) =>
+            {
+                match reindex_step(c, e, field, version, from.as_deref()) {
+                    Err(r) => refused.push(*r),
+                    Ok(SealStep {
+                        backfill: b,
+                        record,
+                        after: contract,
+                    }) => {
+                        steps.extend(record.into_iter().map(alter));
+                        steps.push(alter(format!(
+                            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} bytea;\n",
+                            ordo_schema::ddl::q(&e.name),
+                            ordo_schema::ddl::q(&b.column),
+                        )));
+                        after.extend(contract.into_iter().map(|sql| Step {
+                            code: c.code(),
+                            phase: Phase::Alter,
+                            sql,
+                            index: None,
+                            constraint: None,
+                            table: e.name.clone(),
+                        }));
+                        backfills.push(b);
+                    }
+                }
+            }
+            // No blind index is stored under the old normalization (a field
+            // with none, or one a B8 in this step computes under the new):
+            // nothing to compute again.
+            Change::Normalize { field, .. } if !reindexes(e, live, field) => {}
+            Change::Normalize { entity, field, .. } => refused.push(Refused {
+                change: c.clone(),
+                class: "reindex_needs_stored_plan",
+                why: format!(
+                    "sealed `{entity}.{field}` changes its `normalize`. Every row's blind \
+                         index is computed again under it by the backfill worker, with a key \
+                         lease per space (plan-versions.md increment 13, B10). `ordo apply` does \
+                         not run that. Store the version with `ordo apply --no-activate`, then \
+                         run the step with `ordo evolve --from <version> --to <version> --run`"
+                ),
+                run: None,
+            }),
+            Change::IndexSealedField { entity, field } => refused.push(Refused {
+                change: c.clone(),
+                class: "index_needs_stored_plan",
+                why: format!(
+                    "sealed `{entity}.{field}` gains a blind index. Every row's sealed value is \
+                     opened under its space's key and its index written by the backfill worker \
+                     (plan-versions.md increment 13). `ordo apply` does not run that. Store the \
+                     version with `ordo apply --no-activate`, then run the step with \
+                     `ordo evolve --from <version> --to <version> --run`"
+                ),
+                run: None,
+            }),
+            Change::SealField { entity, field } => refused.push(Refused {
+                change: c.clone(),
+                class: "seal_needs_stored_plan",
+                why: format!(
+                    "`{entity}.{field}` becomes sealed. Every row's plaintext is sealed under its \
+                     space's key by the backfill worker, then the plaintext column is dropped \
+                     (plan-versions.md increment 13). `ordo apply` does not run that. Store the \
+                     version with `ordo apply --no-activate`, then run the step with \
+                     `ordo evolve --from <version> --to <version> --run`"
+                ),
+                run: None,
+            }),
             _ => refused.push(not_built(c)),
         }
     }
+    // **Held to the close** (increment 11b part 4, `plan-backfill-dual-
+    // writes.md` §4): in a step with dual writes the version before keeps
+    // writing until the soaks close, so a unique or a check the new version
+    // adds lands then, once the rows are checked against it.
+    let mut held = Vec::new();
+    let dual = backfills
+        .iter()
+        .any(|b| b.sql.is_some() && b.sealing_from.is_none() && b.indexing_from.is_none());
+    for a in assessed.iter().filter(|a| a.refused.is_empty()) {
+        let Some(e) = schema.native(a.change.entity()) else {
+            continue;
+        };
+        let stated = match &a.change {
+            Change::AddUnique { object, .. }
+            | Change::AddCompositeUnique { object, .. }
+            | Change::AddCheck { object, .. } => choices.held.contains(object),
+            _ => false,
+        };
+        if !dual && !stated {
+            continue;
+        }
+        let h = match &a.change {
+            Change::AddUnique {
+                field,
+                object,
+                column,
+                ..
+            } => Held {
+                entity: e.name.clone(),
+                name: object.clone(),
+                kind: HeldKind::Unique {
+                    fields: vec![field.clone()],
+                    columns: vec![column.clone()],
+                    distinct_nulls: e.field(field).is_some_and(|f| f.indexed),
+                },
+            },
+            Change::AddCompositeUnique { key, object, .. } => Held {
+                entity: e.name.clone(),
+                name: object.clone(),
+                kind: HeldKind::Unique {
+                    fields: key.clone(),
+                    columns: resolve_columns(schema, &e.name, key),
+                    distinct_nulls: false,
+                },
+            },
+            Change::AddCheck {
+                object,
+                source,
+                sql,
+                ..
+            } => Held {
+                entity: e.name.clone(),
+                name: object.clone(),
+                kind: HeldKind::Check {
+                    source: source.clone(),
+                    sql: sql.clone(),
+                },
+            },
+            _ => continue,
+        };
+        // Its statements, when the triage made them, wait for the close.
+        let code = a.change.code();
+        let named = ordo_schema::ddl::q(&h.name);
+        let mine = |s: &Step| s.code == code && s.table == e.name && s.sql.contains(&named);
+        if !steps.iter().any(mine) {
+            continue;
+        }
+        let (moved, kept): (Vec<Step>, Vec<Step>) = steps.into_iter().partition(mine);
+        steps = kept;
+        after.extend(moved);
+        held.push(h);
+    }
     steps.sort_by_key(|s| s.phase);
-    Ok(Triaged { steps, refused })
+    after.sort_by_key(|s| s.phase);
+    Ok(Triaged {
+        steps,
+        refused,
+        backfills,
+        after,
+        held,
+        maps,
+    })
+}
+
+/// The statements of a declared rename (§5 B4, `plan-syntax-additions.md`
+/// §5), as `ordo apply` makes it: the new column, open to nulls; the old
+/// column's values copied into it; then the new column's `NOT NULL`. The
+/// old column is kept with its `NOT NULL`, so the version before still
+/// loads over this database and a rollback by `ordo apply` is not refused.
+/// The serving version still reads it until its tenants move. Never
+/// `ALTER … RENAME`, which would drift the serving version the instant it
+/// landed. The new column's unique, reference and value set are their own
+/// changes in the same step.
+///
+/// **No write is lost between the copy and the pin switch.** Both
+/// versions' writes reach both columns through the host's dual writes
+/// (increment 11a, [`crate::dual_writes::rename_overlays`]): a write on the
+/// version before also sets the new column from the old one, and a write
+/// on the new version sets the old column from the new one, each in the
+/// write's own transaction. An insert that does not name a required
+/// column takes its default first: the old column keeps its own, or gets
+/// the new field's when it has none (`prev_default_required` refuses a
+/// rename with neither).
+pub fn rename_field_steps(
+    e: &ordo_schema::Entity,
+    live: &LiveShape,
+    from: &str,
+    field: &str,
+    version: &str,
+) -> Result<Vec<String>, String> {
+    let Some(f) = e.field(field) else {
+        return Err(format!("`{}.{field}` is not declared", e.name));
+    };
+    let mut open = e.clone();
+    for g in open.fields.iter_mut().filter(|g| g.name == field) {
+        g.optional = true;
+    }
+    let of = open
+        .field(field)
+        .ok_or_else(|| format!("`{}.{field}` is not declared", e.name))?;
+    let mut out = rename_recorded(e, f, from, version);
+    out.extend(
+        ordo_schema::ddl::add_column(&open, of)
+            .map_err(|x| format!("{}: {}", x.code, x.message))?,
+    );
+    out.extend(rename_old_default(e, f, live, from)?);
+    let t = ordo_schema::ddl::q(&e.name);
+    let new = ordo_schema::ddl::q(&f.column());
+    let old = ordo_schema::ddl::q(from);
+    out.push(format!("UPDATE {t} SET {new} = {old};\n"));
+    if !f.optional {
+        out.push(format!(
+            "ALTER TABLE {t} ALTER COLUMN {new} SET NOT NULL;\n"
+        ));
+    }
+    Ok(out)
+}
+
+/// **The rename recorded in the database it changes** (`$renames`,
+/// [`ordo_exec::overlay::RENAMES_DDL`]), before its new column: the table,
+/// its exclusive lock, and the rename's row. The lock waits for every write
+/// that read the table before it, and every write after reads the row, so
+/// no write lands between the new column and its dual writes, whatever a
+/// node has read. [`execute`] runs these first in the step's transaction,
+/// before any table's lock, in the order every write takes them.
+fn rename_recorded(
+    e: &ordo_schema::Entity,
+    f: &ordo_schema::Field,
+    from: &str,
+    version: &str,
+) -> Vec<String> {
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    vec![
+        format!("{};\n", ordo_exec::overlay::RENAMES_DDL),
+        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n".to_string(),
+        format!(
+            "INSERT INTO \"$renames\" (\"entity\", \"from\", \"field\", \"column\", \"version\") \
+             VALUES ({}, {}, {}, {}, {}) ON CONFLICT (\"entity\", \"from\") DO UPDATE SET \
+             \"field\" = EXCLUDED.\"field\", \"column\" = EXCLUDED.\"column\", \
+             \"version\" = EXCLUDED.\"version\";\n",
+            lit(&e.name),
+            lit(from),
+            lit(&f.name),
+            lit(&f.column()),
+            lit(version)
+        ),
+    ]
+}
+
+/// **An entity rename** (`(prev: from)`, §5 B4): the new table made as the
+/// program declares it, every row of the old one copied into it, and both
+/// kept current until the rename lands. The step:
+///
+/// - records the rename in `$renames` (empty `field`), under its exclusive
+///   lock, first: every write after it copies what it writes into the
+///   other name's table (`ordo_exec::overlay::entity_mirrors`), and every
+///   write before it has committed;
+/// - makes the new table, copies the rows, then its uniques and indexes;
+/// - adds the new table's references `NOT VALID`, validated after the
+///   step, so the order the rows were copied in never matters;
+/// - makes each reference another table holds into the old table checked
+///   at commit (`DEFERRABLE INITIALLY DEFERRED`): a write by the new
+///   version adds its row to the new table, and the dual write adds it to
+///   the old one only after the write's own statements.
+///
+/// The old table is kept whole, so the version before still serves over
+/// the database and a revert is a pin switch. The rename lands at a soak's
+/// close, or when a version drops the mark ([`land_entity_rename`]).
+///
+/// Refused: a sealed field (`rename_entity_sealed`: its ciphertext is
+/// bound to the entity's name), and a column the old table does not hold
+/// (`rename_entity_reshaped`: rename in one version, change the fields in
+/// the next). Ids keep the key they were minted with.
+fn rename_entity_steps(
+    c: &Change,
+    schema: &Schema,
+    e: &ordo_schema::Entity,
+    live: &LiveShape,
+    from: &str,
+    version: &str,
+    choices: &Choices,
+) -> Result<EntityRenameParts, Box<Refused>> {
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    if let Some(f) = e.fields.iter().find(|f| f.sealed || f.private) {
+        return Err(refuse(
+            "rename_entity_sealed",
+            format!(
+                "`{}.{}` is sealed, and a sealed value is bound to its entity's name, so a copy \
+                 under `{}` could not be opened. Keep the name `{from}`, or unseal `{}` in a \
+                 version before the rename",
+                e.name, f.name, e.name, f.name
+            ),
+        ));
+    }
+    if e.acl_levels.is_some() {
+        return Err(refuse(
+            "rename_entity_acl",
+            format!(
+                "`{}` declares `acl`, whose access rows live in an entity named after it \
+                 (`{from}Access`). Renaming it would leave every share behind under the old \
+                 name. Keep the name `{from}`",
+                e.name
+            ),
+        ));
+    }
+    let Some(old) = live.table(from) else {
+        return Err(refuse(
+            "mapping_invalid",
+            format!("the database holds no table `{from}` to rename"),
+        ));
+    };
+    let columns: Vec<String> = ordo_schema::ddl::physical_columns(e)
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+    let missing: Vec<String> = columns
+        .iter()
+        .filter(|c| !old.columns.contains_key(*c))
+        .map(|c| format!("`{c}`"))
+        .collect();
+    if !missing.is_empty() {
+        return Err(refuse(
+            "rename_entity_reshaped",
+            format!(
+                "`{}` declares {} that `{from}` does not hold. Both names hold the same rows \
+                 while the rename runs, so the step that renames an entity keeps its fields. \
+                 Rename it in one version, and change its fields in the next",
+                e.name,
+                missing.join(", ")
+            ),
+        ));
+    }
+    let ddl_err = |x: ordo_schema::SchemaError| {
+        refuse("mapping_invalid", format!("{}: {}", x.code, x.message))
+    };
+    let step = |phase: Phase, table: &str, sql: String| Step {
+        code: c.code(),
+        phase,
+        sql,
+        index: None,
+        constraint: None,
+        table: table.to_string(),
+    };
+    let mut out: Vec<Step> = entity_rename_recorded(&e.name, from, version)
+        .into_iter()
+        .map(|sql| step(Phase::Alter, &e.name, sql))
+        .collect();
+    out.push(step(
+        Phase::Table,
+        &e.name,
+        ordo_schema::ddl::create_table(e).map_err(ddl_err)?,
+    ));
+    // `ordo apply` copies in the step. A stored step copies with the
+    // backfill worker, in chunks, while `$renames` keeps every row written
+    // meanwhile current in both tables.
+    // **Only a stored step renames an entity**: its copy runs in chunks with
+    // the backfill worker while `$renames` keeps every write current in
+    // both tables. `ordo apply` runs no worker, and a copy in its step would
+    // hold every write for its length.
+    if !choices.renames_backfill {
+        return Err(refuse(
+            "rename_entity_needs_stored_plan",
+            format!(
+                "`{}` renames `{from}`. The rows are copied in chunks by the backfill worker, \
+                 with every write kept in both tables meanwhile. `ordo apply` does not run that. \
+                 Store the version with `ordo apply --no-activate`, then run the step with \
+                 `ordo evolve --from <version> --to <version> --run`, or move tenants with \
+                 `ordo evolve --tenant <id>`",
+                e.name
+            ),
+        ));
+    }
+    let stored = true;
+    let copy = vec![BackfillStep {
+        code: c.code(),
+        entity: e.name.clone(),
+        field: String::new(),
+        column: String::new(),
+        column_ty: String::new(),
+        mapping: FillMapping::Copy(from.to_string()),
+        sql: None,
+        audit: ordo_commandlog::BackfillAudit::Summarised,
+        sealing_from: None,
+        kept_plaintext: None,
+        indexing_from: None,
+    }];
+    let mut later = Vec::new();
+    for f in &e.fields {
+        out.extend(ordo_schema::ddl::unique(e, f).map(|sql| step(Phase::Alter, &e.name, sql)));
+    }
+    for key in &e.unique_keys {
+        out.extend(
+            ordo_schema::ddl::composite_unique(e, key)
+                .map_err(ddl_err)?
+                .map(|sql| step(Phase::Alter, &e.name, sql)),
+        );
+    }
+    for key in &e.all_indexes() {
+        out.extend(
+            ordo_schema::ddl::index(e, key, false)
+                .map_err(ddl_err)?
+                .map(|sql| step(Phase::Alter, &e.name, sql)),
+        );
+    }
+    for f in &e.fields {
+        if let Some(sql) = ordo_schema::ddl::foreign_key(schema, e, f) {
+            // A reference into the table being copied (its own tree) waits
+            // for the copy: a chunk may hold a row before its parent.
+            let into_itself =
+                matches!(&f.ty, ordo_schema::FieldTy::Ref { target, .. } if *target == e.name);
+            if stored && into_itself {
+                later.push(sql);
+                continue;
+            }
+            out.extend(not_valid_then_validate(
+                c,
+                e,
+                &format!("{}${}$fk", e.name, f.name),
+                &sql,
+            ));
+        }
+    }
+    for (g, fk) in references_into(schema, &e.name) {
+        if live.table(&g).is_some_and(|t| t.constraints.contains(&fk)) {
+            out.push(step(
+                Phase::Alter,
+                &g,
+                format!(
+                    "ALTER TABLE {} ALTER CONSTRAINT {} DEFERRABLE INITIALLY DEFERRED;\n",
+                    ordo_schema::ddl::q(&g),
+                    ordo_schema::ddl::q(&fk)
+                ),
+            ));
+        }
+    }
+    let after = later
+        .into_iter()
+        .map(|sql| step(Phase::Alter, &e.name, sql))
+        .collect();
+    Ok((out, copy, after))
+}
+
+/// **An entity split** (B13; `forward-gaps` ask 8, owner: *"declared
+/// correspondence tool based on prev"*): `part (prev: whole)` while `whole`
+/// stays declared. The step:
+///
+/// - records the split in `$renames` (`field` [`ordo_exec::overlay::SPLIT_FIELD`],
+///   `column` the link, `split` the part's key and moved columns), under its
+///   exclusive lock, first: every write after it keeps both shapes current
+///   (`ordo_exec::overlay::split_mirrors`);
+/// - makes the part's table, its uniques and indexes, and its references
+///   `NOT VALID` then validated, the link checked at commit
+///   (`DEFERRABLE INITIALLY DEFERRED`) so the version before can delete a
+///   whole row and the overlay its part row after;
+/// - copies one part row per whole row with the backfill worker, in
+///   chunks: the rule `--correspond <part>.<link>` states.
+///
+/// The whole keeps the moved columns, kept current, orphaned at the close,
+/// when the link is checked at once again.
+///
+/// Refused, each naming the fix: no stored plan (`split_needs_stored_plan`);
+/// no rule (`split_rule_required`); a link that is not `-> whole owned
+/// unique` and required (`split_entity_link`); a part field the whole does
+/// not hold the same way, or a moved field the whole still declares
+/// (`split_entity_reshaped`); a sealed or file field (`split_entity_sealed`);
+/// a moved field required with no default (`split_default_required`: the
+/// new version's inserts of the whole do not name it); a part with `acl`
+/// or a tree (`split_entity_acl`).
+fn split_entity_steps(
+    c: &Change,
+    schema: &Schema,
+    e: &ordo_schema::Entity,
+    whole: &str,
+    moved: &[ordo_schema::Field],
+    version: &str,
+    choices: &Choices,
+) -> Result<EntityRenameParts, Box<Refused>> {
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    let part = &e.name;
+    let candidate = e
+        .fields
+        .iter()
+        .find(|f| matches!(&f.ty, ordo_schema::FieldTy::Ref { target, .. } if target == whole))
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| whole.to_string());
+    if !choices.renames_backfill {
+        return Err(refuse(
+            "split_needs_stored_plan",
+            format!(
+                "`{part}` is split off `{whole}`. Its rows are copied in chunks by the backfill \
+                 worker, with every write kept in both shapes meanwhile. `ordo apply` does not \
+                 run that. Store the version with `ordo apply --no-activate`, then move tenants \
+                 with `ordo evolve --from <version> --to <version> --correspond \
+                 {part}.{candidate}` and `ordo evolve --tenant <id>`"
+            ),
+        ));
+    }
+    let Some(link_name) = choices.correspond.get(part) else {
+        return Err(refuse(
+            "split_rule_required",
+            format!(
+                "`{part}` takes its rows from `{whole}`, and Ordo does not guess how they \
+                 correspond. State it: `--correspond {part}.{candidate}`, one `{part}` row per \
+                 `{whole}` row, its `{candidate}` naming it"
+            ),
+        ));
+    };
+    if let Some(r) = choices.rules_for(part).first() {
+        return Err(refuse(
+            "correspond_rule_not_built",
+            format!(
+                "`{}`: a split makes one `{part}` row per `{whole}` row, so a pick or a \
+                 condition has nothing to choose from. State the plain rule: `--correspond \
+                 {part}.{link_name}`",
+                r.text()
+            ),
+        ));
+    }
+    let link_fix =
+        format!("declare the link in `{part}`: `{link_name} -> {whole} owned unique`, required");
+    let Some(link) = e.field(link_name) else {
+        return Err(refuse(
+            "split_entity_link",
+            format!("`{part}` declares no `{link_name}`; {link_fix}"),
+        ));
+    };
+    let owned_ref = matches!(&link.ty,
+        ordo_schema::FieldTy::Ref { target, owned: true, .. } if target == whole);
+    if !owned_ref || !link.unique || link.optional {
+        return Err(refuse(
+            "split_entity_link",
+            format!(
+                "`{part}.{link_name}` must name one `{whole}` row each, and be part of it: \
+                 {link_fix}"
+            ),
+        ));
+    }
+    if e.acl_levels.is_some() || e.is_tree {
+        return Err(refuse(
+            "split_entity_acl",
+            format!(
+                "`{part}` declares `acl` or is a tree. A part takes its access from `{whole}` \
+                 through its owned link. Drop it from `{part}` in this version"
+            ),
+        ));
+    }
+    let whole_now = schema.native(whole);
+    let mut columns = Vec::new();
+    let mut cleared = Vec::new();
+    for f in e.declared().filter(|f| f.name != *link_name) {
+        let Some(was) = moved.iter().find(|m| m.name == f.name) else {
+            return Err(refuse(
+                "split_entity_reshaped",
+                format!(
+                    "`{part}.{}` is not a field of `{whole}` in the version serving now. A split \
+                     moves fields as they are. Split them in this version, and add or change \
+                     fields in the next",
+                    f.name
+                ),
+            ));
+        };
+        if f.sealed || f.private || was.sealed || f.is_content() {
+            return Err(refuse(
+                "split_entity_sealed",
+                format!(
+                    "`{whole}.{}` is sealed or a file. A sealed value is bound to its entity, \
+                     and a file's handle to its row, so neither moves into `{part}`. Keep it in \
+                     `{whole}`",
+                    f.name
+                ),
+            ));
+        }
+        let ty = |x: &ordo_schema::Field| {
+            (
+                ordo_schema::ddl::column_ty(x),
+                x.text_max,
+                x.optional,
+                x.ty.clone(),
+            )
+        };
+        if ty(f) != ty(was) {
+            return Err(refuse(
+                "split_entity_reshaped",
+                format!(
+                    "`{part}.{}` is not declared as `{whole}.{}` was (its type or whether it is \
+                     optional). A split moves fields as they are; change them in the next \
+                     version",
+                    f.name, f.name
+                ),
+            ));
+        }
+        if whole_now.is_some_and(|w| w.field(&f.name).is_some()) {
+            return Err(refuse(
+                "split_entity_reshaped",
+                format!(
+                    "`{whole}.{}` is still declared, so `{part}.{}` would copy it, not move it. \
+                     Remove it from `{whole}`",
+                    f.name, f.name
+                ),
+            ));
+        }
+        let default = ordo_schema::ddl::column_default(was)
+            .map_err(|x| refuse("mapping_invalid", format!("{}: {}", x.code, x.message)))?;
+        if !was.optional && default.is_none() {
+            return Err(refuse(
+                "split_default_required",
+                format!(
+                    "`{whole}.{}` is required with no default. While both versions write, the \
+                     new version's inserts of `{whole}` do not name it, and the version before \
+                     would read a value nobody wrote. Give it a default, or make it optional, in \
+                     a version before this one",
+                    f.name
+                ),
+            ));
+        }
+        cleared.push(serde_json::json!([
+            was.column(),
+            default.unwrap_or_else(|| "NULL".into())
+        ]));
+        columns.push(f.column());
+    }
+    let ddl_err = |x: ordo_schema::SchemaError| {
+        refuse("mapping_invalid", format!("{}: {}", x.code, x.message))
+    };
+    let step = |phase: Phase, table: &str, sql: String| Step {
+        code: c.code(),
+        phase,
+        sql,
+        index: None,
+        constraint: None,
+        table: table.to_string(),
+    };
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let shape = serde_json::json!({
+        "key": e.key, "columns": columns, "cleared": cleared,
+    })
+    .to_string();
+    let mut out: Vec<Step> = [
+        format!("{};\n", ordo_exec::overlay::RENAMES_DDL),
+        "ALTER TABLE \"$renames\" ADD COLUMN IF NOT EXISTS \"split\" text;\n".to_string(),
+        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n".to_string(),
+        format!(
+            "INSERT INTO \"$renames\" (\"entity\", \"from\", \"field\", \"column\", \
+             \"version\", \"split\") VALUES ({}, {}, {}, {}, {}, {}) ON CONFLICT (\"entity\", \
+             \"from\") DO UPDATE SET \"version\" = EXCLUDED.\"version\", \
+             \"split\" = EXCLUDED.\"split\";\n",
+            lit(part),
+            lit(whole),
+            lit(ordo_exec::overlay::SPLIT_FIELD),
+            lit(&link.column()),
+            lit(version),
+            lit(&shape)
+        ),
+    ]
+    .into_iter()
+    .map(|sql| step(Phase::Alter, part, sql))
+    .collect();
+    out.push(step(
+        Phase::Table,
+        part,
+        ordo_schema::ddl::create_table(e).map_err(ddl_err)?,
+    ));
+    for f in &e.fields {
+        out.extend(ordo_schema::ddl::unique(e, f).map(|sql| step(Phase::Alter, part, sql)));
+    }
+    for key in &e.unique_keys {
+        out.extend(
+            ordo_schema::ddl::composite_unique(e, key)
+                .map_err(ddl_err)?
+                .map(|sql| step(Phase::Alter, part, sql)),
+        );
+    }
+    for key in &e.all_indexes() {
+        out.extend(
+            ordo_schema::ddl::index(e, key, false)
+                .map_err(ddl_err)?
+                .map(|sql| step(Phase::Alter, part, sql)),
+        );
+    }
+    let link_fk = format!("{part}${link_name}$fk");
+    for f in &e.fields {
+        if let Some(sql) = ordo_schema::ddl::foreign_key(schema, e, f) {
+            let sql = if f.name == *link_name {
+                format!(
+                    "{} DEFERRABLE INITIALLY DEFERRED;\n",
+                    sql.trim_end().trim_end_matches(';')
+                )
+            } else {
+                sql
+            };
+            out.extend(not_valid_then_validate(
+                c,
+                e,
+                &format!("{part}${}$fk", f.name),
+                &sql,
+            ));
+        }
+    }
+    let copy = vec![BackfillStep {
+        code: c.code(),
+        entity: part.clone(),
+        field: String::new(),
+        column: link.column(),
+        column_ty: String::new(),
+        mapping: FillMapping::Part {
+            whole: whole.to_string(),
+            link: link.column(),
+            key: e.key.clone(),
+        },
+        sql: None,
+        audit: ordo_commandlog::BackfillAudit::Summarised,
+        sealing_from: None,
+        kept_plaintext: None,
+        indexing_from: None,
+    }];
+    // At the close the link is checked at once again, as declared.
+    let after = vec![step(
+        Phase::Alter,
+        part,
+        format!(
+            "ALTER TABLE {} ALTER CONSTRAINT {} NOT DEFERRABLE;\n",
+            ordo_schema::ddl::q(part),
+            ordo_schema::ddl::q(&link_fk)
+        ),
+    )];
+    Ok((out, copy, after))
+}
+
+/// **A move from another entity, or an entity merge** (B14; `forward-gaps`
+/// asks 7 and 8, owner: *"dev named"*, *"declared correspondence tool based
+/// on prev"*): fields of `e` each `prev(<source>.<field>)`. The rule is the
+/// stored plan's `--correspond <source>.<link>`: each `source` row gives its
+/// values to the `e` row its link names. The built link is the one a split
+/// makes, `-> e owned unique` and required, so the rows pair one to one.
+/// The step:
+///
+/// - records the move in `$renames` (`field` [`ordo_exec::overlay::MERGE_FIELD`],
+///   `column` the link, `split` the source's key, the moved columns, what
+///   each becomes in `e` when its source row goes, and whether it is a
+///   merge), under its exclusive lock, first: every write after it keeps
+///   both shapes current (`ordo_exec::overlay::split_mirrors`);
+/// - adds the moved columns to `e`, open to nulls, each with its default;
+/// - copies each source row's values with the backfill worker, in chunks.
+///
+/// A required moved column's `NOT NULL` lands at the close. An entity merge
+/// (the source is gone) keeps the source table, kept current by the new
+/// version's writes, so a revert in the soak loses nothing; it is orphaned
+/// at the close. A move whose source stays is one way: a value the new
+/// version gives an `e` row with no source row has no place in the version
+/// before, so the step needs `--one-way`, and the old columns are orphaned
+/// at the close.
+///
+/// Refused, each naming the fix: `move_needs_stored_plan`,
+/// `move_rule_required`, `move_link` (no link from the source to `e`, or not
+/// `owned unique` and required), `move_rule_not_built` (a link to `e` that
+/// is not unique: several source rows per row, `forward-gaps` ask 7),
+/// `move_reshaped`, `move_sealed`, `move_ref_not_built`,
+/// `move_column_orphaned`, `move_default_required`, `move_acl`,
+/// `one_way_unconfirmed`.
+#[allow(clippy::too_many_arguments)]
+fn move_steps(
+    c: &Change,
+    schema: &Schema,
+    e: &ordo_schema::Entity,
+    live: &LiveShape,
+    source: &ordo_schema::Entity,
+    moved: &[ordo_schema::Field],
+    merge: bool,
+    version: &str,
+    choices: &Choices,
+) -> Result<EntityRenameParts, Box<Refused>> {
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    let (into, from) = (&e.name, &source.name);
+    let is_link = |f: &ordo_schema::Field| matches!(&f.ty, ordo_schema::FieldTy::Ref { target, .. } if target == into);
+    let candidate = source
+        .fields
+        .iter()
+        .find(|f| is_link(f))
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| into.to_string());
+    let what = if merge {
+        format!("`{from}` merges into `{into}`")
+    } else {
+        format!("fields of `{from}` move to `{into}`")
+    };
+    if !choices.renames_backfill {
+        return Err(refuse(
+            "move_needs_stored_plan",
+            format!(
+                "{what}. Its values are copied in chunks by the backfill worker, with every \
+                 write kept in both shapes meanwhile. `ordo apply` does not run that. Store the \
+                 version with `ordo apply --no-activate`, then move tenants with `ordo evolve \
+                 --from <version> --to <version> --correspond {from}.{candidate}` and `ordo \
+                 evolve --tenant <id>`"
+            ),
+        ));
+    }
+    // Into the many side: the rule names a link of `into` to `from`, and
+    // which of its rows take the values.
+    let back = e
+        .fields
+        .iter()
+        .find(|f| matches!(&f.ty, ordo_schema::FieldTy::Ref { target, .. } if target == from));
+    if let (None, Some(link_name)) = (choices.correspond.get(from), choices.correspond.get(into)) {
+        let rules = choices.rules_for(into);
+        let Some(link) = e.field(link_name).filter(
+            |f| matches!(&f.ty, ordo_schema::FieldTy::Ref { target, .. } if target == from),
+        ) else {
+            return Err(refuse(
+                "move_link",
+                format!(
+                    "`{into}.{link_name}` is not a link to `{from}`. A rule names the link that \
+                     pairs the rows: `--correspond {into}.<link> all`, the link `-> {from} \
+                     owned`, required"
+                ),
+            ));
+        };
+        if rules.is_empty() {
+            return Err(refuse(
+                "move_rule_required",
+                format!(
+                    "{what}, and several `{into}` rows may name one `{from}` row. Name which of \
+                     them take its values: `--correspond \"{into}.{link_name} all\"`, or \
+                     `first by <field>` or `latest by <field>` in place of `all`"
+                ),
+            ));
+        }
+        return pick_move_steps(
+            c, schema, e, live, source, moved, merge, version, choices, link, &rules, true,
+        );
+    }
+    let Some(link_name) = choices.correspond.get(from) else {
+        let hint = match (source.fields.iter().find(|f| is_link(f)), back) {
+            (None, Some(b)) => format!(
+                "`--correspond \"{into}.{} all\"`, every `{into}` row taking the values of the \
+                 `{from}` row it names, or `first by <field>` or `latest by <field>` in place of \
+                 `all`",
+                b.name
+            ),
+            _ => format!(
+                "`--correspond {from}.{candidate}`, each `{from}` row into the `{into}` row its \
+                 `{candidate}` names"
+            ),
+        };
+        return Err(refuse(
+            "move_rule_required",
+            format!(
+                "{what}, and Ordo does not guess which `{into}` row each `{from}` row's values \
+                 go to. State it: {hint}"
+            ),
+        ));
+    };
+    let link_fix = format!(
+        "in a version before this one, declare the link in `{from}`: `{link_name} -> {into} \
+         owned unique`, required"
+    );
+    let Some(link) = source.field(link_name) else {
+        return Err(refuse(
+            "move_link",
+            format!("`{from}` declares no `{link_name}` in the version serving now; {link_fix}"),
+        ));
+    };
+    if !is_link(link) {
+        return Err(refuse(
+            "move_link",
+            format!(
+                "`{from}.{link_name}` is not a link to `{into}`. The rule built pairs each \
+                 `{from}` row with the `{into}` row its link names, `-> {into} owned unique`"
+            ),
+        ));
+    }
+    let rules = choices.rules_for(from);
+    if !link.unique {
+        if rules.is_empty() {
+            return Err(refuse(
+                "move_rule_required",
+                format!(
+                    "`{from}.{link_name}` is not unique, so several `{from}` rows may name one \
+                     `{into}` row. Name which one gives the values: `--correspond \
+                     \"{from}.{link_name} latest by <field>\"`, or `first by <field>`, the \
+                     field ordering the rows"
+                ),
+            ));
+        }
+        return pick_move_steps(
+            c, schema, e, live, source, moved, merge, version, choices, link, &rules, false,
+        );
+    }
+    if let Some(r) = rules.first() {
+        return Err(refuse(
+            "correspond_rule_not_built",
+            format!(
+                "`{}`: `{from}.{link_name}` is unique, so each `{into}` row has at most one \
+                 `{from}` row, and a pick or a condition has nothing to choose from. State the \
+                 plain rule: `--correspond {from}.{link_name}`",
+                r.text()
+            ),
+        ));
+    }
+    let owned = matches!(&link.ty, ordo_schema::FieldTy::Ref { owned: true, .. });
+    if !owned || link.optional {
+        return Err(refuse(
+            "move_link",
+            format!(
+                "`{from}.{link_name}` must name one `{into}` row each, and be part of it: \
+                 {link_fix}"
+            ),
+        ));
+    }
+    if source.acl_levels.is_some() || source.is_tree {
+        return Err(refuse(
+            "move_acl",
+            format!(
+                "`{from}` declares `acl` or is a tree, and its rows' access would not follow \
+                 the values into `{into}`. Drop it from `{from}` in a version before this one"
+            ),
+        ));
+    }
+    if merge {
+        // A merge moves every field: one left behind would be dropped.
+        if let Some(left) = source
+            .declared()
+            .find(|f| f.name != *link_name && !moved.iter().any(|m| m.name == f.name))
+        {
+            return Err(refuse(
+                "move_reshaped",
+                format!(
+                    "`{from}` is gone and `{from}.{}` does not move into `{into}`. A merge moves \
+                     every field: mark it `prev({from}.{})` in `{into}`, or remove it from \
+                     `{from}` in a version before this one",
+                    left.name, left.name
+                ),
+            ));
+        }
+    }
+    let MovedColumns {
+        columns,
+        cleared,
+        expand,
+        close,
+    } = move_columns(c, schema, e, live, from, moved, merge)?;
+    if !merge && !choices.one_way {
+        return Err(refuse(
+            "one_way_unconfirmed",
+            format!(
+                "`{from}` stays, so a value the new version gives a `{into}` row that no `{from}` \
+                 row names has no place in the version before, and a revert in the soak could \
+                 lose it. Accept this one way change with `--one-way`; revert then requires \
+                 this or manual intervention. A merge (`{from}` removed, every field moved) \
+                 keeps both shapes and reverts"
+            ),
+        ));
+    }
+    let step = |phase: Phase, table: &str, sql: String| Step {
+        code: c.code(),
+        phase,
+        sql,
+        index: None,
+        constraint: None,
+        table: table.to_string(),
+    };
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let shape = serde_json::json!({
+        "key": source.key, "columns": columns, "cleared": cleared, "merge": merge,
+    })
+    .to_string();
+    let mut out: Vec<Step> = [
+        format!("{};\n", ordo_exec::overlay::RENAMES_DDL),
+        "ALTER TABLE \"$renames\" ADD COLUMN IF NOT EXISTS \"split\" text;\n".to_string(),
+        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n".to_string(),
+        format!(
+            "INSERT INTO \"$renames\" (\"entity\", \"from\", \"field\", \"column\", \
+             \"version\", \"split\") VALUES ({}, {}, {}, {}, {}, {}) ON CONFLICT (\"entity\", \
+             \"from\") DO UPDATE SET \"version\" = EXCLUDED.\"version\", \
+             \"split\" = EXCLUDED.\"split\";\n",
+            lit(from),
+            lit(into),
+            lit(ordo_exec::overlay::MERGE_FIELD),
+            lit(&link.column()),
+            lit(version),
+            lit(&shape)
+        ),
+    ]
+    .into_iter()
+    .map(|sql| step(Phase::Alter, into, sql))
+    .collect();
+    out.extend(expand.into_iter().map(|sql| step(Phase::Alter, into, sql)));
+    // After a merge the new version deletes a row of `into` with no
+    // knowledge of `from`, and the overlay deletes the `from` row naming it
+    // after: the link is checked at commit until the close drops it.
+    if merge {
+        out.push(step(
+            Phase::Alter,
+            from,
+            format!(
+                "ALTER TABLE {} ALTER CONSTRAINT {} DEFERRABLE INITIALLY DEFERRED;\n",
+                ordo_schema::ddl::q(from),
+                ordo_schema::ddl::q(&format!("{from}${link_name}$fk"))
+            ),
+        ));
+    }
+    let copy = vec![BackfillStep {
+        code: c.code(),
+        entity: into.clone(),
+        field: from.clone(),
+        column: columns.first().cloned().unwrap_or_default(),
+        column_ty: String::new(),
+        mapping: FillMapping::Merge {
+            from: from.clone(),
+            link: link.column(),
+            key: source.key.clone(),
+            columns: columns.clone(),
+            merge,
+            pick: None,
+        },
+        sql: None,
+        audit: ordo_commandlog::BackfillAudit::Summarised,
+        sealing_from: None,
+        kept_plaintext: None,
+        indexing_from: None,
+    }];
+    let after = close
+        .into_iter()
+        .map(|sql| step(Phase::Alter, into, sql))
+        .collect();
+    Ok((out, copy, after))
+}
+
+/// **A move through a link that is not unique** (B14 with a named rule;
+/// `forward-gaps` ask 7, owner: *"dev named"*; [`ordo_exec::pick`]). The
+/// link is a field of the many side naming a row of the one side:
+///
+/// - into the one side (`into_many` false, the link a field of `source`):
+///   each rule picks the row that gives the values, `first` or `latest`
+///   `by` a field;
+/// - into the many side (`into_many` true, the link a field of `e`): each
+///   rule picks the rows that take them, `all`, or the `first` or `latest`.
+///
+/// Each rule may carry a condition over the many side's fields, in Ordo's
+/// own expression language; a row is in the first rule it meets, and the
+/// pre-check lists the rows that meet none. The step records the move in
+/// `$renames` (as a move's row, its shape holding `pick`), adds the
+/// columns, and the backfill worker sets each group in chunks. The version
+/// before keeps them current in each write's own transaction; the version
+/// after writes nothing back, so the step is one way (`--one-way`), and a
+/// merge is not built this way.
+///
+/// Refused, each naming the fix: `correspond_rule_not_built` (a merge),
+/// `correspond_rule_invalid` (a rule with no pick, `all` into the one
+/// side, `first` or `latest` with no `by`, a field or a condition Ordo
+/// cannot read), `move_link`, `move_acl`, and what [`move_columns`]
+/// refuses.
+#[allow(clippy::too_many_arguments)]
+fn pick_move_steps(
+    c: &Change,
+    schema: &Schema,
+    e: &ordo_schema::Entity,
+    live: &LiveShape,
+    source: &ordo_schema::Entity,
+    moved: &[ordo_schema::Field],
+    merge: bool,
+    version: &str,
+    choices: &Choices,
+    link: &ordo_schema::Field,
+    rules: &[&CorrespondRule],
+    into_many: bool,
+) -> Result<EntityRenameParts, Box<Refused>> {
+    use ordo_exec::pick::Pick;
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    let (into, from) = (&e.name, &source.name);
+    let (one, many) = if into_many {
+        (from, into)
+    } else {
+        (into, from)
+    };
+    let link_name = &link.name;
+    if merge {
+        return Err(refuse(
+            "correspond_rule_not_built",
+            format!(
+                "`{from}` is gone, and several `{many}` rows name one `{one}` row: a merge keeps \
+                 both shapes so a revert loses nothing, and the rows a rule leaves out would be \
+                 lost. Keep `{from}` in this version and move the fields one way (`--one-way`), \
+                 then remove `{from}` in the next"
+            ),
+        ));
+    }
+    let owned = matches!(&link.ty, ordo_schema::FieldTy::Ref { owned: true, .. });
+    if !owned || link.optional {
+        return Err(refuse(
+            "move_link",
+            format!(
+                "`{many}.{link_name}` must name one `{one}` row each, and be part of it. In a \
+                 version before this one, declare it `{link_name} -> {one} owned`, required"
+            ),
+        ));
+    }
+    if into_many
+        && !live
+            .table(many)
+            .is_some_and(|t| t.columns.contains_key(&link.column()))
+    {
+        return Err(refuse(
+            "move_link",
+            format!(
+                "`{many}.{link_name}` is not in the version serving now. Declare the link in a \
+                 version before this one, then move the fields"
+            ),
+        ));
+    }
+    // The many side is part of the one side (`owned`), so both read alike;
+    // its own `acl` or tree would not follow the values.
+    let many_entity = if into_many { e } else { source };
+    if many_entity.acl_levels.is_some() || many_entity.is_tree {
+        return Err(refuse(
+            "move_acl",
+            format!(
+                "`{many}` declares `acl` or is a tree, and its rows' access would not follow the \
+                 values. Drop it from `{many}` in a version before this one"
+            ),
+        ));
+    }
+    // The many side's fields a rule may read, as served now. Into the many
+    // side, the moved fields are not among them yet.
+    let fields: Vec<ordo_schema::Field> = if into_many {
+        e.fields
+            .iter()
+            .filter(|f| !moved.iter().any(|m| m.name == f.name))
+            .cloned()
+            .collect()
+    } else {
+        source.fields.clone()
+    };
+    let words = if into_many {
+        "`all`, `first by <field>` or `latest by <field>`"
+    } else {
+        "`first by <field>` or `latest by <field>`"
+    };
+    let mut picked = Vec::new();
+    for r in rules {
+        let invalid =
+            |why: String| refuse("correspond_rule_invalid", format!("`{}`: {why}", r.text()));
+        let Some(pick) = r.pick else {
+            return Err(invalid(format!(
+                "name which `{many}` rows the rule pairs: {words}"
+            )));
+        };
+        if pick == Pick::All && !into_many {
+            return Err(invalid(format!(
+                "several `{many}` rows cannot all give one `{one}` row its value. Name one: \
+                 {words}"
+            )));
+        }
+        let by = match (&r.by, pick) {
+            (Some(_), Pick::All) => {
+                return Err(invalid("`all` takes every row, so it takes no `by`".into()))
+            }
+            (None, Pick::All) => None,
+            (None, _) => {
+                return Err(invalid(format!(
+                    "Ordo keeps no creation time for a row, so `{p}` needs the field that \
+                     orders the rows: `{p} by <field>`",
+                    p = pick.as_str()
+                )))
+            }
+            (Some(b), _) => {
+                let f = fields.iter().find(|f| f.name == *b).ok_or_else(|| {
+                    invalid(format!(
+                        "`{many}` has no field `{b}` in the version serving now"
+                    ))
+                })?;
+                if f.sealed || f.private || ordo_schema::check::field_type(f).is_none() {
+                    return Err(invalid(format!(
+                        "`{many}.{b}` does not order its rows: name a text, number, date or \
+                         time field that is not sealed"
+                    )));
+                }
+                Some(f.column())
+            }
+        };
+        let when = match &r.condition {
+            None => None,
+            Some(src) => {
+                let cond = ordo_syntax::parse_condition(src).map_err(|err| {
+                    invalid(format!("the condition `{src}` does not parse: {err}"))
+                })?;
+                Some(
+                    ordo_schema::check::render_condition(many, &fields, &cond)
+                        .map_err(|err| invalid(format!("{}: {}", err.code, err.message)))?,
+                )
+            }
+        };
+        picked.push(ordo_exec::pick::PickRule { pick, by, when });
+    }
+    let MovedColumns {
+        columns,
+        cleared,
+        expand,
+        close,
+    } = move_columns(c, schema, e, live, from, moved, false)?;
+    if !choices.one_way {
+        return Err(refuse(
+            "one_way_unconfirmed",
+            format!(
+                "`{from}` stays, and a value the new version gives a `{into}` row has no place \
+                 in the version before, so a revert in the soak could lose it. Accept this one \
+                 way change with `--one-way`; revert then requires this or manual intervention"
+            ),
+        ));
+    }
+    let pick = ordo_exec::pick::PickMove {
+        one: one.clone(),
+        many: many.clone(),
+        link: link.column(),
+        into_many,
+        columns: columns.clone(),
+        cleared: cleared
+            .iter()
+            .filter_map(|v| Some((v[0].as_str()?.to_string(), v[1].as_str()?.to_string())))
+            .collect(),
+        rules: picked,
+    };
+    let step = |table: &str, sql: String| Step {
+        code: c.code(),
+        phase: Phase::Alter,
+        sql,
+        index: None,
+        constraint: None,
+        table: table.to_string(),
+    };
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let shape = serde_json::json!({
+        "key": source.key, "columns": columns, "cleared": cleared, "merge": false,
+        "pick": pick.to_json(),
+    })
+    .to_string();
+    let mut out: Vec<Step> = [
+        format!("{};\n", ordo_exec::overlay::RENAMES_DDL),
+        "ALTER TABLE \"$renames\" ADD COLUMN IF NOT EXISTS \"split\" text;\n".to_string(),
+        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n".to_string(),
+        format!(
+            "INSERT INTO \"$renames\" (\"entity\", \"from\", \"field\", \"column\", \
+             \"version\", \"split\") VALUES ({}, {}, {}, {}, {}, {}) ON CONFLICT (\"entity\", \
+             \"from\") DO UPDATE SET \"version\" = EXCLUDED.\"version\", \
+             \"split\" = EXCLUDED.\"split\";\n",
+            lit(from),
+            lit(into),
+            lit(ordo_exec::overlay::MERGE_FIELD),
+            lit(&link.column()),
+            lit(version),
+            lit(&shape)
+        ),
+    ]
+    .into_iter()
+    .map(|sql| step(into, sql))
+    .collect();
+    out.extend(expand.into_iter().map(|sql| step(into, sql)));
+    let copy = vec![BackfillStep {
+        code: c.code(),
+        entity: into.clone(),
+        field: from.clone(),
+        column: columns.first().cloned().unwrap_or_default(),
+        column_ty: String::new(),
+        mapping: FillMapping::Merge {
+            from: from.clone(),
+            link: link.column(),
+            key: source.key.clone(),
+            columns,
+            merge: false,
+            pick: Some(pick.to_json().to_string()),
+        },
+        sql: None,
+        audit: ordo_commandlog::BackfillAudit::Summarised,
+        sealing_from: None,
+        kept_plaintext: None,
+        indexing_from: None,
+    }];
+    let after = close.into_iter().map(|sql| step(into, sql)).collect();
+    Ok((out, copy, after))
+}
+
+/// What a move's fields come to: the moved columns, each with what it
+/// holds when no row gives it a value, the statements that add them, and
+/// the `NOT NULL`s that land at the close.
+struct MovedColumns {
+    columns: Vec<String>,
+    cleared: Vec<serde_json::Value>,
+    expand: Vec<String>,
+    close: Vec<String>,
+}
+
+/// Each moved field checked and its column made, for a move into `e` from
+/// `from` (B14): refused, each naming the fix, as `move_sealed`,
+/// `move_ref_not_built`, `move_reshaped`, `move_column_orphaned`,
+/// `move_default_required`.
+fn move_columns(
+    c: &Change,
+    schema: &Schema,
+    e: &ordo_schema::Entity,
+    live: &LiveShape,
+    from: &str,
+    moved: &[ordo_schema::Field],
+    merge: bool,
+) -> Result<MovedColumns, Box<Refused>> {
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    let into = &e.name;
+    let still = schema.native(from);
+    let mut columns = Vec::new();
+    let mut cleared = Vec::new();
+    let mut expand = Vec::new();
+    let mut close = Vec::new();
+    let t = ordo_schema::ddl::q(into);
+    for was in moved {
+        let name = &was.name;
+        let Some(f) = e.field(name) else {
+            return Err(refuse(
+                "mapping_invalid",
+                format!("`{into}.{name}` is not declared"),
+            ));
+        };
+        if f.sealed || f.private || was.sealed || was.private || f.is_content() {
+            return Err(refuse(
+                "move_sealed",
+                format!(
+                    "`{from}.{name}` is sealed or a file. A sealed value is bound to its entity, \
+                     and a file's handle to its row, so neither moves into `{into}`. Keep it in \
+                     `{from}`"
+                ),
+            ));
+        }
+        if matches!(f.ty, ordo_schema::FieldTy::Ref { .. }) {
+            return Err(refuse(
+                "move_ref_not_built",
+                format!(
+                    "`{from}.{name}` is a link. Moving a link is not built: add it to `{into}` \
+                     as a new field and fill it with an op, then remove it from `{from}`"
+                ),
+            ));
+        }
+        let ty = |x: &ordo_schema::Field| {
+            (
+                ordo_schema::ddl::column_ty(x),
+                x.text_max,
+                x.optional,
+                x.ty.clone(),
+            )
+        };
+        if ty(f) != ty(was) || f.unique {
+            return Err(refuse(
+                "move_reshaped",
+                format!(
+                    "`{into}.{name}` is not declared as `{from}.{name}` was (its type, whether \
+                     it is optional, or a new `unique`). A move takes fields as they are; change \
+                     them in the next version"
+                ),
+            ));
+        }
+        // An orphaned column of the same name, left by an earlier step,
+        // holds values nobody keeps current: the move would read them as
+        // its own for every row no source row names.
+        if live
+            .table(into)
+            .is_some_and(|t| t.columns.contains_key(&f.column()))
+        {
+            return Err(refuse(
+                "move_column_orphaned",
+                format!(
+                    "`{into}` still holds a column `{}`, orphaned by an earlier step, so the \
+                     moved values would land beside stale ones. Prune it first: `ordo evolve \
+                     --prune {into}.{name}`, or move the field under another name",
+                    f.column()
+                ),
+            ));
+        }
+        if still.is_some_and(|s| s.field(name).is_some()) {
+            return Err(refuse(
+                "move_reshaped",
+                format!(
+                    "`{from}.{name}` is still declared, so `{into}.{name}` would copy it, not \
+                     move it. Remove it from `{from}`"
+                ),
+            ));
+        }
+        let default = ordo_schema::ddl::column_default(f)
+            .map_err(|x| refuse("mapping_invalid", format!("{}: {}", x.code, x.message)))?;
+        if !f.optional && default.is_none() {
+            return Err(refuse(
+                "move_default_required",
+                format!(
+                    "`{into}.{name}` is required with no default. A `{into}` row no `{from}` row \
+                     names, and one the version before adds, has no value for it. Give it a \
+                     default: `{name}: {} = <value> prev({from}.{name})`",
+                    ordo_schema::ddl::column_ty(f)
+                ),
+            ));
+        }
+        if !merge && !was.optional {
+            let old_default = ordo_schema::ddl::column_default(was)
+                .map_err(|x| refuse("mapping_invalid", format!("{}: {}", x.code, x.message)))?;
+            if old_default.is_none() {
+                return Err(refuse(
+                    "move_default_required",
+                    format!(
+                        "`{from}.{name}` is required with no default, and `{from}` stays: the \
+                         new version's inserts of `{from}` do not name it, and the version \
+                         before would read a value nobody wrote. Give it a default, or make it \
+                         optional, in a version before this one"
+                    ),
+                ));
+            }
+        }
+        let col = f.column();
+        expand.push(format!(
+            "ALTER TABLE {t} ADD COLUMN IF NOT EXISTS {} {}{};\n",
+            ordo_schema::ddl::q(&col),
+            ordo_schema::ddl::column_ty(f),
+            default
+                .as_ref()
+                .map(|d| format!(" DEFAULT {d}"))
+                .unwrap_or_default()
+        ));
+        if !f.optional {
+            close.push(format!(
+                "ALTER TABLE {t} ALTER COLUMN {} SET NOT NULL;\n",
+                ordo_schema::ddl::q(&col)
+            ));
+        }
+        cleared.push(serde_json::json!([
+            col,
+            default.unwrap_or_else(|| "NULL".into())
+        ]));
+        columns.push(col);
+    }
+    Ok(MovedColumns {
+        columns,
+        cleared,
+        expand,
+        close,
+    })
+}
+
+/// An entity rename's statements, its copy when a stored step runs it with
+/// the backfill worker, and what lands after the copy.
+type EntityRenameParts = (Vec<Step>, Vec<BackfillStep>, Vec<Step>);
+
+/// Each reference another entity of `schema` holds into `entity`, as
+/// `(table, constraint)`. The constraint is named for the referring field,
+/// so it is the same name before and after a rename of `entity`.
+pub fn references_into(schema: &Schema, entity: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for g in schema.entities.iter().filter(|g| g.name != entity) {
+        for f in &g.fields {
+            if matches!(&f.ty, ordo_schema::FieldTy::Ref { target, .. } if target == entity) {
+                out.push((g.name.clone(), format!("{}${}$fk", g.name, f.name)));
+            }
+        }
+    }
+    out
+}
+
+/// An entity rename recorded in `$renames`: `entity` the new table, `from`
+/// the old one, `field` and `column` empty.
+fn entity_rename_recorded(entity: &str, from: &str, version: &str) -> Vec<String> {
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    vec![
+        format!("{};\n", ordo_exec::overlay::RENAMES_DDL),
+        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n".to_string(),
+        format!(
+            "INSERT INTO \"$renames\" (\"entity\", \"from\", \"field\", \"column\", \"version\") \
+             VALUES ({}, {}, '', '', {}) ON CONFLICT (\"entity\", \"from\") DO UPDATE SET \
+             \"version\" = EXCLUDED.\"version\";\n",
+            lit(entity),
+            lit(from),
+            lit(version)
+        ),
+    ]
+}
+
+/// **An entity rename lands** (`(prev: from)`): the old table is no longer
+/// written. In one transaction, under `$renames`' exclusive lock: the
+/// rename leaves `$renames`, so no write copies into the old table again;
+/// every reference into the old table moves to the new one, `NOT VALID`,
+/// then validated; the old table's own references go, so a row it keeps
+/// never holds back a delete elsewhere. The caller records the old table
+/// in `$orphans`. Nothing when the rename is not recorded there (already
+/// landed). Answers whether it landed now.
+pub async fn land_entity_rename(
+    pool: &Pool,
+    schema: &Schema,
+    entity: &str,
+    from: &str,
+) -> Result<bool, String> {
+    let recorded = match pool
+        .rows(&format!(
+            "SELECT 1 FROM \"$renames\" WHERE \"entity\" = {} AND \"from\" = {} \
+             AND \"field\" = ''",
+            ordo_exec::sql_lit(entity),
+            ordo_exec::sql_lit(from)
+        ))
+        .await
+    {
+        Ok(r) => !r.is_empty(),
+        Err(e) if e.is_missing_table() => false,
+        Err(e) => return Err(format!("$renames: {e}")),
+    };
+    if !recorded {
+        return Ok(false);
+    }
+    let q = ordo_schema::ddl::q;
+    let pg = pool.schema().to_string();
+    // The references into the old table and its own, from the catalog.
+    let fks = pool
+        .rows(&format!(
+            "SELECT r.relname::text, c.conname::text, \
+             CASE WHEN c.confrelid = o.oid THEN 'in' ELSE 'out' END \
+             FROM pg_constraint c \
+             JOIN pg_class r ON r.oid = c.conrelid \
+             JOIN pg_class o ON o.relname = {} \
+             JOIN pg_namespace n ON n.oid = o.relnamespace AND n.nspname = {} \
+             WHERE c.contype = 'f' AND (c.confrelid = o.oid OR c.conrelid = o.oid) \
+             AND r.relnamespace = n.oid",
+            ordo_exec::sql_lit(from),
+            ordo_exec::sql_lit(&pg)
+        ))
+        .await
+        .map_err(|e| format!("reading the references of `{from}`: {e}"))?;
+    let mut sql = vec![
+        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE".to_string(),
+        format!(
+            "DELETE FROM \"$renames\" WHERE \"entity\" = {} AND \"from\" = {} AND \"field\" = ''",
+            ordo_exec::sql_lit(entity),
+            ordo_exec::sql_lit(from)
+        ),
+    ];
+    let mut validate = Vec::new();
+    for r in fks {
+        let mut it = r.into_iter();
+        let (Some(Some(table)), Some(Some(name)), Some(Some(way))) =
+            (it.next(), it.next(), it.next())
+        else {
+            continue;
+        };
+        sql.push(format!(
+            "ALTER TABLE {} DROP CONSTRAINT {}",
+            q(&table),
+            q(&name)
+        ));
+        if way != "in" || table == from {
+            continue;
+        }
+        // The same reference, onto the new table, as the program declares it.
+        let declared = schema.native(&table).and_then(|g| {
+            g.fields
+                .iter()
+                .find(|f| format!("{}${}$fk", g.name, f.name) == name)
+                .and_then(|f| ordo_schema::ddl::foreign_key(schema, g, f))
+        });
+        if let Some(add) = declared {
+            sql.push(format!(
+                "{} NOT VALID",
+                add.trim_end().trim_end_matches(';')
+            ));
+            validate.push(format!(
+                "ALTER TABLE {} VALIDATE CONSTRAINT {}",
+                q(&table),
+                q(&name)
+            ));
+        }
+    }
+    let fail = |e: PoolError| format!("landing `{from}` renamed `{entity}`: {e}");
+    let tx = pool.begin().await.map_err(fail)?;
+    for s in &sql {
+        if let Err(e) = tx.rows(s).await {
+            let _ = tx.rollback().await;
+            return Err(fail(e));
+        }
+    }
+    tx.commit().await.map_err(fail)?;
+    for v in validate {
+        pool.rows(&v)
+            .await
+            .map_err(|e| format!("validating a reference into `{entity}`: {e}"))?;
+    }
+    Ok(true)
+}
+
+/// Whether a step's statement is one of a rename's records in `$renames`,
+/// or a seal's in `$seals`: each runs first in its transaction, the order
+/// every write takes the lock in.
+pub fn is_rename_record(sql: &str) -> bool {
+    sql.contains("\"$renames\"") || sql.contains("\"$seals\"")
+}
+
+/// The old column of a rename keeps its `NOT NULL`, so an insert by the
+/// new version, which does not name it, needs a default there. A column
+/// with none gets the new field's; the dual writes then set the real value
+/// in the same transaction. Nothing when the old column is optional or
+/// has a default of its own.
+fn rename_old_default(
+    e: &ordo_schema::Entity,
+    f: &ordo_schema::Field,
+    live: &LiveShape,
+    from: &str,
+) -> Result<Vec<String>, String> {
+    let old_live = live.table(&e.name).and_then(|lt| lt.columns.get(from));
+    if !old_live.is_some_and(|c| !c.nullable && !c.has_default) {
+        return Ok(Vec::new());
+    }
+    match ordo_schema::ddl::column_default(f).map_err(|x| format!("{}: {}", x.code, x.message))? {
+        Some(d) => Ok(vec![format!(
+            "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {d};\n",
+            ordo_schema::ddl::q(&e.name),
+            ordo_schema::ddl::q(from)
+        )]),
+        None => Err(format!(
+            "prev_default_required: `{}.{from}` is required and has no default, and \
+             `{}.{}` declares none, so an insert by the new version could not leave it \
+             empty. Give `{}` a default (`= <value>`)",
+            e.name, e.name, f.name, f.name
+        )),
+    }
+}
+
+/// **The rows a split's or a merge's mapping does not parse** (15b): for
+/// A move's rule, when it moves through a link that is not unique and
+/// renders: what the pre-check and the preview read.
+pub fn move_pick(
+    c: &Change,
+    schema: &Schema,
+    live: &LiveShape,
+    choices: &Choices,
+) -> Option<ordo_exec::pick::PickMove> {
+    let Change::MoveFields {
+        entity,
+        fields,
+        merge,
+        source,
+        ..
+    } = c
+    else {
+        return None;
+    };
+    let e = schema.native(entity)?;
+    let mut c2 = choices.clone();
+    c2.renames_backfill = true;
+    let (_, bfs, _) = move_steps(c, schema, e, live, source, fields, *merge, "", &c2).ok()?;
+    bfs.first().and_then(BackfillStep::pick)
+}
+
+/// **The rows a move's rules leave out** (`forward-gaps` ask 7): each row
+/// of the many side that meets no rule, listed as `space/id` (never its
+/// values), up to [`SAMPLE`], with the count. The move does not start
+/// while any remain.
+pub async fn unmatched(
+    pool: &Pool,
+    p: &ordo_exec::pick::PickMove,
+) -> Result<Probe, ordo_exec::PoolError> {
+    let what = format!(
+        "rows of `{}` that meet no rule of the correspondence",
+        p.many
+    );
+    let rows = pool.rows(&p.unmatched_sql(SAMPLE)).await?;
+    if rows.is_empty() {
+        return Ok(Probe::Clean(format!(
+            "every row of `{}` meets a rule of the correspondence",
+            p.many
+        )));
+    }
+    let g = |r: &Vec<Option<String>>, i: usize| r.get(i).cloned().flatten().unwrap_or_default();
+    let count: usize = rows
+        .first()
+        .and_then(|r| g(r, 2).parse().ok())
+        .unwrap_or(rows.len());
+    let ids: Vec<String> = rows
+        .iter()
+        .map(|r| format!("{}/{}", g(r, 0), g(r, 1)))
+        .collect();
+    Ok(Probe::Dirty {
+        what,
+        lines: vec![format!(
+            "`{}`: {count} row(s) meet no rule: {}{}",
+            p.many,
+            ids.join(", "),
+            if count > ids.len() { ", ..." } else { "" }
+        )],
+    })
+}
+
+/// each new field the program requires, the rows whose mapping is null,
+/// listed as `space/id` (never their values), up to [`SAMPLE`] per field,
+/// with the count.
+pub async fn unparsed(
+    pool: &Pool,
+    schema: &Schema,
+    backfills: &[BackfillStep],
+) -> Result<Probe, ordo_exec::PoolError> {
+    let mut lines = Vec::new();
+    let mut asked = Vec::new();
+    for b in backfills.iter().filter(|b| b.code == "B12") {
+        let required = schema
+            .native(&b.entity)
+            .and_then(|e| e.field(&b.field))
+            .is_some_and(|f| !f.optional);
+        let Some(sql) = b.sql.as_ref().filter(|_| required) else {
+            continue;
+        };
+        asked.push(format!("`{}.{}`", b.entity, b.field));
+        let t = ordo_schema::ddl::q(&b.entity);
+        let count = pool
+            .rows(&format!(
+                "SELECT count(*)::text FROM {t} WHERE ({sql}) IS NULL"
+            ))
+            .await?
+            .first()
+            .and_then(|r| r.first().cloned().flatten())
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(0);
+        if count == 0 {
+            continue;
+        }
+        let rows = pool
+            .rows(&format!(
+                "SELECT \"$space\", \"id\"::text FROM {t} WHERE ({sql}) IS NULL \
+                 ORDER BY \"$space\", \"id\" LIMIT {SAMPLE}"
+            ))
+            .await?;
+        let ids: Vec<String> = rows
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}/{}",
+                    r.first().cloned().flatten().unwrap_or_default(),
+                    r.get(1).cloned().flatten().unwrap_or_default()
+                )
+            })
+            .collect();
+        lines.push(format!(
+            "`{}.{}`: {count} row(s) the mapping `{}` does not parse: {}{}",
+            b.entity,
+            b.field,
+            b.mapping.text(),
+            ids.join(", "),
+            if count as usize > ids.len() {
+                ", ..."
+            } else {
+                ""
+            }
+        ));
+    }
+    let what = format!(
+        "rows the split or merge does not parse, under {}",
+        asked.join(", ")
+    );
+    Ok(if lines.is_empty() {
+        Probe::Clean(what)
+    } else {
+        Probe::Dirty { what, lines }
+    })
+}
+
+/// The parts of a split or merge in a stored plan: the expand, one
+/// backfill per new field, the `NOT NULL`s that land at the close, and the
+/// map.
+pub type MapParts = (Vec<String>, Vec<BackfillStep>, Vec<String>, MapStep);
+
+/// **A split or merge in a stored plan** (B12, increment 15b; `forward-gaps`
+/// asks 8 and 18, owner: *"expand on prev"*).
+///
+/// - Each new field is added open to nulls and filled by the backfill
+///   worker with its `--fill` expression, which reads the old fields. A
+///   required one gets its `NOT NULL` at the close. A row the expression
+///   does not parse (null) under a required field is listed by the
+///   pre-check, and the step waits for it.
+/// - Each old column is kept with its `NOT NULL`, so the version before
+///   still loads. Its `--reverse` expression, over the new fields, keeps it
+///   current while the new version writes; a required one with no default
+///   takes a placeholder default its type's zero, which the reverse
+///   replaces in the same write.
+/// - An old field with no `--reverse` makes the step one way: refused
+///   unless `--one-way` accepts it.
+/// - Without a stored plan (`ordo apply`) it is refused: the mapping is a
+///   plan option, never guessed.
+pub fn map_step(
+    c: &Change,
+    e: &ordo_schema::Entity,
+    live: &LiveShape,
+    from: &[ordo_schema::Field],
+    to: &[String],
+    choices: &Choices,
+) -> Result<MapParts, Box<Refused>> {
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    let old_names = from
+        .iter()
+        .map(|f| f.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !choices.stored {
+        return Err(refuse(
+            "map_needs_stored_plan",
+            format!(
+                "a split, a merge or a type change needs a mapping for each new field, which is a stored \
+                 plan's option. Render it with `ordo evolve --from <version> --to <version> \
+                 --fill {}.{}=<expression over {old_names}>`",
+                e.name, to[0]
+            ),
+        ));
+    }
+    let t = ordo_schema::ddl::q(&e.name);
+    // The new fields' mappings read the old fields and every field the
+    // two versions share, never another new one.
+    let mut over: Vec<ordo_schema::Field> = e
+        .fields
+        .iter()
+        .filter(|x| !to.contains(&x.name))
+        .cloned()
+        .collect();
+    over.extend(from.iter().cloned());
+    let mut expand = Vec::new();
+    let mut close = Vec::new();
+    let mut bfs = Vec::new();
+    for name in to {
+        let Some(f) = e.field(name) else {
+            return Err(refuse(
+                "mapping_invalid",
+                format!("`{}.{name}` is not declared", e.name),
+            ));
+        };
+        let example = if from.len() == 1 && to.len() == 1 {
+            convert_example(&from[0], f)
+        } else if from.len() == 1 {
+            format!("before({}, \" \")", from[0].name)
+        } else {
+            from.iter()
+                .map(|x| x.name.clone())
+                .collect::<Vec<_>>()
+                .join(" + \" \" + ")
+        };
+        let Some(fill) = choices.fill_for(&e.name, name) else {
+            return Err(refuse(
+                "map_fill_required",
+                format!(
+                    "`{}.{name}` takes its value from {old_names}, and Ordo does not guess how. \
+                     State it: `--fill {}.{name}=<expression>`, for example \
+                     `--fill {}.{name}={example}`",
+                    e.name, e.name, e.name
+                ),
+            ));
+        };
+        let FillMapping::Expr(src) = &fill.mapping else {
+            return Err(refuse(
+                "map_function_not_built",
+                format!(
+                    "`{}.{name}` is filled by a backend function, which has no per-row rule \
+                     for the write path. Write it as an expression over {old_names}",
+                    e.name
+                ),
+            ));
+        };
+        let expr = ordo_syntax::parse_expr(src).map_err(|err| {
+            refuse(
+                "mapping_invalid",
+                format!("the mapping `{src}` does not parse: {err}"),
+            )
+        })?;
+        let sql = ordo_schema::check::render_mapping(&e.name, &over, &expr)
+            .map_err(|err| refuse("mapping_invalid", format!("{}: {}", err.code, err.message)))?;
+        if let Some((class, why)) = mapping_fits(&e.name, f, &over, &expr, src, &example) {
+            return Err(refuse(class, why));
+        }
+        let sql = stored_sql(f, &sql);
+        let col = f.column();
+        let ty = ordo_schema::ddl::column_ty(f);
+        expand.push(format!(
+            "ALTER TABLE {t} ADD COLUMN IF NOT EXISTS {} {ty};\n",
+            ordo_schema::ddl::q(&col)
+        ));
+        if !f.optional {
+            close.push(format!(
+                "ALTER TABLE {t} ALTER COLUMN {} SET NOT NULL;\n",
+                ordo_schema::ddl::q(&col)
+            ));
+        }
+        bfs.push(BackfillStep {
+            code: c.code(),
+            entity: e.name.clone(),
+            field: name.clone(),
+            column: col,
+            column_ty: ty,
+            mapping: fill.mapping.clone(),
+            sql: Some(sql),
+            audit: fill.audit,
+            sealing_from: None,
+            kept_plaintext: None,
+            indexing_from: None,
+        });
+    }
+    // The reverses read the new version's fields.
+    let mut reverse = Vec::new();
+    let mut missing = Vec::new();
+    for old in from {
+        let Some(src) = choices.reverses.get(&(e.name.clone(), old.name.clone())) else {
+            missing.push(old.name.clone());
+            continue;
+        };
+        let expr = ordo_syntax::parse_expr(src).map_err(|err| {
+            refuse(
+                "mapping_invalid",
+                format!("the reverse `{src}` does not parse: {err}"),
+            )
+        })?;
+        let sql = ordo_schema::check::render_mapping(&e.name, &e.fields, &expr).map_err(|err| {
+            refuse(
+                "mapping_invalid",
+                format!(
+                    "the reverse of `{}.{}`: {}: {}",
+                    e.name, old.name, err.code, err.message
+                ),
+            )
+        })?;
+        let back = if to.len() == 1 {
+            e.field(&to[0])
+                .map(|t| convert_example(t, old))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        if let Some((class, why)) = mapping_fits(&e.name, old, &e.fields, &expr, src, &back) {
+            return Err(refuse(class, why.replace("--fill", "--reverse")));
+        }
+        let sql = stored_sql(old, &sql);
+        reverse.push(ReverseSet {
+            field: old.name.clone(),
+            column: old.column(),
+            mapping: src.clone(),
+            sql,
+            required: !old.optional,
+        });
+    }
+    if !missing.is_empty() && !choices.one_way {
+        let join = if to.len() > 1 {
+            to.join(" + \" \" + ")
+        } else {
+            format!("before({}, \" \")", to[0])
+        };
+        return Err(refuse(
+            "one_way_unconfirmed",
+            format!(
+                "no reverse is given for {}, so a revert in the soak could not give the \
+                 version before its values. Give one: `--reverse {}.{}={join}`, or accept this \
+                 one way change with `--one-way`; revert then requires this or manual \
+                 intervention",
+                missing
+                    .iter()
+                    .map(|m| format!("`{}.{m}`", e.name))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                e.name,
+                missing[0]
+            ),
+        ));
+    }
+    // An old required column the new version's inserts do not name takes
+    // a placeholder its type's zero, only where the reverse sets the real
+    // value in the same write. With no reverse the placeholder would stay,
+    // where the version before can read it as data (a share read by a space
+    // on it, a later rollback), so it is refused by name.
+    for old in from.iter().filter(|o| !o.optional) {
+        let held = live
+            .table(&e.name)
+            .and_then(|lt| lt.columns.get(&old.column()));
+        if !held.is_some_and(|c| !c.nullable && !c.has_default) {
+            continue;
+        }
+        if missing.contains(&old.name) {
+            return Err(refuse(
+                "map_default_required",
+                format!(
+                    "`{}.{}` is required with no default and has no reverse, so the new \
+                     version's inserts would leave it a value nobody wrote, which the \
+                     version before reads as data. Give a reverse (`--reverse {}.{}=<expression>`), \
+                     or give `{}` a default in a version before this one",
+                    e.name, old.name, e.name, old.name, old.name
+                ),
+            ));
+        }
+        let zero = match ordo_schema::ddl::column_ty(old).as_str() {
+            "text" => "''",
+            "bigint" | "integer" | "smallint" | "numeric" => "0",
+            "boolean" => "false",
+            other => {
+                return Err(refuse(
+                    "map_type_not_built",
+                    format!(
+                        "`{}.{}` is a required `{other}` with no default, and the new version's \
+                         inserts do not name it. Give it a default in a version before this \
+                         one, or make it optional there",
+                        e.name, old.name
+                    ),
+                ))
+            }
+        };
+        expand.push(format!(
+            "ALTER TABLE {t} ALTER COLUMN {} SET DEFAULT {zero};\n",
+            ordo_schema::ddl::q(&old.column())
+        ));
+    }
+    let m = MapStep {
+        entity: e.name.clone(),
+        from: from.iter().map(|f| f.name.clone()).collect(),
+        to: to.to_vec(),
+        reverse,
+        one_way: !missing.is_empty(),
+    };
+    Ok((expand, bfs, close, m))
+}
+
+/// The conversion a mapping from `from` into `to` would be written with,
+/// for a refusal's example: `int(count)`, `text(count)`, or the field.
+fn convert_example(from: &ordo_schema::Field, to: &ordo_schema::Field) -> String {
+    use ordo_schema::check::Family;
+    let (a, b) = (
+        ordo_schema::check::field_type(from).map(|t| t.family),
+        ordo_schema::check::field_type(to),
+    );
+    let n = &from.name;
+    match (a, b) {
+        (Some(x), Some(t)) if t.family == Family::Text && x != Family::Text => format!("text({n})"),
+        (Some(Family::Text), Some(t)) if t.family == Family::Number => {
+            format!("int({n})")
+        }
+        (Some(Family::Number), Some(t)) if t.family == Family::Number => {
+            format!("round({n}, {})", t.places.unwrap_or(0))
+        }
+        (Some(Family::Text), Some(t)) if t.family == Family::Bool => format!("bool({n})"),
+        (Some(Family::Text), Some(t)) if t.family == Family::Date => format!("date({n})"),
+        (Some(Family::Text), Some(t)) if t.family == Family::Datetime => {
+            format!("datetime({n})")
+        }
+        _ => n.clone(),
+    }
+}
+
+/// Whether the mapping `src` gives what `f` holds (type casts on a rename,
+/// `forward-gaps` asks 15 and 17): the same kind, and for a number no more
+/// places than `f` keeps. `None` when it does, or when the kind cannot be
+/// told without the database. Else the refusal, naming a conversion.
+///
+/// A conversion Ordo has no function for (text to a date) is refused as
+/// `map_cast_not_built`; one that loses places as `map_cast_required`,
+/// naming `round`, since Ordo never rounds unasked. A `money` field is
+/// stored in minor units, and no mapping fills one yet.
+fn mapping_fits(
+    entity: &str,
+    f: &ordo_schema::Field,
+    over: &[ordo_schema::Field],
+    expr: &ordo_syntax::Expr,
+    src: &str,
+    example: &str,
+) -> Option<(&'static str, String)> {
+    use ordo_schema::check::Family;
+    let want = ordo_schema::check::field_type(f)?;
+    let fix = if example.is_empty() || example == src {
+        String::new()
+    } else {
+        format!(", for example `--fill {entity}.{}={example}`", f.name)
+    };
+    // A money field is stored in minor units and a mapping gives major
+    // ones, converted exactly ([`stored_sql`]): only a value whose places
+    // are known to fit converts without rounding.
+    let money = money_places(f);
+    let Some(got) = ordo_schema::check::mapping_type(over, expr) else {
+        return money.map(|p| {
+            (
+                "map_cast_required",
+                format!(
+                    "`{entity}.{}` is money with {p} place(s), and Ordo cannot tell how many \
+                     `{src}` gives. State it: `--fill {entity}.{}=round({src}, {p})`",
+                    f.name, f.name
+                ),
+            )
+        });
+    };
+    if want.family != got.family {
+        let built = matches!(
+            (got.family, want.family),
+            (_, Family::Text)
+                | (Family::Text, Family::Number)
+                | (Family::Text, Family::Bool)
+                | (Family::Text, Family::Date)
+                | (Family::Text, Family::Datetime)
+        );
+        if !built {
+            return Some((
+                "map_cast_not_built",
+                format!(
+                    "`{entity}.{}` holds {} and `{src}` gives {}. Ordo has no conversion from {} to {} yet. Keep the type in this version, or fill `{}` with an op",
+                    f.name,
+                    want.family.as_str(),
+                    got.family.as_str(),
+                    got.family.as_str(),
+                    want.family.as_str(),
+                    f.name
+                ),
+            ));
+        }
+        return Some((
+            "map_cast_required",
+            format!(
+                "`{entity}.{}` holds {} and `{src}` gives {}. Ordo does not convert unasked: state the conversion{fix}",
+                f.name,
+                want.family.as_str(),
+                got.family.as_str()
+            ),
+        ));
+    }
+    if let (Some(keep), Some(has)) = (want.places, got.places) {
+        if has > keep {
+            return Some((
+                "map_cast_required",
+                format!(
+                    "`{entity}.{}` keeps {keep} place(s) and `{src}` gives {has}. Ordo never \
+                     rounds unasked: state it with `round`{fix}",
+                    f.name
+                ),
+            ));
+        }
+    }
+    if let (Some(p), None) = (money, got.places) {
+        return Some((
+            "map_cast_required",
+            format!(
+                "`{entity}.{}` is money with {p} place(s), and Ordo cannot tell how many `{src}` \
+                 gives. State it: `--fill {entity}.{}=round({src}, {p})`",
+                f.name, f.name
+            ),
+        ));
+    }
+    None
+}
+
+/// The places of a `money` field, or `None` for any other.
+fn money_places(f: &ordo_schema::Field) -> Option<u8> {
+    match f.ty {
+        ordo_schema::FieldTy::Scalar(ordo_syntax::ScalarTy::Money(p)) if !f.sealed => Some(p),
+        _ => None,
+    }
+}
+
+/// A mapping's SQL as `f`'s column stores it. A mapping reads and gives
+/// money in major units (`check` does too, 27ak); a `money(p)` column holds
+/// minor ones, so the value is multiplied by `10^p`, which rounds nothing,
+/// and stored as the column's integer. [`mapping_fits`] has already refused
+/// a value with more places than `p`.
+pub fn stored_sql(f: &ordo_schema::Field, sql: &str) -> String {
+    match money_places(f) {
+        Some(0) => format!("(({sql}))::bigint"),
+        Some(p) => format!("(({sql}) * 1{})::bigint", "0".repeat(usize::from(p))),
+        None => sql.to_string(),
+    }
+}
+
+/// A declared rename in a stored plan (increment 11a): the statements of
+/// the expand, the backfill that copies the old column into the new one,
+/// and the new column's `NOT NULL`, which lands when the move closes.
+///
+/// The expand adds the new column open to nulls (with its default, if it
+/// has one). The old column keeps its `NOT NULL`, so the version before
+/// still loads over the database; when it has no default it gets the new
+/// field's, so the new version's inserts, which do not name it, are taken
+/// and the dual writes set its value in the same transaction. Until the
+/// move closes, the new field's `required` is held by the host's guards on
+/// every write (`ordo_exec::overlay`). A sealed or file field is not copied
+/// this way: its copy needs the write path's custody.
+type RenameParts = (Vec<String>, BackfillStep, Option<String>);
+
+fn rename_backfill(
+    c: &Change,
+    e: &ordo_schema::Entity,
+    live: &LiveShape,
+    from: &str,
+    field: &str,
+    version: &str,
+) -> Result<RenameParts, Box<Refused>> {
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    let Some(f) = e.field(field) else {
+        return Err(refuse(
+            "mapping_invalid",
+            format!("`{}.{field}` is not declared", e.name),
+        ));
+    };
+    if f.sealed || f.indexed || f.is_content() {
+        return Err(refuse(
+            "rename_backfill_not_built",
+            format!(
+                "`{}.{field}` is sealed or a file, and the backfill worker copies neither: a \
+                 sealed copy needs a key lease (increment 13), a file's handle the upload's \
+                 custody. Apply the rename with `ordo apply`, which copies it in the step",
+                e.name
+            ),
+        ));
+    }
+    let mut open = e.clone();
+    for g in open.fields.iter_mut().filter(|g| g.name == field) {
+        g.optional = true;
+    }
+    let of = open
+        .field(field)
+        .ok_or_else(|| refuse("mapping_invalid", format!("`{}.{field}`", e.name)))?;
+    let mut expand = rename_recorded(e, f, from, version);
+    expand.extend(
+        ordo_schema::ddl::add_column(&open, of)
+            .map_err(|x| refuse("mapping_invalid", format!("{}: {}", x.code, x.message)))?,
+    );
+    expand.extend(rename_old_default(e, f, live, from).map_err(|why| {
+        let (class, why) = match why.split_once(": ") {
+            Some(("prev_default_required", rest)) => ("prev_default_required", rest.to_string()),
+            _ => ("mapping_invalid", why),
+        };
+        refuse(class, why)
+    })?);
+    let t = ordo_schema::ddl::q(&e.name);
+    let close = (!f.optional).then(|| {
+        format!(
+            "ALTER TABLE {t} ALTER COLUMN {} SET NOT NULL;\n",
+            ordo_schema::ddl::q(&f.column())
+        )
+    });
+    Ok((
+        expand,
+        BackfillStep {
+            code: c.code(),
+            entity: e.name.clone(),
+            field: field.to_string(),
+            column: f.column(),
+            column_ty: ordo_schema::ddl::column_ty(f),
+            mapping: FillMapping::Expr(from.to_string()),
+            sql: Some(ordo_schema::ddl::q(from)),
+            audit: ordo_commandlog::BackfillAudit::Summarised,
+            sealing_from: None,
+            kept_plaintext: None,
+            indexing_from: None,
+        },
+        close,
+    ))
 }
 
 /// The two steps a foreign key, an enum pin or a check takes onto a table
@@ -2336,10 +7036,14 @@ pub async fn execute_with(
     steps: &[Step],
     locks: &LockPolicy,
 ) -> Result<Executed, ExecFailure> {
-    let tx_steps: Vec<&Step> = steps
+    // A rename's records in `$renames` first, before any table's lock: a
+    // write takes `$renames` first too, so the two never wait on each
+    // other in opposite orders (increment 11a).
+    let (records, rest): (Vec<&Step>, Vec<&Step>) = steps
         .iter()
         .filter(|s| matches!(s.phase, Phase::Table | Phase::Alter))
-        .collect();
+        .partition(|s| is_rename_record(&s.sql));
+    let tx_steps: Vec<&Step> = records.into_iter().chain(rest).collect();
     let validate_steps: Vec<&Step> = steps
         .iter()
         .filter(|s| s.phase == Phase::Validate)
@@ -2566,7 +7270,7 @@ pub struct Record<'a> {
     pub from: Option<&'a str>,
     pub to: &'a str,
     pub actor: &'a str,
-    /// What the caller was: `ordo apply`, `ordo migrate --apply`, or the
+    /// What the caller was: `ordo apply`, `std.deployment.evolve`, or the
     /// platform op that 18l adds.
     pub op: &'a str,
     pub changes: &'a str,
@@ -2668,6 +7372,10 @@ pub enum Applied {
         /// The `$migrations` row and the event note, or why recording
         /// failed (the DDL still landed).
         recorded: Result<(i64, String), String>,
+        /// The backfills still to run, and what lands after them (10b).
+        /// Empty unless a stored plan's fills were stated.
+        backfills: Vec<BackfillStep>,
+        after: Vec<Step>,
     },
 }
 
@@ -2685,7 +7393,7 @@ pub enum ApplyRefusal {
     /// measured against a baseline that is not there.
     ServingDrifted { serving: String, drift: Vec<Change> },
     /// The triage refused some change; nothing was sent.
-    NotApplied(Triaged),
+    NotApplied(Box<Triaged>),
     /// Creating the schema failed.
     CreateFailed(String),
     /// Executing failed. `recorded` says whether the failure was written.
@@ -2777,10 +7485,14 @@ pub fn safe_changes_value(v: Option<&str>) -> Option<bool> {
     }
 }
 
-/// A change that cannot lose or reject data: class A, or a foreign key
-/// that arrives on a table this same plan creates (so it holds no rows).
+/// A change that cannot lose or reject data: class A, a foreign key
+/// that arrives on a table this same plan creates (so it holds no rows), or
+/// a field rename the program declares with `prev` (§5 B4,
+/// `plan-syntax-additions.md` §5): the values are copied and the old column
+/// is kept, so nothing is lost and a revert reads it again.
 fn is_safe_change(c: &Change, all: &[&Change]) -> bool {
     match c {
+        Change::RenameField { .. } => true,
         Change::AddForeignKey { entity, .. } => all
             .iter()
             .any(|o| matches!(o, Change::AddEntity { entity: e } if e == entity)),
@@ -2793,11 +7505,47 @@ fn is_safe_change(c: &Change, all: &[&Change]) -> bool {
 /// refused, and every change is safe. `std.deployment.plan` asks the same
 /// question [`apply_safe`] does, so a preview and an apply cannot disagree.
 pub fn all_safe(plan: &Plan) -> bool {
+    let plan = without_drops(plan);
     let all: Vec<&Change> = plan.changes().collect();
     plan.present() > 0
         && plan.refusals.is_empty()
         && !all.is_empty()
         && all.iter().all(|c| is_safe_change(c, &all))
+}
+
+/// The plan without its dropped fields and entities, and without the
+/// refusals they raised.
+///
+/// A drop is never executed by an apply: its column or table stays, and the
+/// gate tolerates it (§8.2, "A dropped field"). A program that only drops
+/// applies as `Matches { pending }`. Before 2026-11-23 a program that added
+/// a field and dropped another was refused whole, because the drop's
+/// `drop_read_by_active_op` (the serving version still reads it) counted
+/// against the addition. Found by notes v3 (`plan-versions.md`, increment
+/// 7a). The safe additions are judged and applied alone now, and the drop
+/// stays pending as a drop alone does.
+fn without_drops(plan: &Plan) -> std::borrow::Cow<'_, Plan> {
+    let is_drop = |c: &Change| matches!(c, Change::DropField { .. } | Change::DropEntity { .. });
+    if !plan.assessed.iter().any(|a| is_drop(&a.change)) {
+        return std::borrow::Cow::Borrowed(plan);
+    }
+    let mut out = plan.clone();
+    let (drops, kept): (Vec<Assessed>, Vec<Assessed>) =
+        out.assessed.into_iter().partition(|a| is_drop(&a.change));
+    out.assessed = kept;
+    for a in &drops {
+        if a.change.refusal().is_none() && a.change.class() == Class::D {
+            out.destructive = out.destructive.saturating_sub(1);
+        }
+        for r in &a.refused {
+            let class = r.split(" — ").next().unwrap_or(r);
+            let line = format!("{class} on `{}`", a.change.entity());
+            if let Some(at) = out.refusals.iter().position(|x| *x == line) {
+                out.refusals.remove(at);
+            }
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// What [`apply_safe`] did.
@@ -2817,7 +7565,7 @@ pub enum SafeApply {
 
 /// Apply the program's changes over a database that is behind, when every
 /// one of them is safe (see [`is_safe_change`]) and the setting is on.
-/// The same path as `ordo migrate --apply`: plan, triage, execute, record.
+/// The same path as `ordo evolve --run`: plan, triage, execute, record.
 pub async fn apply_safe(
     pool: &Pool,
     program: &Program,
@@ -2832,6 +7580,8 @@ pub async fn apply_safe(
     if !all_safe(&plan) {
         return Ok(SafeApply::NotSafe);
     }
+    // A drop beside the additions is left pending, as a drop alone is.
+    let plan = without_drops(&plan).into_owned();
     let all: Vec<&Change> = plan.changes().collect();
     let changes: Vec<(String, String)> = all
         .iter()
@@ -2860,7 +7610,7 @@ pub async fn apply_safe(
 /// lines (owner ruling 2026-11-18, `ordo_exec::peer::grant_readers`): a
 /// table this apply creates is granted in the same apply, and a table taken
 /// off a line is revoked.
-async fn apply_planned(
+pub async fn apply_planned(
     pool: &Pool,
     plan: &Plan,
     actor: &str,
@@ -2937,7 +7687,7 @@ async fn apply_planned_tables(
     .await
     .map_err(ApplyRefusal::Internal)?;
     if !triaged.refused.is_empty() {
-        return Err(ApplyRefusal::NotApplied(triaged));
+        return Err(ApplyRefusal::NotApplied(Box::new(triaged)));
     }
 
     let changes = plan
@@ -2977,12 +7727,29 @@ async fn apply_planned_tables(
             (Err(failure), phase, note)
         }
     };
+    // A step with backfills (10b) has only expanded here: the database
+    // still holds the version before it until each backfill verifies and
+    // its `NOT NULL` lands, so the record names that version, and the stale
+    // check of a run again finds the step still to finish.
+    let expanded_only = !triaged.backfills.is_empty();
+    let note = if expanded_only && note.is_empty() {
+        format!(
+            "expand of {}; {} backfill(s) to run before it is recorded",
+            plan.program.version,
+            triaged.backfills.len()
+        )
+    } else {
+        note
+    };
     let recorded = record(
         pool,
         &Record {
             kind: migrate::kind::ADDITIVE,
             from,
-            to: &plan.program.version,
+            to: match (expanded_only, from) {
+                (true, Some(f)) => f,
+                _ => &plan.program.version,
+            },
             actor,
             op,
             changes: &changes,
@@ -2997,6 +7764,8 @@ async fn apply_planned_tables(
             steps: triaged.steps,
             executed,
             recorded,
+            backfills: triaged.backfills,
+            after: triaged.after,
         }),
         Err(failure) => Err(ApplyRefusal::ExecFailed(Box::new(ExecFailed {
             steps: triaged.steps,
@@ -3190,9 +7959,27 @@ pub async fn bring_forward_from(
             (written, choices)
         }
     };
+    // **Back across B10, or forward again** (increment 13): a blind index
+    // this database keeps under the normalization `program` declares is
+    // whole, so the change of `normalize` needs no reindex. The diff reads
+    // it as declared already; the node trades the index in before it
+    // serves the tenant on `program` ([`restore_kept_indexes`]), under the
+    // epoch of the pin that follows, so nothing written before the pin
+    // moves reads or writes the other one.
+    let written = match written {
+        Some(w) => {
+            let kept = kept_indexes_due(pool, &program.schema)
+                .await
+                .map_err(|e| internal(e.to_string()))?;
+            Some(as_kept(&w, &program.schema, &kept))
+        }
+        None => None,
+    };
     let plan = self::plan_with(pool, program, &choices, written.as_ref())
         .await
         .map_err(internal)?;
+    // A drop is left pending here as on the deployment's own database.
+    let plan = without_drops(&plan).into_owned();
     let statements = match apply_planned(pool, &plan, actor, op).await {
         Ok(Applied::Additive { steps, .. }) => steps.len(),
         Ok(Applied::Created(c)) => c.tables,
@@ -3236,6 +8023,13 @@ pub async fn bring_forward_from(
             .map_err(internal)?;
         }
         Err(e) => return Err(internal(e.to_string())),
+    }
+    // What the version left behind here (§2.7). Read against the version
+    // this database held, when the deployment's own database could say it.
+    if let Some(prior) = &written {
+        record_orphans(pool, prior, program, before.as_deref(), actor)
+            .await
+            .map_err(internal)?;
     }
     Ok(Forward::Advanced { statements })
 }

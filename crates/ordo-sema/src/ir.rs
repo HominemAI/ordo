@@ -458,7 +458,20 @@ pub struct ExternalRead {
     pub prefix: String,
     /// Every declared field, in declaration order.
     pub columns: Vec<ExternalColumn>,
+    /// `Some(nickname)` when the peer is read through its door
+    /// (`ORDO_PEER_<NAME>_URL`, step G5): the table is never read, and each
+    /// read is served the rows the holder answered ([`Self::served`]).
+    pub door: Option<String>,
+    /// The rows the holder answered for this call, by the alias that reads
+    /// them. Set by the executor for one statement and dropped with it: no
+    /// copy outlives the call (`plan-federation-grants.md` §2, rule 1).
+    pub served: Option<ServedRows>,
 }
+
+/// One door-served alias's rows: each row the key column's value, then
+/// each declared column's, in [`ExternalRead::columns`] order, as text
+/// (`None` is SQL null). A json value is its compact text.
+pub type ServedRows = std::sync::Arc<std::collections::BTreeMap<String, Vec<Vec<Option<String>>>>>;
 
 /// One field of an external entity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -469,6 +482,8 @@ pub struct ExternalColumn {
     /// For a ref (to another external), the target's typed-id prefix: the
     /// column is shown as that target's id.
     pub ref_prefix: Option<String>,
+    /// The field's value type: what a door-served value is cast to.
+    pub ty: ScalarTy,
 }
 
 /// Entity name to how it is read. Shared, for [`NotNullColumns`]' reason.

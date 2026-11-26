@@ -37,6 +37,7 @@
       "constant.language.ordo": ["null", "true", "false"]
     },
     "contextual": {
+      "keyword.declaration.ordo": ["edition"],
       "keyword.other.access-verb.ordo": ["read", "write", "admin"],
       "keyword.other.access-open.ordo": ["open"],
       "keyword.other.schedule.ordo": ["day"],
@@ -52,7 +53,8 @@
       "support.function.ordo": [
         "year", "month", "week", "day", "hour", "dow", "abs", "round", "floor",
         "ceil", "mod", "least", "greatest", "hash", "allocate", "coalesce",
-        "lower", "length", "trim"
+        "lower", "length", "trim", "before", "after", "text", "int", "bool", "date",
+        "datetime"
       ],
       "support.function.aggregate.ordo": [
         "count", "sum", "avg", "min", "max", "median", "percentile", "distinct", "joined"
@@ -73,6 +75,7 @@
     { "include": "#trigger-when" },
     { "include": "#arrow-run" },
     { "include": "#run-header" },
+    { "include": "#declaration-edition" },
     { "include": "#declaration-domain" },
     { "include": "#declaration-named" },
     { "include": "#declaration-routine" },
@@ -203,6 +206,15 @@
       "comment": "A routine's `run(...):` header. `run` is contextual — a field may still be named `run`, so only this position colours it.",
       "match": "^\\s*(run)\\s*(?=\\()",
       "captures": { "1": { "name": "keyword.other.trigger-run.ordo" } }
+    },
+
+    "declaration-edition": {
+      "comment": "`edition 2`, once per program, at the top level (`plan-versions.md` §2.6). `edition` is contextual: a field may still be named `edition`, so only a line that is the word and a number colours it.",
+      "match": "^\\s*(edition)\\s+(\\d+)\\b",
+      "captures": {
+        "1": { "name": "keyword.declaration.ordo" },
+        "2": { "name": "constant.numeric.edition.ordo" }
+      }
     },
 
     "declaration-domain": {
@@ -438,7 +450,7 @@
 
     "function": {
       "comment": "The closed expression-function set, with its arities checked by the parser. Coloured only when a `(` follows, so a field named `round` stays a field.",
-      "match": "\\b(year|month|week|day|hour|dow|abs|round|floor|ceil|mod|least|greatest|hash|allocate|coalesce|lower|length|trim)\\b\\s*(?=\\()",
+      "match": "\\b(year|month|week|day|hour|dow|abs|round|floor|ceil|mod|least|greatest|hash|allocate|coalesce|lower|length|trim|before|after|text|int|bool|date|datetime)\\b\\s*(?=\\()",
       "captures": { "1": { "name": "support.function.ordo" } }
     },
 

@@ -235,6 +235,7 @@ pub fn specs() -> Vec<OpSpec> {
             "yourRole",
             "version",
             "ordinal",
+            "move",
         ]
         .iter()
         .map(|f| FieldSpec::new(*f))
@@ -309,6 +310,15 @@ impl TenantListOps {
                 .await
                 .map_err(|e| e.to_exec_error("the versions' order numbers could not be read"))?
         };
+        // A tenant still on its version while its database is brought to
+        // the active one, and why (`plan-versions.md` §2.1, increment 7).
+        let moves: BTreeMap<String, crate::versions::Move> = versions
+            .moves()
+            .await
+            .map_err(|e| e.to_exec_error("the tenants' open moves could not be read"))?
+            .into_iter()
+            .map(|m| (m.space.clone(), m))
+            .collect();
         let include_reaped = bound
             .0
             .get("includeReaped")
@@ -367,6 +377,18 @@ impl TenantListOps {
                     "yourRole": roles.get(&t.id).copied().flatten(),
                     "version": pins.get(&t.id),
                     "ordinal": pins.get(&t.id).and_then(|v| ordinals.get(v)),
+                    "move": moves.get(&t.id).map(|m| json!({
+                        "from": m.from,
+                        "to": m.to,
+                        "phase": m.phase.as_str(),
+                        "reason": m.reason,
+                        "since": m.started_at,
+                        "line": m.line(),
+                        // A move with dual writes (increment 11a): its
+                        // step and the end of its soak.
+                        "step": (!m.step.is_empty()).then_some(&m.step),
+                        "soakUntil": (m.soak_until > 0).then_some(m.soak_until),
+                    })),
                 })
             })
             .collect();

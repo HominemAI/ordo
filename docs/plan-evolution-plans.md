@@ -130,7 +130,7 @@ waits for a choice:
 | New required field, no default (B2) | constant · expression · refuse |
 | Add a unique (C1) with duplicates | refuse (default) · show me the duplicates |
 | Drop a field (D1) | drop now · keep the column, stop serving it (contract later) |
-| Change a money or decimal field's places (B11) | rescale · keep. **Built** (25aa) as `--places` on `ordo plan` and `ordo migrate --apply`, until the stored plan holds it |
+| Change a money or decimal field's places (B11) | rescale · keep. **Built** (25aa) as `--places` on `ordo plan` and `ordo evolve`, which stores it with the plan |
 
 A choice is recorded in the plan and travels to every tenant that runs it,
 so every tenant gets the same answer.
@@ -226,7 +226,9 @@ Ruled 2026-10-01, in `corpus-rulings.md`. In short:
 
 - **Refuse, with the options in the error.** Decisions happen on paper.
 - **Pre-checks run every check against every tenant** and report all issues
-  at once, each with its Ordo-level remediation (27w).
+  at once, each with its Ordo-level remediation (27w). Built 2026-11-23 in
+  `plan-versions.md` increment 9: `ordo evolve` lists every issue from
+  every database, and `--run` refuses while one is open.
 - **`prev` declares renames and correspondence:** `entity b (prev a) {}`,
   `field x (prev c)`, one version back only (27x). Source or plan: ask 23.
 - **Orphan instead of drop.** Undeclared fields and entities are kept and
@@ -252,6 +254,23 @@ Ruled 2026-10-01, in `corpus-rulings.md`. In short:
   the others.
 
 ## 4 · What changes in the code
+
+> **Review 2026-11-23.** 3 things landed or were ruled after this table.
+>
+> - The command is `ordo evolve` (ruled 2026-10-04). It is a door op,
+>   `std.deployment.evolve` (the CLI goes through the door, ruled
+>   2026-11-05). `ordo migrate --apply --direct` is what it replaces.
+> - An external entity never appears in a plan's steps. Its check runs in
+>   `plan_with` beside the plan, per database.
+> - A plan that changes a table a `reader` line names lists the readers
+>   (`plan-evolution-federation.md` §3).
+>
+> The build order is `plan-versions.md` §4, increments 8 and 9.
+>
+> Built 2026-11-23 (increment 8): `crates/ordo-host/src/evolve.rs`. The
+> plan is not run from stored SQL. Each run renders its step again on its
+> database with the stored options, and the digest checks it renders as
+> stored (D3).
 
 | Piece | Change |
 |---|---|

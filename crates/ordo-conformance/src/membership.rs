@@ -863,6 +863,7 @@ impl Fixture {
             // no differently from anyone else, because rule 6 is not what
             // let them.
             owner_administration: false,
+            backfill: None,
             restored_unverified: false,
             restore: None,
         })

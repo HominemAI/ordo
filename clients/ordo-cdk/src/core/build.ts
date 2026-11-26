@@ -29,6 +29,7 @@ import type {
   ExternalNode,
   PeerNode,
   ReaderNode,
+  GrantNode,
   FieldKindNode,
   FieldNode,
   GuardClauseNode,
@@ -73,6 +74,7 @@ export class TypeSpec {
   inlineFlag = false;
   privateFlag = false;
   normalizeName: string | null = null;
+  prevNames: string[] | null = null;
   defaultValue: ExprNode | null = null;
   maxValue: ExprNode | null = null;
 
@@ -165,6 +167,22 @@ export class TypeSpec {
     return this;
   }
 
+  /**
+   * `prev(old)` or `prev(first, last)` — the name(s) this field had in the
+   * previous version. `entity.field` names a field that moved from another
+   * entity. Two names are a merge.
+   */
+  prev(...names: string[]): this {
+    if (names.length === 0) throw new Error('`prev` needs at least one previous field name');
+    for (const n of names) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(n)) {
+        throw new Error(`\`prev('${n}')\`: a previous name is \`field\` or \`entity.field\``);
+      }
+    }
+    this.prevNames = names;
+    return this;
+  }
+
   default(v: Value): this {
     this.defaultValue = v.node;
     return this;
@@ -203,6 +221,13 @@ export class TypeSpec {
     }
     if (this.normalizeName !== null) {
       refuse('external_unsupported', 'normalize', 'the other system owns the column');
+    }
+    if (this.prevNames !== null) {
+      refuse(
+        'external_unsupported',
+        'prev',
+        'a translation is re-imported on every apply; to follow a renamed column, change the column name',
+      );
     }
     if (this.defaultValue !== null) {
       refuse('external_unsupported', 'default', 'Ordo never writes the row');
@@ -299,6 +324,7 @@ function fieldNode(name: string, s: TypeSpec): FieldNode {
     inline: s.inlineFlag,
     private: s.privateFlag,
     normalize: s.normalizeName,
+    prev: s.prevNames,
   };
 }
 
@@ -315,6 +341,7 @@ export function paramNode(name: string, s: TypeSpec): ParamNode {
     [s.inlineFlag, 'inline'],
     [s.privateFlag, 'private'],
     [s.normalizeName !== null, 'normalize'],
+    [s.prevNames !== null, 'prev'],
   ] as const) {
     if (flag) throw new Error(`\`$${name}\`: \`${word}\` is a field modifier, not a parameter one`);
   }
@@ -686,6 +713,8 @@ export function domain(name: string, version?: string): DomainNode {
 export interface EntityOptions {
   /** `entity projects (key: proj)` — the typed-id prefix override. */
   readonly key?: string;
+  /** `entity customers (prev: clients)` — the entity's name in the previous version. */
+  readonly prev?: string;
 }
 
 /** An entity declaration, usable as a source wherever one is wanted. */
@@ -693,6 +722,7 @@ export class Entity implements Sourceable {
   readonly kind = 'entity' as const;
   readonly name: string;
   readonly key: string | null;
+  readonly prev: string | null;
   readonly fields: FieldNode[];
   accessReadClause: GuardClauseNode | null = null;
   accessWriteClause: GuardClauseNode | null = null;
@@ -705,6 +735,10 @@ export class Entity implements Sourceable {
   constructor(name: string, fields: Record<string, TypeSpec>, options?: EntityOptions) {
     this.name = name;
     this.key = options?.key ?? null;
+    if (options?.prev !== undefined && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(options.prev)) {
+      throw new Error(`\`${name}\`: \`prev\` is the previous entity name, one bare name`);
+    }
+    this.prev = options?.prev ?? null;
     this.fields = Object.entries(fields).map(([n, s]) => fieldNode(n, s));
   }
 
@@ -786,6 +820,7 @@ export class Entity implements Sourceable {
       kind: 'entity',
       name: this.name,
       key: this.key,
+      prev: this.prev,
       fields: this.fields,
       accessRead: this.accessReadClause,
       accessWrite: this.accessWriteClause,
@@ -812,12 +847,18 @@ export function entity(
  * peer's `notes`, in the schema `ORDO_PEER_JOURNAL_SCHEMA` names, and
  * `$caller` on it means the peer's member for the same person. Pass the
  * peer to `synth` before the externals that read it.
+ *
+ * With `uses`, `peer('notes', ['std.notes.list', 'addComment'])` prints the
+ * block form: the holder's ops this deployment calls through the holder's
+ * door (`plan-federation-grants.md` §4). The holder's address is the
+ * setting `ORDO_PEER_<NAME>_URL`, never the file.
  */
 export class Peer {
   readonly kind = 'peer' as const;
   readonly name: string;
+  readonly uses: readonly string[] | null;
 
-  constructor(name: string) {
+  constructor(name: string, uses?: readonly string[]) {
     if (!/^[a-z][a-z0-9]*$/.test(name)) {
       throw new Error(
         `peer_name: \`peer ${name}\`: a peer name is lowercase letters and digits, ` +
@@ -825,16 +866,40 @@ export class Peer {
       );
     }
     this.name = name;
+    if (uses !== undefined) {
+      if (uses.length === 0) {
+        throw new Error(
+          `peer_block: \`peer ${name} { }\` names no op. List the holder's ops this ` +
+            'deployment calls, or leave `uses` out',
+        );
+      }
+      const seen = new Set<string>();
+      for (const op of uses) {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/.test(op)) {
+          throw new Error(
+            `peer_block: \`peer ${name}\`: \`${op}\` is not an op name. A line is one exact ` +
+              "op name of the holder; patterns belong in the holder's grant",
+          );
+        }
+        if (seen.has(op)) {
+          throw new Error(`peer_block: \`peer ${name}\` names \`${op}\` twice; keep one`);
+        }
+        seen.add(op);
+      }
+      this.uses = [...uses];
+    } else {
+      this.uses = null;
+    }
   }
 
   node(): PeerNode {
-    return { kind: 'peer', name: this.name };
+    return { kind: 'peer', name: this.name, uses: this.uses };
   }
 }
 
-/** `peer('journal')`: see {@link Peer}. */
-export function peer(name: string): Peer {
-  return new Peer(name);
+/** `peer('journal')` or `peer('notes', ['std.notes.list'])`: see {@link Peer}. */
+export function peer(name: string, uses?: readonly string[]): Peer {
+  return new Peer(name, uses);
 }
 
 /**
@@ -868,6 +933,80 @@ export function reader(name: string, tables: readonly (string | Entity)[]): Read
   return { kind: 'reader', name, tables: names };
 }
 
+/** What `grant()` and `grantProvider()` take beside the lines. */
+export interface GrantOptions {
+  /** `as itself`: calls carrying no person are allowed too. */
+  readonly asItself?: boolean;
+}
+
+/** One line of a grant: an op name, `'/regex/'`, `'*'`, each optionally after `!`. */
+function grantLine(header: string, line: string | Op): string {
+  const text = typeof line === 'string' ? line.trim() : line.name;
+  const body = text.startsWith('!') ? text.slice(1) : text;
+  const ok =
+    body === '*' ||
+    (body.length > 2 && body.startsWith('/') && body.endsWith('/')) ||
+    /^[a-z][A-Za-z0-9]*(\.[A-Za-z][A-Za-z0-9]*)*$/.test(body);
+  if (!ok) {
+    throw new Error(
+      `grant_block: \`${header}\`: \`${text}\` is not a line. A line is an op name ` +
+        "('std.notes.get'), a pattern matching whole names ('/add.*/') or every op ('*'), " +
+        "and '!' before it takes ops away",
+    );
+  }
+  return text;
+}
+
+function grantNode(
+  name: string,
+  provider: boolean,
+  asItself: boolean,
+  lines: readonly (string | Op)[],
+): GrantNode {
+  const header = provider
+    ? `grant provider ${name}`
+    : asItself
+      ? `grant ${name} as itself`
+      : `grant ${name}`;
+  if (!/^[a-z][a-z0-9_]*$/.test(name)) {
+    throw new Error(
+      `grant_block: \`${header}\`: a grant name is lowercase letters, digits and underscores, ` +
+        'starting with a letter. It is upper-cased into ORDO_CONSUMER_<NAME>_CLIENT',
+    );
+  }
+  if (lines.length === 0) {
+    throw new Error(
+      `grant_block: \`${header}\` has no line, so it grants nothing. Name the ops it opens`,
+    );
+  }
+  return { kind: 'grant', name, provider, asItself, lines: lines.map((l) => grantLine(header, l)) };
+}
+
+/**
+ * `grant note_viewer { … }`: the ops the consumer `note_viewer` may call
+ * through this deployment's door, on behalf of a person (or as itself with
+ * `{ asItself: true }`). The consumer's id is the setting
+ * `ORDO_CONSUMER_NOTE_VIEWER_CLIENT`, never the file. Each line is an op (or
+ * its name), `'/regex/'`, or `'*'`, optionally after `'!'`; the last line
+ * that matches an op decides. Expanded against the ops at apply, and
+ * checked by the door on every call from another deployment.
+ */
+export function grant(
+  name: string,
+  lines: readonly (string | Op)[],
+  options: GrantOptions = {},
+): GrantNode {
+  return grantNode(name, false, options.asItself === true, lines);
+}
+
+/**
+ * `grant provider hominem { … }`: every deployment registered at the identity
+ * service the sign-in connection `hominem` reaches, on behalf of a person only.
+ */
+export function grantProvider(name: string, lines: readonly (string | Op)[]): GrantNode {
+  return grantNode(name, true, false, lines);
+}
+
 /** The platform's own entities, which a reader line may name without declaring. */
 const PLATFORM_ENTITIES = new Set(['members', 'groupMembers']);
 
@@ -887,6 +1026,8 @@ type ExternalWhere =
 export type ExternalOptions = ExternalWhere & {
   /** `external projects (key: proj)`: the typed-id prefix override. */
   readonly key?: string;
+  /** Refused: an external's name follows the other system's table. */
+  readonly prev?: never;
   readonly table: string;
   /** Required, and only ever `true`: every space reads every row. */
   readonly shared: true;
@@ -915,6 +1056,12 @@ export class External implements Sourceable {
       throw new Error(`external_not_shared: \`${name}\` needs \`shared: true\``);
     }
     this.name = name;
+    if ((options as { prev?: unknown }).prev !== undefined) {
+      throw new Error(
+        'external_unsupported: `prev` cannot rename an external: a translation is ' +
+          're-imported on every apply; to follow a renamed table, change `table`',
+      );
+    }
     this.key = options.key ?? null;
     if (options.peer !== undefined && options.schema !== undefined) {
       throw new Error(`external ${name}: name a \`schema\` or a \`peer\`, not both`);
@@ -1166,6 +1313,7 @@ export function synth(...decls: Synthesizable[]): string {
   checkExternalRefs(nodes);
   checkPeers(nodes);
   checkReaders(nodes);
+  checkGrants(nodes);
   const out = nodes.map(printDeclaration);
   return out.join('\n\n') + '\n';
 }
@@ -1185,6 +1333,8 @@ function checkPeers(nodes: Declaration[]): void {
         throw new Error(`peer_name: \`peer ${n.name}\` is passed twice; pass it once`);
       }
       declared.add(n.name);
+      // A block is used by its own ops, through the holder's door.
+      if (n.uses !== null) read.add(n.name);
     }
     if (n.kind === 'external' && n.peer !== null) {
       if (!declared.has(n.peer)) {
@@ -1203,6 +1353,21 @@ function checkPeers(nodes: Declaration[]): void {
           `external(name, fields, { peer: ${p}, table: '…', shared: true })`,
       );
     }
+  }
+}
+
+/** Each grant is passed once. What its lines match is decided at apply. */
+function checkGrants(nodes: Declaration[]): void {
+  const names = new Set<string>();
+  for (const n of nodes) {
+    if (n.kind !== 'grant') continue;
+    const key = `${n.provider ? 'provider ' : ''}${n.name}`;
+    if (names.has(key)) {
+      throw new Error(
+        `grant_block: \`grant ${key}\` is passed twice. Pass one grant with every line`,
+      );
+    }
+    names.add(key);
   }
 }
 

@@ -322,6 +322,19 @@ async fn serve_door(site: &Site, name: &str) -> (Arc<Door>, String) {
     })
     .await
     .expect("app pool");
+    // With `rollout.strategy` unset, a deployment that is not dev rolls an
+    // apply out a batch at a time (ruled 2026-11-25). These tests apply and
+    // expect every node on the new version at once.
+    ordo_host::rollouts::Rollouts::on(&app)
+        .set_setting(
+            "rollout.strategy",
+            Some("all"),
+            "test",
+            "every tenant at once",
+            0,
+        )
+        .await
+        .expect("rollout.strategy all");
     let deploys = ordo_host::apply_op::ApplyOps::new(
         app.clone(),
         Arc::new(ordo_exec::route::SinglePool::new(app.clone())),

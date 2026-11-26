@@ -44,3 +44,8 @@ pub fn cli_code_hash(code: &str) -> String {
 pub fn oidc_code_hash(code: &str) -> String {
     tagged_hash("ordo-identity/oidc-code/v1", code)
 }
+
+/// What a spent client assertion's `jti` is stored as ([`crate::exchange`]).
+pub fn assertion_jti_hash(jti: &str) -> String {
+    tagged_hash("ordo-identity/assertion-jti/v1", jti)
+}

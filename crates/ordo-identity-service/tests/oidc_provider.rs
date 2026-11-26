@@ -85,6 +85,7 @@ async fn three_with(name: &str, extra: &[(&str, &str)]) -> H {
                     },
                     return_urls: vec![callback(origin)],
                     sign_up,
+                    consumer_key: None,
                 },
             )
             .await
@@ -298,7 +299,10 @@ async fn discovery_says_what_the_service_does() {
     assert_eq!(v["response_types_supported"], json!(["code"]));
     assert_eq!(v["code_challenge_methods_supported"], json!(["S256"]));
     assert_eq!(v["id_token_signing_alg_values_supported"], json!(["EdDSA"]));
-    assert_eq!(v["token_endpoint_auth_methods_supported"], json!(["none"]));
+    assert_eq!(
+        v["token_endpoint_auth_methods_supported"],
+        json!(["none", "private_key_jwt"])
+    );
     assert_eq!(v["authorization_response_iss_parameter_supported"], true);
 }
 

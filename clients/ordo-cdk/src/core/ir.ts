@@ -90,6 +90,8 @@ export interface FieldNode {
   /** `blob private` — client-sealed; the platform holds no key. */
   readonly private: boolean;
   readonly normalize: string | null;
+  /** `prev(…)`: the field's name(s) in the previous version. */
+  readonly prev: readonly string[] | null;
 }
 
 /**
@@ -124,6 +126,8 @@ export interface EntityNode {
   readonly kind: 'entity';
   readonly name: string;
   readonly key: string | null;
+  /** `(prev: old)`: the entity's name in the previous version. */
+  readonly prev: string | null;
   readonly fields: readonly FieldNode[];
   readonly accessRead: GuardClauseNode | null;
   readonly accessWrite: GuardClauseNode | null;
@@ -386,10 +390,15 @@ export interface AuthNode {
   } | null;
 }
 
-/** `peer journal`: a local nickname for another Ordo deployment. */
+/**
+ * `peer journal`: a local nickname for another Ordo deployment. With
+ * `uses`, the block form `peer notes { std.notes.list }`: the holder's ops
+ * this deployment calls through the holder's door.
+ */
 export interface PeerNode {
   readonly kind: 'peer';
   readonly name: string;
+  readonly uses: readonly string[] | null;
 }
 
 /**
@@ -402,11 +411,28 @@ export interface ReaderNode {
   readonly tables: readonly string[];
 }
 
+/**
+ * `grant note_viewer { std.notes.get  /add.*\/  !addAdmin }`: the ops another
+ * Ordo deployment may call through this one's door. Each line is an exact op
+ * name, a `/regex/` matching whole names, or `*`, optionally after `!`; the
+ * last line that matches an op decides. Expanded at apply.
+ */
+export interface GrantNode {
+  readonly kind: 'grant';
+  readonly name: string;
+  /** `grant provider <name>`: every deployment registered at that identity service. */
+  readonly provider: boolean;
+  /** `as itself`: calls with no person are allowed too. */
+  readonly asItself: boolean;
+  readonly lines: readonly string[];
+}
+
 /** Anything `synth()` accepts, in written order. */
 export type Declaration =
   | DomainNode
   | PeerNode
   | ReaderNode
+  | GrantNode
   | EntityNode
   | ExternalNode
   | OpNode

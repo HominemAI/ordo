@@ -232,6 +232,26 @@ impl World {
     /// `ordo apply <dir>` with this build's CLI, in this process, as the
     /// command line runs it. It waits for the running server to serve it.
     async fn apply_current(&self, dir: &Path) -> String {
+        // With `rollout.strategy` unset, a deployment that is not dev rolls
+        // an apply out a batch at a time (ruled 2026-11-25). This test
+        // expects every tenant on the new version at once.
+        let pool = ordo_exec::Pool::connect(PoolConfig {
+            db: self.db.clone(),
+            size: 1,
+            ..PoolConfig::from_env()
+        })
+        .await
+        .expect("control pool");
+        ordo_host::rollouts::Rollouts::on(&pool)
+            .set_setting(
+                "rollout.strategy",
+                Some("all"),
+                "test",
+                "every tenant at once",
+                0,
+            )
+            .await
+            .expect("rollout.strategy all");
         let args = vec![
             dir.display().to_string(),
             "--as".into(),

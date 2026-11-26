@@ -57,6 +57,42 @@ pub fn door_command(name: &str) -> String {
 /// The one promotion setting, off by default (`plan-versions.md` §3.1, §7).
 pub const SKIP_STAGING: &str = "promotion.skip_staging";
 
+/// `prune.enabled` (`plan-versions.md` §2.7, §7): whether `ordo evolve
+/// --prune` may remove an orphaned column here. Off in production and on
+/// in every other environment unless set.
+pub const PRUNE_ENABLED: &str = "prune.enabled";
+
+/// The command that sets it, for a refusal to name.
+pub const PRUNE_COMMAND: &str = "ordo environments set prune on --reason \"...\"";
+
+/// Whether a setting name given to `ordo environments set` is
+/// `prune.enabled`.
+pub fn is_prune_setting(name: &str) -> bool {
+    matches!(
+        name.trim(),
+        "prune" | "prune.enabled" | "prune_enabled" | "prune-enabled"
+    )
+}
+
+/// `preview.values` (`plan-versions.md` increment 15b, §7): whether a
+/// split's or a merge's preview in `ordo evolve` shows sample rows' values.
+/// It shows tenant data in a plan's output, so it is off in production and
+/// on elsewhere unless set, as `forward-gaps` ask 24 rules for the values a
+/// refusal suggests.
+pub const PREVIEW_VALUES: &str = "preview.values";
+
+/// The command that sets it, for the preview to name.
+pub const PREVIEW_COMMAND: &str = "ordo environments set preview on --reason \"...\"";
+
+/// Whether a setting name given to `ordo environments set` is
+/// `preview.values`.
+pub fn is_preview_setting(name: &str) -> bool {
+    matches!(
+        name.trim(),
+        "preview" | "preview.values" | "preview_values" | "preview-values"
+    )
+}
+
 /// The environment `promotion.skip_staging` skips.
 pub const STAGING: &str = "staging";
 
@@ -122,6 +158,17 @@ impl Door {
             space: space.to_string(),
             handle: handle.map(str::to_string),
         })
+    }
+}
+
+/// `promotion.release_mismatch` or `promotion.attestation_max_age`, by
+/// either spelling, when `setting` names one (`crate::rehearsals`).
+pub fn rehearsal_setting(setting: &str) -> Option<&'static str> {
+    let setting = setting.trim();
+    match setting.strip_prefix("promotion.").unwrap_or(setting) {
+        "release_mismatch" | "release-mismatch" => Some(crate::rehearsals::RELEASE_MISMATCH),
+        "attestation_max_age" | "attestation-max-age" => Some(crate::rehearsals::MAX_AGE),
+        _ => None,
     }
 }
 
@@ -492,9 +539,53 @@ impl<'a> Environments<'a> {
     ) -> Result<(PromotionSettings, bool), EnvironmentRefusal> {
         let setting = setting.trim();
         let named = setting.strip_prefix("promotion.").unwrap_or(setting);
+        // The signed rehearsal's two (`crate::rehearsals`, §3.2).
+        if let Some(name) = rehearsal_setting(setting) {
+            let value = value.trim();
+            if name == crate::rehearsals::RELEASE_MISMATCH {
+                if !matches!(value, "refuse" | "warn") {
+                    return Err(EnvironmentRefusal::Setting(format!(
+                        "{name} takes `refuse` or `warn`, not `{value}`"
+                    )));
+                }
+            } else {
+                crate::rehearsals::parse_age(value).map_err(EnvironmentRefusal::Setting)?;
+            }
+            let reason = crate::versions::check_reason(reason)
+                .map_err(|e| EnvironmentRefusal::Reason(e.to_string()))?;
+            let latest = format!(
+                "SELECT \"value\" FROM \"$promotion_settings\" WHERE \"setting\" = {} \
+                 ORDER BY \"seq\" DESC LIMIT 1",
+                sql_lit(name)
+            );
+            let was = match self.pool.rows(&latest).await {
+                Ok(rows) => rows.first().and_then(|r| r.first().cloned().flatten()),
+                Err(e) if e.is_missing_table() => None,
+                Err(e) => return Err(e.into()),
+            };
+            let now = self.promotion_settings().await?;
+            if was.as_deref() == Some(value) {
+                return Ok((now, false));
+            }
+            self.pool.rows(SETTINGS_DDL).await?;
+            self.pool
+                .rows(&format!(
+                    "INSERT INTO \"$promotion_settings\" (\"setting\", \"value\", \"actor\", \
+                     \"reason\", \"at\") VALUES ({}, {}, {}, {}, {at})",
+                    sql_lit(name),
+                    sql_lit(value),
+                    sql_lit(actor),
+                    sql_lit(&reason)
+                ))
+                .await?;
+            return Ok((now, true));
+        }
         if !matches!(named, "skip_staging" | "skip-staging") {
             return Err(EnvironmentRefusal::Setting(format!(
-                "`{setting}` is not a promotion setting. There is {SKIP_STAGING}"
+                "`{setting}` is not a promotion setting. There are {SKIP_STAGING}, \
+                 {PRUNE_ENABLED}, {} and {}",
+                crate::rehearsals::RELEASE_MISMATCH,
+                crate::rehearsals::MAX_AGE
             )));
         }
         let on = match value.trim() {
@@ -524,6 +615,98 @@ impl<'a> Environments<'a> {
             ))
             .await?;
         Ok((PromotionSettings { skip_staging: on }, true))
+    }
+
+    /// `prune.enabled`: its latest value, or off in production and on
+    /// elsewhere when never set. Answers the value and whether it was set.
+    pub async fn prune_enabled(&self) -> Result<(bool, bool), EnvironmentRefusal> {
+        self.flag(PRUNE_ENABLED).await
+    }
+
+    /// `preview.values` (15b): its latest value, or off in production and
+    /// on elsewhere when never set. Answers the value and whether it was
+    /// set.
+    pub async fn preview_values(&self) -> Result<(bool, bool), EnvironmentRefusal> {
+        self.flag(PREVIEW_VALUES).await
+    }
+
+    /// **Set `preview.values`**, `on` or `off`, with a reason.
+    pub async fn set_preview_values(
+        &self,
+        value: &str,
+        actor: &str,
+        reason: &str,
+        at: u64,
+    ) -> Result<(bool, bool), EnvironmentRefusal> {
+        self.set_flag(PREVIEW_VALUES, value, actor, reason, at)
+            .await
+    }
+
+    /// An on-or-off setting: off in production and on elsewhere unless set.
+    async fn flag(&self, name: &str) -> Result<(bool, bool), EnvironmentRefusal> {
+        let sql = format!(
+            "SELECT \"value\" FROM \"$promotion_settings\" WHERE \"setting\" = {} \
+             ORDER BY \"seq\" DESC LIMIT 1",
+            sql_lit(name)
+        );
+        let set = match self.pool.rows(&sql).await {
+            Ok(rows) => rows.first().and_then(|r| r.first().cloned().flatten()),
+            Err(e) if e.is_missing_table() => None,
+            Err(e) => return Err(e.into()),
+        };
+        Ok(match set {
+            Some(v) => (v == "on", true),
+            None => (self.own().await?.name != DEFAULT_OWN, false),
+        })
+    }
+
+    /// **Set `prune.enabled`**, `on` or `off`, with a reason. Answers the
+    /// value and whether anything changed.
+    pub async fn set_prune_enabled(
+        &self,
+        value: &str,
+        actor: &str,
+        reason: &str,
+        at: u64,
+    ) -> Result<(bool, bool), EnvironmentRefusal> {
+        self.set_flag(PRUNE_ENABLED, value, actor, reason, at).await
+    }
+
+    async fn set_flag(
+        &self,
+        name: &str,
+        value: &str,
+        actor: &str,
+        reason: &str,
+        at: u64,
+    ) -> Result<(bool, bool), EnvironmentRefusal> {
+        let on = match value.trim() {
+            "on" => true,
+            "off" => false,
+            other => {
+                return Err(EnvironmentRefusal::Setting(format!(
+                    "{name} takes `on` or `off`, not `{other}`"
+                )))
+            }
+        };
+        let reason = crate::versions::check_reason(reason)
+            .map_err(|e| EnvironmentRefusal::Reason(e.to_string()))?;
+        let (now, set) = self.flag(name).await?;
+        if set && now == on {
+            return Ok((on, false));
+        }
+        self.pool.rows(SETTINGS_DDL).await?;
+        self.pool
+            .rows(&format!(
+                "INSERT INTO \"$promotion_settings\" (\"setting\", \"value\", \"actor\", \
+                 \"reason\", \"at\") VALUES ({}, {}, {}, {}, {at})",
+                sql_lit(name),
+                sql_lit(if on { "on" } else { "off" }),
+                sql_lit(actor),
+                sql_lit(&reason)
+            ))
+            .await?;
+        Ok((on, now != on))
     }
 
     /// **Record where an environment's door is**, or clear it with `None`.
@@ -704,6 +887,26 @@ impl<'a> Environments<'a> {
             Err(e) if e.is_missing_table() => Ok(0),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// **This deployment is `name`**: registered first when the chain does
+    /// not hold it (before this deployment's own, as [`Environments::register`]
+    /// places it), then made its own ([`Environments::set_own`]). Answers the
+    /// chain. A dev deployment and a test of one start so: with
+    /// `rollout.strategy` unset, dev activates every tenant at once
+    /// (ruled 2026-11-25).
+    pub async fn declare_own(
+        &self,
+        name: &str,
+        actor: &str,
+        reason: &str,
+        at: u64,
+    ) -> Result<Vec<Environment>, EnvironmentRefusal> {
+        match self.register(name, None, actor, reason, at).await {
+            Ok(_) | Err(EnvironmentRefusal::Registered { .. }) => {}
+            Err(e) => return Err(e),
+        }
+        Ok(self.set_own(name, reason).await?.0)
     }
 
     /// **Say which environment this deployment is.** `name` must be

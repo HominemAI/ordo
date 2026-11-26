@@ -1001,9 +1001,25 @@ exclusively `since` or a parameter, so nondeterminism has one keyword.
   expressions are: projections, write RHS (per-row values in bulk writes and
   rules), aggregate arguments, sort keys.
 - Text: `lower(t)`, `length(t)`, `trim(t)` (strips leading/trailing Unicode
-  whitespace), and `+` for concatenation
+  whitespace), `before(t, sep)` and `after(t, sep)` (the part before or
+  after the first `sep`, null when `sep` is not in `t`; built 2026-11-25
+  for field splits, legal anywhere), and `+` for concatenation
   (`"lease ends " + end`; non-text operands render canonically); matching
   stays in operators
+- Conversions (built 2026-11-25 for type casts on a rename, legal
+  anywhere): `text(x)`, the value's canonical text; `int(t)`, the whole
+  number `t` spells, spaces around it allowed; `bool(t)`, `true` or `false`
+  as `t` spells it, in any case. Each is null where the value does not
+  convert, never an error
+- Dates (built 2026-11-25, legal anywhere): `date(t)`, the date `t` spells
+  as `YYYY-MM-DD`; `date(t, "DD/MM/YYYY")`, the date in the format named;
+  `datetime(t)`, the ISO 8601 instant `t` spells (`2026-11-25T09:30`,
+  seconds optional, `T` or a space), at the offset it names or UTC. A
+  format is `YYYY`, `MM` and `DD`, each once, joined by `-`, `/`, `.` or a
+  space; `MM` and `DD` read 1 or 2 digits. Any other format is refused when
+  the program compiles. Each is null where the text spells no date, or a
+  day not in the calendar (`2026-02-30`). Read two formats with
+  `coalesce(date(t), date(t, "DD/MM/YYYY"))`
 
 ### Ownership [settled]
 
@@ -2006,6 +2022,280 @@ Build-time advisors (including LLM analysis of registered query
 patterns) may *suggest* indexes and sealing changes. Suggestions land in the shape
 file for human approval, never at runtime.
 
+### `prev`: renames across versions [ruled 2026-10-04, built 2026-11-23, increment 15]
+
+A `prev` mark says a field or an entity is the same thing as a name in the
+version serving now. The plan then renders a rename, never a drop and an
+add (`plan-syntax-additions.md` §5).
+
+```
+entity customers (key: cust, prev: clients) {
+  fullName: text prev(name)
+  note:     text? prev(orders.shippingNote)
+}
+```
+
+- A field takes `prev(<old>)` in its modifier tail. An entity takes
+  `prev: <old>` in its header's parenthesis, beside `key:`, in either order.
+- `prev` reaches one version back only.
+- `prev` is contextual: a field may still be named `prev`.
+- A field rename (§5 B4 of `plan-schema-evolution.md`) adds the new column,
+  copies every value into it, and keeps the old column with its
+  `NOT NULL`, so the version before still loads over the database. The
+  receipt's reverse copies the values back and drops the new column.
+- No write is lost between the copy and the tenant's pin switch. The
+  host's dual writes (increment 11a) run in each write's own transaction:
+  a write by the version before also sets the new column, and a write by
+  the new version also sets the old one.
+- A required field renamed needs a default (`prev_default_required`). Each
+  version's insert names only its own column, so the other takes its
+  default first, and the dual writes set it in the same write. An old
+  column with no default of its own takes the new field's.
+- `ordo apply` makes a field rename itself, as it makes an additive change.
+  A stored step copies the values with the backfill worker.
+- An entity rename (built 2026-11-24) makes the new table, copies every
+  row into it in chunks with the backfill worker, and keeps the old table
+  whole, so the version before still
+  serves. The rename is recorded in the database's `$renames`, and every
+  write copies what it writes, and deletes what it deletes, into the other
+  name's table in its own transaction. A reference another entity holds
+  into the old table is checked at commit until the rename lands.
+- An entity rename lands at a move's soak close, or when a version drops
+  the mark. Then every reference moves to the new table, the old table is
+  an orphan (§2.7 of `plan-versions.md`), and a reader app loses it. Until
+  then a reader of the new table reads the old one too.
+- Ids keep the key they were minted with. A row the new name writes takes
+  the new name's key.
+- An entity rename keeps its fields in the step that renames it
+  (`rename_entity_reshaped`). Rename in one version, change the fields in
+  the next.
+- **Splits and merges** (built 2026-11-25, increment 15b). Two or more
+  fields each `prev(name)` split `name`; one field `prev(a, b)` merges two.
+  The rule for each value is the stored plan's, never guessed:
+
+  ```
+  entity person {
+    first: text prev(fullName)
+    last:  text prev(fullName)
+  }
+  ```
+
+  ```
+  ordo evolve --from 1.0.0 --to 1.1.0 \
+    --fill 'person.first=before(fullName, " ");person.last=after(fullName, " ")' \
+    --reverse 'person.fullName=first + " " + last'
+  ```
+
+  - `--fill` gives each new field's value, an expression over the old
+    fields and the fields both versions share.
+  - `--reverse` gives each old field's value from the new fields. It keeps
+    the old column current through the soak, so a revert loses nothing.
+    With no reverse the step is one way, and `--one-way` must accept it;
+    its soak then cannot be reverted.
+  - A row a required new field's mapping does not parse (null) is listed
+    by `space/id`, and the move waits for it.
+  - The plan previews the mapping on 3 rows. The values show where
+    `preview.values` is on: off in production, on elsewhere.
+  - It runs as a move (`ordo evolve --tenant`, or a rollout). `ordo apply`
+    and `ordo evolve --run` refuse it.
+- **Type casts** (built 2026-11-25, increment 15c). A rename whose type
+  changes, `qty: int = 0 prev(count)` over `count: text`, is a one-to-one
+  map. Its conversion is the plan's `--fill`, never guessed:
+  `--fill 'item.qty=int(count)' --reverse 'item.count=text(qty)'`.
+  - The conversions are `text(x)`, `int(t)`, `bool(t)`, `date(t)`,
+    `date(t, format)` and `datetime(t)`, and `round(x, n)` for places. Each
+    gives null where a value does not convert, so the pre-check lists the
+    row and the move waits: `--fill 'item.dueOn=date(due, "DD/MM/YYYY")'`.
+  - A mapping that gives another kind than its field holds is refused
+    (`map_cast_required`), naming the conversion. One that loses places
+    names `round`: Ordo never rounds unasked.
+  - A conversion Ordo has no function for (a number to a date) is refused
+    as `map_cast_not_built`.
+  - Money (built 2026-11-25): a mapping reads and gives money in major
+    units, as `check` does, and a `money(p)` column stores minor ones, so
+    `--fill item.price=cost` turns 12.34 into 1234 cents, and the reverse
+    turns them back. A value with more places than `p`, or places Ordo
+    cannot tell, is refused naming `round`. A `money` field carries only its
+    places, so the places are the check.
+- **Entity splits** (built 2026-11-25, increment 15c). An entity marked
+  `(prev: whole)` while `whole` stays declared is a part split off it. It
+  takes the fields it declares from `whole`, as they were declared there:
+
+  ```
+  entity notes { title: text }
+  entity stars (key: star, prev: notes) {
+    note -> notes owned unique
+    starred: bool = false
+  }
+  ```
+
+  ```
+  ordo evolve --from 0.3.4 --to 0.3.10 --correspond stars.note
+  ```
+
+  - `--correspond <part>.<link>` is the rule: one part row per row of
+    `whole`, its link naming that row, its id `<part key>_<whole id>`. The
+    link is `-> whole owned unique` and required, so the part takes the
+    whole's access.
+  - The plan previews the rule on 3 rows: the part row each gives, with
+    values where `preview.values` is on.
+  - The step makes the part's table and copies one row per whole row in
+    chunks. The whole keeps the moved columns. Through `$renames` every
+    write keeps both shapes current: a write of the whole by the version
+    before reaches its part row, and a write of a part row by the new
+    version reaches the whole's old columns. Deleting a part row puts them
+    back to their defaults. A revert in the soak loses nothing.
+  - At the close the moved columns are orphaned and the split leaves
+    `$renames`.
+  - A moved field must be optional or have a default: the new version's
+    inserts of the whole do not name it.
+  - It runs as a move. `ordo apply` and `ordo evolve --run` refuse it.
+- **Moves and entity merges** (built 2026-11-25, increment 15d). A field
+  marked `prev(other.field)` moves from `other`. Merging an entity is
+  moving every field of it and removing it:
+
+  ```
+  entity person {
+    name:   text
+    street: text? prev(address.street)
+    city:   text = "" prev(address.city)
+  }
+  # `address (key: adr) { person -> person owned unique ... }` is removed
+  ```
+
+  ```
+  ordo evolve --from 1.0.0 --to 1.1.0 --correspond address.person
+  ```
+
+  - `--correspond <other>.<link>` is the rule: each `other` row gives its
+    values to the row its link names. The link is `-> <entity> owned
+    unique` and required, declared in the version serving now, so the rows
+    pair one to one: the shape a split makes, read backwards.
+  - A field keeps its name and its declaration as it moves. A required one
+    needs a default: a row no `other` row names has no value for it.
+  - The plan previews the rule on 3 rows, values where `preview.values` is
+    on.
+  - The step adds the columns and copies in chunks. Through `$renames`
+    every write keeps both shapes current: a write of `other` by the
+    version before reaches the row its link names, and deleting it puts
+    the values back to their defaults. After a merge, a write by the new
+    version reaches `other` too, making its row (`<other key>_<id>`) where
+    there was none, so a revert in the soak loses nothing.
+  - At the close a merged entity is orphaned and its references go; a
+    moved field's old column is orphaned.
+  - A move whose `other` stays is one way: a value the new version gives a
+    row no `other` row names has no place in the version before. It needs
+    `--one-way`, and its soak cannot be reverted.
+  - It runs as a move. `ordo apply` and `ordo evolve --run` refuse it.
+- **Moves through a link that is not unique** (built 2026-11-25,
+  increment 15e; `forward-gaps` ask 7, owner: *"dev named"*). A person
+  with several addresses, `person -> person owned` in `address`:
+
+  ```
+  entity person {
+    name:   text
+    street: text? prev(address.street)    # into the one side
+  }
+  entity address (key: adr) {
+    person -> person owned
+    kind:   text = "home"
+    at:     int = 0
+    city:   text = "" prev(person.city)   # into the many side
+  }
+  ```
+
+  ```
+  ordo evolve --from 1.0.0 --to 1.1.0 --one-way \
+    --correspond 'address.person latest by at where kind == "home"; address.person first by at'
+  ```
+
+  - A rule is `<entity>.<link> first|latest|all [by <field>] [where
+    <condition>]`. `<entity>` holds the link. The step is refused until
+    the rule names its rows (`move_rule_required`).
+  - Into the one side, the rule names the row that gives the values:
+    `first` or `latest` by a field of `<entity>`, a null last, the id
+    breaking ties. `all` is refused there: several rows cannot give one
+    value.
+  - Into the many side, the rule names the rows that take the values:
+    `all`, or the `first` or `latest`. The rest take the field's default.
+  - Ordo keeps no creation time for a row, so `first` and `latest` name
+    their field.
+  - `where` takes a condition in Ordo's own expression language, over the
+    fields of `<entity>` in the version serving now.
+  - Rules separated by `;` are tried in order. A row is in the first rule
+    whose condition it meets. Into the one side, the first rule with a row
+    for it gives the value.
+  - The pre-check lists the rows that meet no rule, by id, never their
+    values. The move does not start while any remain (`move_unmatched`).
+    A last rule with no `where` meets every row. A row written during the
+    move that meets no rule is not refused; it takes the default, and the
+    soak's close refuses (`move_unmatched`) while any such row remains,
+    listing it by id.
+  - The plan previews the rule on 3 rows: the row each takes its values
+    from, values where `preview.values` is on.
+  - The step adds the columns and copies in chunks. Each write by the
+    version before sets the values again for the rows it touches, in its
+    own transaction, under the lock of their row of the one side.
+  - Such a move is one way (`--one-way`): the version after writes nothing
+    back. At the close the old column is orphaned.
+  - A merge through such a link is not built (`correspond_rule_not_built`):
+    the rows a rule leaves out would be lost. Keep the old entity, move
+    one way, and remove it in the next version.
+- **Not built:** a mapping over two entities, `prev(a.x, b.y)`
+  (`prev_mapping_required`); moving a link field (`move_ref_not_built`); a
+  split whose whole is renamed or gone (`entity_split_needs_whole`); a pick
+  or a condition on a split or on a link that is unique, where each row has
+  at most one other (`correspond_rule_not_built`); a merge through a link
+  that is not unique.
+- A clean `ordo apply` names each mark whose rename has landed in every
+  environment. `ordo apply --remove-landed-prev` cuts those marks from the
+  source. A mark has landed when this deployment is the last environment of
+  its chain and every tenant is on a version with the new name. The stored
+  plan keeps the rename for any tenant still behind.
+
+Checked at compile time (the parser):
+
+| Class | Refused |
+|---|---|
+| `prev_self` | `prev` naming the field's or entity's own name |
+| `prev_still_declared` | `prev(name)` while `name` is still a field of the entity |
+| `prev_duplicate` | a name a merge or a move claims beside another field, or one name twice in one `prev` (two fields each `prev(name)` alone are a split) |
+| `external_unsupported` | `prev` on an external's field or in its header |
+
+Checked at plan time, against the version serving now. With nothing
+serving, nothing is checked and the program is created as declared:
+
+| Class | Refused |
+|---|---|
+| `prev_unresolved` | the old name is not in the version serving now |
+| `prev_type` | a rename to or from a file: a file's handle is never computed |
+| `prev_mapping_required` | a mapping over two entities, `prev(a.x, b.y)`; a move from the entity itself; moves out of one entity into two; a move into an entity renamed in the same step |
+| `move_renamed` | a field renamed as it moves |
+| `move_rule_required`, `move_link` | a move with no `--correspond`, or through a link that is not unique with no pick; a rule whose link is not `-> <entity> owned` (and `unique` for one row per row) and required |
+| `correspond_rule_invalid` | a rule with no pick, `all` into the one side, `first` or `latest` with no `by`, a field or a condition Ordo cannot read |
+| `correspond_rule_not_built` | a pick or a condition on a split or a unique link; a merge through a link that is not unique |
+| `move_reshaped`, `move_sealed`, `move_ref_not_built`, `move_default_required`, `move_acl` | a field moved as it was not declared, a merge that leaves a field behind, or one still declared in `other`; a sealed or file field; a link field; a required field with no default; an `other` with `acl` or a tree |
+| `move_column_orphaned` | a moved field whose entity still holds an orphaned column of its name; prune it first (`ordo evolve --prune`) |
+| `map_cast_required`, `map_cast_not_built` | a mapping that gives another kind than its field holds, or loses places (into money too); one Ordo has no conversion for |
+| `split_rule_required` | an entity split with no `--correspond` |
+| `split_entity_link` | a part whose link is not `-> whole owned unique` and required |
+| `split_entity_reshaped` | a part field the whole did not declare the same way, or a moved field the whole still declares |
+| `split_entity_sealed`, `split_entity_acl` | a sealed or file field moved; a part with `acl` or a tree |
+| `split_default_required` | a moved field required with no default |
+| `split_needs_stored_plan`, `split_needs_move` | an entity split through `ordo apply`, or `ordo evolve --run` |
+| `entity_split_needs_whole` | two or more entities `(prev: x)` with `x` gone |
+| `map_fill_required` | a split's or a merge's new field with no `--fill` |
+| `one_way_unconfirmed` | an old field with no `--reverse`, and no `--one-way` |
+| `map_needs_stored_plan`, `map_needs_move` | a split or a merge through `ordo apply`, or `ordo evolve --run` |
+| `prev_sealed` | a sealed field: its ciphertext is bound to the field, so a copy cannot be read under the new name |
+| `rename_entity_sealed` | an entity rename of an entity with a sealed field: its ciphertext is bound to the entity's name |
+| `rename_entity_reshaped` | an entity rename whose new declaration has a column the old table does not hold |
+| `rename_entity_needs_stored_plan` | an entity rename by `ordo apply`: its copy runs only in a stored step (`ordo evolve`), in chunks, so no write waits for it |
+| `rename_entity_acl` | an entity rename of an entity with `acl`: its shares live in an entity named after it |
+| `prev_stale` | a warning, never a refusal: the version serving now already has the new name, so the mark can go |
+
+The CDK spells it `t.text().prev('name')` and `entity(…, { prev: 'clients' })`.
+
 ### `external`: a table another system owns [ruled 2026-11-15, built slices A, B and C]
 
 Another system can keep its own table in the database where Ordo's SQL runs:
@@ -2188,6 +2478,73 @@ Refusals, each naming the fix:
 | `external_no_key` | `ordo introspect --external`: no single-column unique, not null key |
 | `external_unsupported` | `unique`, `index`, `check`, `std sealed`, `tree`, `normalize`, `prev`, a default or a `blob` on an external; `public*` (an external owns nothing, write `public`); `public` on the `id` line; or `whole` anchored on one |
 
+### `peer { … }`: the ops this deployment calls on another [ruled 2026-11-26, built in G4]
+
+A `peer` block lists the holder's ops this deployment calls through the
+holder's door (`plan-federation-grants.md` §4):
+
+```
+peer notes {
+  std.notes.list
+  addComment
+}
+```
+
+- Each line is one exact op name of the holder. Patterns and `!` belong in
+  the holder's `grant` block, never here. No line, two ops on one line, or an
+  op named twice is refused (`peer_block`).
+- The holder's address is the setting `ORDO_PEER_NOTES_URL`, its handle at
+  the identity service `ORDO_PEER_NOTES_DEPLOYMENT` (default the nickname),
+  and the space each call is bound to `ORDO_PEER_NOTES_SPACE`. Never the file.
+- At each apply, Ordo reads the holder's grant for this deployment
+  (`std.peer.grant`, as itself) and refuses, by name, any listed op it does
+  not grant (`peer_refused`, line `peer_op_not_granted`). Nothing is stored.
+- When nothing is refused, the holder records what this version calls
+  (`std.peer.recordUse`). The holder's plan and apply then name each consumer
+  a change would break: "note_viewer calls archiveNote". A warning; the
+  holder's apply goes on.
+- `ordo plan` (`std.deployment.plan`) checks the same, recording nothing.
+- A block needs no external. The one-line form below keeps working until the
+  shared-database path is removed (G8).
+- This deployment registers its consumer key at the identity service once,
+  with a token for its own admin: `std.peer.registerKey($token)`. Until then
+  the apply is refused naming that op.
+
+#### A peer's entities through its door [built in G5]
+
+With `ORDO_PEER_<NAME>_URL` set, an `external … from <name>.<table>` is read
+through that deployment's door, never its tables
+(`plan-federation-grants.md` §4). The file does not change; the setting
+decides. `ORDO_PEER_<NAME>_SCHEMA` is then not read.
+
+- Each read of the entity is one call to the holder's `std.<table>.list`.
+  Its conditions on the entity's own fields (`==`, `!=`, `<`, `<=`, `>`,
+  `>=`, `in`, `is null`, on text, ids, ints, bools, dates and datetimes),
+  its fields, and, for a read whose rows are the peer's, its sort and its
+  `take`, are sent whole. The holder runs them as its own SQL. Anything
+  else runs here over what the holder answered.
+- A native entity's ref to it (`note.title`, a guard that walks into it)
+  is one call with the refs of the rows read, never one call per row.
+- `field == $caller` on it is the holder's `$caller`: the holder decides it
+  for the person the call is made for. Under `or` or `not` it is refused
+  (`peer_refused`). With nobody signed in it matches nothing, and the holder
+  is not asked.
+- Each call is made for the person signed in here, under the holder's rules
+  for them, or as this deployment itself when nobody is. The holder's grant
+  must open `std.<table>.list` to this deployment; the apply checks it as if
+  a `peer` block listed it.
+- Nothing the holder answered outlives the read.
+- **Consistency.** There is no transaction across deployments. 2 reads of
+  the holder in one op are 2 calls, not one snapshot.
+- A tenant kept in a database of its own reaches the peer as the
+  deployment's own space does. Its people's sign-in links are read from
+  the deployment's database.
+- A holder that does not answer in `ORDO_PEER_TIMEOUT_SECS` (10 seconds)
+  refuses the op `peer_unavailable`. A read the holder refuses is
+  `peer_refused`, with its words. A read that would take more than
+  `ORDO_PEER_READ_MAX_ROWS` rows from the holder with nothing to bound them
+  there is `peer_refused`, naming the setting.
+
 ### `peer`: another Ordo deployment's tables [ruled 2026-11-17, built]
 
 Two Ordo deployments can share one database, each in its own schema
@@ -2283,8 +2640,10 @@ again only when that list changes.
 **Known gap.** A peer row matches the person's member in any of the peer's
 spaces. The reader's own space plays no part.
 
-The peer is in the same database. A deployment that keeps a tenant in a
-database of its own does not reach a peer from there.
+The peer is in the same database. A tenant kept in a database of its own
+does not reach a peer this way: its op is refused `peer_refused`, line
+`peer_tenant_database`, naming the peer and `ORDO_PEER_<NAME>_URL`. Read
+the peer through its door to reach it from every database.
 
 ### `reader`: who may read this deployment's tables [ruled 2026-11-18, built]
 
@@ -2320,6 +2679,11 @@ holds in this deployment's schema are made equal to the line:
   `principal`, `retired_case`) and `$authconnection` (`name`, `kind`,
   `fingerprint`, `subject_claim`). Naming `members` on the line grants the
   whole table.
+- These columns are a contract between Ordo releases (owner, 2026-11-23).
+  A release that changes one keeps it granted for `editions.load_window`
+  (12 months), so a reader on an older release keeps matching `$caller`.
+- `SELECT` on `$ordorelease` (`release`): the Ordo release this deployment
+  last started under. `ordo release-check` on the reader names it.
 
 A table taken off the line is revoked at the next apply or start. So is
 everything, when the whole line is removed: `$readergrant` remembers which
@@ -2351,6 +2715,88 @@ its own role:
   superuser, or a member of `pg_read_all_data`. Such a start is refused
   unless `ORDO_PEER_SHARED_ROLE=on`. `ordo dev` turns that on, since it runs
   every app as one role.
+
+### `grant`: what another deployment may call through this one's door [ruled 2026-11-26, built G1 to G7]
+
+`plan-federation-grants.md` §3. A grant replaces `reader` once the door
+path works (step G8). The apply expands it, stores it and shows it; the
+door checks every call from another deployment against it (step G3).
+
+```
+grant note_viewer {
+  std.notes.get
+  std.notes.list
+  /std\.notesAccess\..*/
+  /add.*/
+  !addAdmin
+}
+
+grant billing as itself {
+  markPaid
+}
+
+grant provider hominem {
+  std.notes.get
+}
+```
+
+- The header is `grant <name>`, `grant <name> as itself` or
+  `grant provider <name>`. The name is lowercase letters, digits and
+  underscores, starting with a letter, and each block is declared once
+  (`grant_block`).
+- Without `as itself`, the grant is used only on behalf of a person. With
+  it, calls carrying no person are allowed too.
+- `grant provider <name>` covers every deployment registered at that
+  identity service, on behalf of a person only. `as itself` is refused on
+  it (`grant_block`). It needs no `ORDO_CONSUMER_<NAME>_CLIENT`: a
+  deployment no grant names reads it at its apply (`std.peer.grant`) and
+  calls under it for a person. Its call as itself is refused, naming
+  `ORDO_CONSUMER_<NAME>_CLIENT=<its id>`. The plan shows it as
+  `grant provider <name>` and names the service's issuer.
+- The block holds op lines only, one per line. A line is an exact op name,
+  a `/regex/` that must match the whole name (Rust `regex`, linear time;
+  `\/` is a slash), or `*` for every op.
+- `!` before a line takes the ops it matches away. Lines are read top to
+  bottom and the last line that matches an op decides. An op no line
+  matches is not granted.
+- An empty block is refused (`grant_block`).
+
+**At apply.** Each block is expanded against this program's own ops,
+the derived `std.<entity>.get`, `.list` and the rest included. The
+expanded list is stored with the version (`$consumergrant`), and the door
+will check only that list. The plan (`ordo plan`) and the apply show each
+list and every change to it against the serving version:
+`grant note_viewer gains addReaction, matches /add.*/`. A later op that a
+pattern matches is granted and shown this way. The lines as written are in
+the version's artifact, so a changed grant is a new version.
+
+**Sealed fields.** The door opens a sealed field in its own answers, under
+this deployment's rules, and no key leaves it. A derived `std.<entity>.get`
+or `.list` carries sealed fields only when the entity says `std sealed`
+(§3), so a consumer reads them through a grant only then. Without it the
+consumer's read is refused naming the field. A seal of a field a grant
+opens is not refused; one a `reader` line reads still is
+(`seal_read_by_reader`, until G8).
+
+**The consumer's id** is never in the file. The deployment owner sets
+`ORDO_CONSUMER_NOTE_VIEWER_CLIENT`, the name upper-cased, to the consumer's
+client id at the identity service. The plan shows its value. Unset is a
+warning naming it.
+
+**Refusals at apply**, each named with the fix, before anything is stored
+(`grant_refused`):
+
+- `grant_matches_nothing`: a line no op of the program matches.
+- `grant_line_changes_nothing`: a line whose removal leaves the grant the
+  same. Usually a later line overrides every op it matches; also a `!` line
+  with nothing above it to take away.
+- `grant_pattern_invalid`: a `/…/` that is not a regex.
+- `grant_provider_not_identity_service`: `grant provider <name>` where
+  `<name>` is not a sign-in connection to Ordo's identity service. A
+  connection is the identity service when `ORDO_AUTH_<NAME>_KIND=oidc` and
+  its `ORDO_AUTH_<NAME>_ISSUER` is `ORDO_IDENTITY_ORIGIN`. A preset (Google,
+  Microsoft) or any other issuer is an outside provider, where everything
+  registered is anyone.
 
 ---
 

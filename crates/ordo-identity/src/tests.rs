@@ -208,6 +208,8 @@ fn roles_have_no_implicit_hierarchy() {
 fn pin(seed: &[u8], read: &[&str], guard: Option<&str>, caller: bool) -> OpPin {
     OpPin {
         manifest_hash: ManifestHash::of(seed),
+        version: None,
+        contract: false,
         unguarded: false,
         entities: vec![EntityPin {
             entity: "txns".into(),
@@ -217,6 +219,8 @@ fn pin(seed: &[u8], read: &[&str], guard: Option<&str>, caller: bool) -> OpPin {
             read_guard: guard.map_or(GuardPin::Every, |g| GuardPin::Walk(g.into())),
             write_guard: GuardPin::Every,
             caller_restricted: caller,
+            sealed: Default::default(),
+            release: Default::default(),
         }],
     }
 }
@@ -690,6 +694,8 @@ fn a_newly_reached_entity_kills_the_grant() {
         read_guard: GuardPin::Every,
         write_guard: GuardPin::Every,
         caller_restricted: false,
+        sealed: Default::default(),
+        release: Default::default(),
     });
     let (e, claims, drift) = redeployed(before, after);
     assert!(matches!(drift, PinDrift::Expanded { .. }), "{drift:?}");
@@ -3217,4 +3223,375 @@ fn a_deleted_account_is_given_no_new_authenticator_link() {
         Err(DirectoryError::Deleted(p)) if p == person
     ));
     assert_eq!(dir.principal_for(&new).unwrap(), None, "nothing was linked");
+}
+
+// ──────────── sharing across program versions (plan-versions §1.7) ────────────
+
+type VersionPins = std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, String>>>;
+
+/// An engine serving 0.1.0 and 0.2.0, with `txns.list` declared by each as
+/// given, and tenants pinned by the shared map. A move is a write to it.
+fn engine_on_versions(v1: OpPin, v2: OpPin) -> (AccessEngine, VersionPins) {
+    let mut e = engine_with_profile();
+    e.set_profile(
+        &other_space(),
+        AccessProfile::new().allow(Role::Owner, "txns.list"),
+    );
+    e.deploy_op("txns.list", v2.clone());
+    e.deploy_op_in("0.1.0", "txns.list", v1);
+    e.deploy_op_in("0.2.0", "txns.list", v2);
+    e.deploy_op("std.$blob.get", pin(b"blob", &[], None, false));
+    e.share_unversioned(&ops(&["txns.list"]));
+    let pins: VersionPins = Default::default();
+    let read = pins.clone();
+    e.set_tenant_versions(std::sync::Arc::new(move |s: &SpaceId| {
+        read.lock().unwrap().get(&s.0).cloned()
+    }));
+    (e, pins)
+}
+
+fn move_to(pins: &VersionPins, space: &SpaceId, version: &str) {
+    pins.lock().unwrap().insert(space.0.clone(), version.into());
+}
+
+fn holder(grant: crate::principal::CapabilityGrant) -> TokenClaims {
+    TokenClaims {
+        principal: PrincipalId("prn_guest".into()),
+        capability: Some(grant),
+        client: None,
+        user_presence_at: None,
+        delegation: None,
+        session: None,
+    }
+}
+
+fn granted(e: &AccessEngine, in_space: &SpaceId) -> TokenClaims {
+    holder(
+        e.grant_for(GrantId("shr_a".into()), in_space, ops(&["txns.list"]), T1)
+            .expect("deployed"),
+    )
+}
+
+/// A grant made in a tenant pins the ops of the version serving that
+/// tenant, not the active one, and records the version. Before §1.7 was
+/// built it pinned the active version's manifest whatever the tenant ran.
+#[test]
+fn a_grant_pins_the_ops_of_its_tenants_version() {
+    let v1 = pin(b"v1", &["amount"], Some("owner == $caller"), true);
+    let v2 = pin(b"v2", &["amount", "payee"], Some("owner == $caller"), true);
+    let (e, pins) = engine_on_versions(v1.clone(), v2);
+    move_to(&pins, &space(), "0.1.0");
+    move_to(&pins, &other_space(), "0.2.0");
+
+    let g = granted(&e, &space());
+    let held = &g.capability.as_ref().unwrap().pins()["txns.list"];
+    assert_eq!(held.version.as_deref(), Some("0.1.0"));
+    assert_eq!(
+        held.entities, v1.entities,
+        "0.1.0's shape, not the active one"
+    );
+    assert!(e.check(&g, &space(), "txns.list", T0).is_allow());
+
+    let g = granted(&e, &other_space());
+    let held = &g.capability.as_ref().unwrap().pins()["txns.list"];
+    assert_eq!(held.version.as_deref(), Some("0.2.0"));
+    assert!(e.check(&g, &other_space(), "txns.list", T0).is_allow());
+
+    // The platform's own ops are in every version.
+    assert!(e.deployed_in(&space()).contains_key("std.$blob.get"));
+}
+
+/// A tenant whose grant was pinned under 0.1.0 moves to 0.2.0, where the op
+/// reads a field more: `versions_disagree`, naming both versions, the op
+/// and the entity. Back on 0.1.0 the grant is good again.
+#[test]
+fn a_tenant_that_moves_to_a_version_that_reads_more_refuses_the_grant_by_name() {
+    let v1 = pin(b"v1", &["amount"], Some("owner == $caller"), true);
+    let v2 = pin(b"v2", &["amount", "payee"], Some("owner == $caller"), true);
+    let (e, pins) = engine_on_versions(v1, v2);
+    move_to(&pins, &space(), "0.1.0");
+    let g = granted(&e, &space());
+    move_to(&pins, &space(), "0.2.0");
+    match e.check(&g, &space(), "txns.list", T0) {
+        Decision::Deny {
+            reason:
+                DenyReason::VersionsDisagree {
+                    pinned,
+                    serving,
+                    op,
+                    entity,
+                    detail,
+                },
+            ..
+        } => {
+            assert_eq!((pinned.as_str(), serving.as_str()), ("0.1.0", "0.2.0"));
+            assert_eq!(op, "txns.list");
+            assert_eq!(entity.as_deref(), Some("txns"));
+            assert!(detail.contains("payee"), "{detail}");
+        }
+        other => panic!("expected versions_disagree, got {other:?}"),
+    }
+    move_to(&pins, &space(), "0.1.0");
+    assert!(e.check(&g, &space(), "txns.list", T0).is_allow());
+}
+
+/// The other direction: pinned under the version that reads more, the
+/// tenant moves to the one that reads less. Fewer fields keep sharing.
+#[test]
+fn fewer_fields_read_in_the_new_version_keep_the_grant() {
+    let v1 = pin(b"v1", &["amount"], Some("owner == $caller"), true);
+    let v2 = pin(b"v2", &["amount", "payee"], Some("owner == $caller"), true);
+    let (e, pins) = engine_on_versions(v1, v2);
+    move_to(&pins, &space(), "0.2.0");
+    let g = granted(&e, &space());
+    move_to(&pins, &space(), "0.1.0");
+    assert!(e.check(&g, &space(), "txns.list", T0).is_allow());
+}
+
+/// Differing guards refuse (D7), a tighter one included: across versions
+/// the guards must match, where one version's redeploy lets a narrowing
+/// apply silently.
+#[test]
+fn a_differing_guard_across_versions_refuses_even_when_tighter() {
+    let v1 = pin(b"v1", &["amount"], None, false);
+    let v2 = pin(b"v2", &["amount"], Some("owner == $caller"), false);
+    let (e, pins) = engine_on_versions(v1.clone(), v2.clone());
+    move_to(&pins, &space(), "0.1.0");
+    let g = granted(&e, &space());
+    move_to(&pins, &space(), "0.2.0");
+    assert!(matches!(
+        e.check(&g, &space(), "txns.list", T0),
+        Decision::Deny {
+            reason: DenyReason::VersionsDisagree { .. },
+            ..
+        }
+    ));
+    // The same change as one version's redeploy is a narrowing.
+    assert!(!crate::pins::compare(&v1, &v2).is_fatal());
+}
+
+/// A grant pinned before versions were recorded is compared as before.
+#[test]
+fn a_grant_with_no_recorded_version_is_compared_as_a_redeploy() {
+    let v1 = pin(b"v1", &["amount"], None, false);
+    let v2 = pin(b"v2", &["amount"], Some("owner == $caller"), false);
+    let (e, pins) = engine_on_versions(v1.clone(), v2);
+    move_to(&pins, &space(), "0.2.0");
+    let old = crate::principal::CapabilityGrant::new(
+        GrantId("shr_old".into()),
+        space(),
+        [("txns.list".to_string(), v1)].into_iter().collect(),
+        T1,
+    );
+    assert!(e.check(&holder(old), &space(), "txns.list", T0).is_allow());
+}
+
+/// A pin's version, sealing and release ride in its encoding
+/// (`pins.v3`), which a pin with no version keeps byte-identical to
+/// `pins.v1`.
+#[test]
+fn a_pins_version_round_trips_and_an_unversioned_pin_encodes_as_before() {
+    let mut m = std::collections::BTreeMap::new();
+    m.insert("a".to_string(), base_pin(b"a"));
+    let plain = encode_pins(&m);
+    assert!(plain.starts_with("7:pins.v1"), "{plain}");
+    assert_eq!(decode_pins(&plain), Some(m.clone()));
+    let mut versioned = contracted(&["amount"], &["amount"], &[("payee", "remove")]);
+    versioned.version = Some("0.2.0".into());
+    m.insert("b".to_string(), versioned);
+    let text = encode_pins(&m);
+    assert!(text.starts_with("7:pins.v3"), "{text}");
+    assert_eq!(decode_pins(&text), Some(m));
+}
+
+/// A `pins.v2` blob, written before sealing and release were recorded,
+/// still decodes, as a pin whose sealing and release are not known.
+#[test]
+fn a_pins_v2_blob_still_decodes_without_a_contract() {
+    let hash: String = ManifestHash::of(b"a")
+        .0
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let v2 = format!("7:pins.v21:11:a64:{hash}5:0.1.01:01:0");
+    let got = decode_pins(&v2).expect("a v2 blob decodes");
+    let a = &got["a"];
+    assert_eq!(a.version.as_deref(), Some("0.1.0"));
+    assert!(!a.contract);
+    assert!(a.entities.is_empty());
+}
+
+/// A v3 blob whose release effects are out of order, or repeat a field, is
+/// not what the encoder writes, and is refused.
+#[test]
+fn a_pins_v3_blob_with_its_release_out_of_order_is_refused() {
+    let mut pin = contracted(
+        &["amount"],
+        &[],
+        &[("amount", "remove"), ("payee", "remove")],
+    );
+    pin.version = Some("0.1.0".into());
+    let m = std::collections::BTreeMap::from([("op".to_string(), pin)]);
+    let good = encode_pins(&m);
+    assert_eq!(decode_pins(&good).as_ref(), Some(&m));
+    let swapped = good.replacen("6:amount6:remove5:payee", "5:payee6:remove6:amount", 1);
+    assert_ne!(swapped, good);
+    assert_eq!(decode_pins(&swapped), None, "{swapped}");
+    for n in 0..good.len() {
+        assert_eq!(
+            decode_pins(&good[..n]),
+            None,
+            "prefix of length {n} decoded"
+        );
+    }
+}
+
+/// `txns.list` as the compiler conversion pins it: reading `read`, of which
+/// `sealed` are sealed, and `release` naming each field's effect.
+fn contracted(read: &[&str], sealed: &[&str], release: &[(&str, &str)]) -> OpPin {
+    let mut p = pin(b"same", read, Some("owner == $caller"), true);
+    p.contract = true;
+    let e = &mut p.entities[0];
+    e.sealed = sealed.iter().map(|s| s.to_string()).collect();
+    e.release = release
+        .iter()
+        .map(|(f, x)| (f.to_string(), x.to_string()))
+        .collect();
+    p
+}
+
+fn disagrees(e: &AccessEngine, g: &TokenClaims) -> String {
+    match e.check(g, &space(), "txns.list", T0) {
+        Decision::Deny {
+            reason:
+                DenyReason::VersionsDisagree {
+                    pinned,
+                    serving,
+                    entity,
+                    detail,
+                    ..
+                },
+            ..
+        } => {
+            assert_eq!(entity.as_deref(), Some("txns"));
+            format!("{pinned}->{serving}: {detail}")
+        }
+        other => panic!("expected versions_disagree, got {other:?}"),
+    }
+}
+
+/// **Sealing in the sharing rule** (§1.7, review V-10). 0.2.0 seals
+/// `amount`, which the shared op reads. The fields, guards and manifest
+/// hash are the same, so only the sealing tells them apart: a grant made
+/// on 0.1.0 is refused on 0.2.0 by name, both ways, and is good again back
+/// on its own version.
+#[test]
+fn a_share_is_refused_when_the_two_versions_differ_in_sealing() {
+    let v1 = contracted(&["amount"], &[], &[]);
+    let v2 = contracted(&["amount"], &["amount"], &[]);
+    let (e, pins) = engine_on_versions(v1.clone(), v2.clone());
+    move_to(&pins, &space(), "0.1.0");
+    let g = granted(&e, &space());
+    assert!(e.check(&g, &space(), "txns.list", T0).is_allow());
+    move_to(&pins, &space(), "0.2.0");
+    let said = disagrees(&e, &g);
+    assert!(said.starts_with("0.1.0->0.2.0"), "{said}");
+    assert!(said.contains("`amount` is sealed"), "{said}");
+    move_to(&pins, &space(), "0.1.0");
+    assert!(e.check(&g, &space(), "txns.list", T0).is_allow());
+
+    // The other way: made on the sealing version, read on the plain one.
+    move_to(&pins, &space(), "0.2.0");
+    let g = granted(&e, &space());
+    move_to(&pins, &space(), "0.1.0");
+    assert!(disagrees(&e, &g).contains("`amount` is sealed"));
+
+    // A sealed field the op does not reach is not compared.
+    let v1 = contracted(&["amount"], &[], &[]);
+    let v2 = contracted(&["amount"], &["memo"], &[]);
+    let (e, pins) = engine_on_versions(v1, v2);
+    move_to(&pins, &space(), "0.1.0");
+    let g = granted(&e, &space());
+    move_to(&pins, &space(), "0.2.0");
+    assert!(e.check(&g, &space(), "txns.list", T0).is_allow());
+}
+
+/// **Release in the sharing rule.** 0.2.0 removes a leaving member's rows
+/// by `amount`'s ref where 0.1.0 reassigned them: refused by name. The same
+/// effect in both keeps sharing.
+#[test]
+fn a_share_is_refused_when_the_two_versions_differ_in_release() {
+    let v1 = contracted(&["amount"], &[], &[("amount", "reassign to owner")]);
+    let v2 = contracted(&["amount"], &[], &[("amount", "remove")]);
+    let (e, pins) = engine_on_versions(v1, v2);
+    move_to(&pins, &space(), "0.1.0");
+    let g = granted(&e, &space());
+    move_to(&pins, &space(), "0.2.0");
+    let said = disagrees(&e, &g);
+    assert!(
+        said.contains("`amount`'s `release member` effect differs"),
+        "{said}"
+    );
+
+    // An effect gained by a field both read refuses too.
+    let v1 = contracted(&["amount"], &[], &[]);
+    let v2 = contracted(&["amount"], &[], &[("amount", "remove")]);
+    let (e, pins) = engine_on_versions(v1, v2);
+    move_to(&pins, &space(), "0.1.0");
+    let g = granted(&e, &space());
+    move_to(&pins, &space(), "0.2.0");
+    assert!(disagrees(&e, &g).contains("release member"));
+
+    let same = contracted(&["amount"], &["amount"], &[("amount", "remove")]);
+    let mut other = same.clone();
+    other.manifest_hash = ManifestHash::of(b"another version's text");
+    let (e, pins) = engine_on_versions(same, other);
+    move_to(&pins, &space(), "0.1.0");
+    let g = granted(&e, &space());
+    move_to(&pins, &space(), "0.2.0");
+    assert!(e.check(&g, &space(), "txns.list", T0).is_allow());
+}
+
+/// A grant pinned before sealing and release were recorded (`pins.v2`)
+/// does not escape them: on use, its pin is re-recorded from the version
+/// it was made under, then compared as any other. Made on 0.1.0, where
+/// `amount` is plain, and called on 0.2.0, which seals it: refused by
+/// name. A version this engine does not serve leaves it as it was.
+#[test]
+fn a_pins_v2_grant_is_re_recorded_from_its_version_and_compared_on_use() {
+    let v1 = contracted(&["amount"], &[], &[("amount", "remove")]);
+    let v2 = contracted(&["amount"], &["amount"], &[("amount", "remove")]);
+    let (e, pins) = engine_on_versions(v1.clone(), v2);
+    let mut old_pin = v1.clone();
+    old_pin.contract = false;
+    old_pin.version = Some("0.1.0".into());
+    for en in &mut old_pin.entities {
+        en.sealed.clear();
+        en.release.clear();
+    }
+
+    let recorded = e.record_contract(&old_pin).expect("0.1.0 is served");
+    assert!(recorded.contract);
+    assert_eq!(recorded.entities[0].release, v1.entities[0].release);
+    assert!(recorded.entities[0].sealed.is_empty());
+    assert_eq!(
+        recorded.manifest_hash, old_pin.manifest_hash,
+        "as consented"
+    );
+    assert!(e.record_contract(&recorded).is_none(), "once is enough");
+    let mut elsewhere = old_pin.clone();
+    elsewhere.version = Some("0.0.9".into());
+    assert!(e.record_contract(&elsewhere).is_none());
+
+    move_to(&pins, &space(), "0.2.0");
+    let old = crate::principal::CapabilityGrant::new(
+        GrantId("shr_v2".into()),
+        space(),
+        [("txns.list".to_string(), old_pin)].into_iter().collect(),
+        T1,
+    );
+    let said = disagrees(&e, &holder(old.clone()));
+    assert!(said.contains("`amount` is sealed"), "{said}");
+    move_to(&pins, &space(), "0.1.0");
+    assert!(e.check(&holder(old), &space(), "txns.list", T0).is_allow());
 }

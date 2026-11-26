@@ -64,6 +64,12 @@ struct Lexer<'s> {
     col: u32,
     depth: u32,
     out: Vec<Token>,
+    /// A top-level line that starts with `grant`: its `{` opens a grant
+    /// block (`plan-federation-grants.md` §3).
+    grant_head: bool,
+    /// The depth inside a grant block, where `!` negates a line and
+    /// `/…/` is a pattern. `None` outside one.
+    grant_depth: Option<u32>,
 }
 
 impl<'s> Lexer<'s> {
@@ -76,6 +82,8 @@ impl<'s> Lexer<'s> {
             col: 1,
             depth: 0,
             out: Vec::new(),
+            grant_head: false,
+            grant_depth: None,
         }
     }
 
@@ -88,6 +96,9 @@ impl<'s> Lexer<'s> {
                 b' ' | b'\t' | b'\r' => self.bump(),
                 b'\n' => {
                     self.bump_newline();
+                    if self.depth == 0 {
+                        self.grant_head = false;
+                    }
                     // Only a separator at depth zero, and never stacked.
                     if self.depth == 0
                         && !matches!(
@@ -102,6 +113,11 @@ impl<'s> Lexer<'s> {
                     while self.pos < self.bytes.len() && self.bytes[self.pos] != b'\n' {
                         self.bump();
                     }
+                }
+                b'/' if self.in_grant() => self.pattern(start, line, col)?,
+                b'!' if self.in_grant() => {
+                    self.bump();
+                    self.push(TokenKind::Bang, start, line, col);
                 }
                 b'"' => self.string(start, line, col)?,
                 b'$' => self.param(start, line, col)?,
@@ -129,6 +145,65 @@ impl<'s> Lexer<'s> {
         }
         self.push(TokenKind::Eof, self.pos, self.line, self.col);
         Ok(self.out)
+    }
+
+    /// Directly inside a grant block's braces.
+    fn in_grant(&self) -> bool {
+        self.grant_depth == Some(self.depth)
+    }
+
+    /// `/regex/` inside a grant block: everything up to the next `/` on the
+    /// same line. `\/` is a slash in the pattern; every other escape is the
+    /// regex's own and is kept as written. The pattern is compiled at apply,
+    /// where a bad one is refused by name.
+    fn pattern(&mut self, start: usize, line: u32, col: u32) -> Result<(), LexError> {
+        self.bump(); // opening slash
+        let mut value = String::new();
+        loop {
+            match self.peek(0) {
+                0 | b'\n' => {
+                    return Err(self.err_at(
+                        "a grant pattern ends with `/` on the same line: `/add.*/`".into(),
+                        start,
+                        line,
+                        col,
+                    ));
+                }
+                b'/' => {
+                    self.bump();
+                    break;
+                }
+                b'\\' if self.peek(1) == b'/' => {
+                    self.bump();
+                    self.bump();
+                    value.push('/');
+                }
+                b'\\' if self.peek(1) != 0 && self.peek(1) != b'\n' => {
+                    value.push('\\');
+                    self.bump();
+                    let ch = self.src[self.pos..].chars().next().unwrap_or('\u{fffd}');
+                    value.push(ch);
+                    self.bump();
+                }
+                _ => {
+                    let ch = self.src[self.pos..].chars().next().unwrap_or('\u{fffd}');
+                    value.push(ch);
+                    self.bump();
+                }
+            }
+        }
+        if value.is_empty() {
+            return Err(self.err_at(
+                "an empty grant pattern `//` matches nothing; write the pattern between the \
+                 slashes, such as `/add.*/`, or `*` for every op"
+                    .into(),
+                start,
+                line,
+                col,
+            ));
+        }
+        self.push(TokenKind::Regex(value), start, line, col);
+        Ok(())
     }
 
     // ── character plumbing ──
@@ -259,10 +334,24 @@ impl<'s> Lexer<'s> {
         // word after `reader` at the start of a top-level line (owner,
         // 2026-11-18, `reader note_viewer reads notes`). It is upper-cased
         // into `ORDO_READER_<NAME>_ROLE` and never names a field or table.
-        let reader_name = matches!(
-            self.out.last(),
-            Some(Token { kind: TokenKind::Ident(w), span }) if w == "reader" && span.col == 1
-        );
+        // A grant's name is the same kind of name (`grant note_viewer`,
+        // `grant provider hominem`): upper-cased into a setting, never a
+        // field or a table.
+        let n = self.out.len();
+        let head = |i: usize, word: &str| {
+            matches!(
+                self.out.get(i),
+                Some(Token { kind: TokenKind::Ident(w), span }) if w == word && span.col == 1
+            )
+        };
+        let after_provider = n >= 2
+            && matches!(self.out.get(n - 1), Some(Token { kind: TokenKind::Ident(w), .. }) if w == "provider")
+            && head(n - 2, "grant");
+        let reader_name =
+            n >= 1 && (head(n - 1, "reader") || head(n - 1, "grant")) || after_provider;
+        if word == "grant" && col == 1 && self.depth == 0 {
+            self.grant_head = true;
+        }
         if reader_name {
             if word.len() > MAX_IDENT_LEN {
                 return Err(self.err_at(
@@ -523,11 +612,18 @@ impl<'s> Lexer<'s> {
                 TokenKind::RBracket
             }
             b'{' => {
+                if self.depth == 0 && self.grant_head {
+                    self.grant_depth = Some(1);
+                }
                 self.depth += 1;
                 TokenKind::LBrace
             }
             b'}' => {
                 self.depth = self.depth.saturating_sub(1);
+                if self.grant_depth.is_some_and(|d| self.depth < d) {
+                    self.grant_depth = None;
+                    self.grant_head = false;
+                }
                 TokenKind::RBrace
             }
             b',' => TokenKind::Comma,

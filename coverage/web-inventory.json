@@ -1,7 +1,7 @@
 {
   "version": 1,
   "status": "discovery-only",
-  "sourceDigest": "15acad8a0993508665f40f78b152c908fa35c3363b533300c33281c9bf93ceaf",
+  "sourceDigest": "db94a7c5cc45fcbd666d6ede5777206b1d5404522b6163ca13e4e41dab1b864c",
   "files": [
     {
       "file": "crates/ordo-api/src/attest.rs",
@@ -35,8 +35,8 @@
     },
     {
       "file": "crates/ordo-api/src/error.rs",
-      "sha256": "ae5c1ba86927390448cb5639c20c0d7b133d02ecbf7951db2f92a854e22f7067",
-      "lines": 2125
+      "sha256": "7fbf08739aba50af920db75fa09967a3be14675961e9804da52473c66753c571",
+      "lines": 2157
     },
     {
       "file": "crates/ordo-api/src/functions.rs",
@@ -50,7 +50,7 @@
     },
     {
       "file": "crates/ordo-api/src/lib.rs",
-      "sha256": "d7c5bcafcc8a9a571320f2e385f3f1329312b8681df7f094465f5474bc6a5a0a",
+      "sha256": "278e4af212bd6c2afccca5e2fb63bf1d71aaef77956f72b82dae6a73ebb8b578",
       "lines": 81
     },
     {
@@ -75,8 +75,8 @@
     },
     {
       "file": "crates/ordo-api/src/refine.rs",
-      "sha256": "fee8c984b72c086c325e53234783d1e807941eddef8a277271535c7ed5c62b7f",
-      "lines": 604
+      "sha256": "52017c3f2e74079a85fe40ce3283173bc5157d9ef348f7f516564be402776427",
+      "lines": 701
     },
     {
       "file": "crates/ordo-api/src/registry.rs",
@@ -85,13 +85,13 @@
     },
     {
       "file": "crates/ordo-api/src/router.rs",
-      "sha256": "43c887a3ecc559cc847ef1004824aace0518c30d2d4e66e427176ce30b6459d5",
-      "lines": 3043
+      "sha256": "9d9292698fad3e213ee7fb3da8dfe0a7c62daa0e8b8b023cc041e654cbdad45c",
+      "lines": 3114
     },
     {
       "file": "crates/ordo-api/src/spec.rs",
-      "sha256": "b3022adc8faa669a0215dd5522bc521f65ac5bfe494a818c069b2262750703ab",
-      "lines": 1253
+      "sha256": "8b107ca411e80dfa282a4e255a23f6e27dea37b3172719ab8ab73287d292711b",
+      "lines": 1299
     },
     {
       "file": "crates/ordo-api/src/sync.rs",
@@ -134,6 +134,11 @@
       "lines": 799
     },
     {
+      "file": "crates/ordo-cli/src/branches.rs",
+      "sha256": "2496c7bf98304ea0c5d70fbbec5da9a17e32c97b10ceb3d9654c509b97f479fe",
+      "lines": 309
+    },
+    {
       "file": "crates/ordo-cli/src/deploy_wait.rs",
       "sha256": "2c6cf59bbc2226ce3fe6e87a497e15667caee62e4c7ad25d1140da9a520f24d1",
       "lines": 276
@@ -150,13 +155,13 @@
     },
     {
       "file": "crates/ordo-cli/src/direct.rs",
-      "sha256": "35dc79d0f9f9aadefa1f3cea8d54b38a39fccce2089fcd78c51ccf95a1095348",
+      "sha256": "0fc3c756f3b7c3a4aa50bfd64d48bbb6dd1f811686e93b41c4b77618fc415932",
       "lines": 224
     },
     {
       "file": "crates/ordo-cli/src/evolve.rs",
-      "sha256": "96165c31cdeaa2c3ef2cf3d9c3b9e739fd53405475e7913aa016ecfb1c53ddaf",
-      "lines": 396
+      "sha256": "32f5d0be5874ff063f4ef59d76f2ab201637ca6e141f2beba573cda1ed0e1bee",
+      "lines": 747
     },
     {
       "file": "crates/ordo-cli/src/fix.rs",
@@ -180,13 +185,13 @@
     },
     {
       "file": "crates/ordo-cli/src/lib.rs",
-      "sha256": "7a1bb7c049281a5b51a78578d711c39c0e1c949028ebedc9d6ddc34e366d5da4",
-      "lines": 988
+      "sha256": "79655c855d6b233b179b741f724985fbd0c469d66ed3d7e5e8d1d04eaf77e279",
+      "lines": 992
     },
     {
       "file": "crates/ordo-cli/src/main.rs",
-      "sha256": "69fd4bcdc5878ada97497307c657afaa4c0d92d77b7a76633b8cec594caa2ff1",
-      "lines": 868
+      "sha256": "d2b2b01d68a6308c1aa428ee7dac5dfba77fd5d1e0a21c9963e81f542609ab8d",
+      "lines": 910
     },
     {
       "file": "crates/ordo-cli/src/migrate.rs",
@@ -195,8 +200,8 @@
     },
     {
       "file": "crates/ordo-cli/src/operator.rs",
-      "sha256": "b56e58853b6be6367ab4ad036c9d69b3c31f0a6c61d9c4c083937fba8b7d7a98",
-      "lines": 4865
+      "sha256": "00f06d3314116f5f6e7574a96b3d75c338235664c29aec2f091dbfaf9d8e7110",
+      "lines": 5697
     },
     {
       "file": "crates/ordo-cli/src/ops.rs",
@@ -209,9 +214,19 @@
       "lines": 256
     },
     {
+      "file": "crates/ordo-cli/src/prev.rs",
+      "sha256": "84b7773b08fc9a85e360a3ab0fcf235ae4cc47716f14571dff02d2584d2a247e",
+      "lines": 145
+    },
+    {
       "file": "crates/ordo-cli/src/release_check.rs",
       "sha256": "ae5a444fbb6f17a1b168afba214d3fe77da68c31d3cdc98140ef5f4d19b9fe2e",
       "lines": 123
+    },
+    {
+      "file": "crates/ordo-cli/src/rollout.rs",
+      "sha256": "bda90bd2aea73110bdae4606a5fda180215a9d3de3b28d6b9304c550b036b125",
+      "lines": 418
     },
     {
       "file": "crates/ordo-cli/src/signin.rs",
@@ -227,6 +242,11 @@
       "file": "crates/ordo-cli/src/sources.rs",
       "sha256": "17f2975d53d098bd46b6153985fa94e26d59ecb6ff704c146b15631bf76cf3bf",
       "lines": 181
+    },
+    {
+      "file": "crates/ordo-cli/src/tenant_builds.rs",
+      "sha256": "17bae52e0fe5f927d9eef50d7aad058d4bb759e52336bd0a2660507da55e50d7",
+      "lines": 188
     },
     {
       "file": "crates/ordo-cli/src/triggers.rs",
@@ -290,8 +310,8 @@
     },
     {
       "file": "crates/ordo-conformance/src/lib.rs",
-      "sha256": "9ab86b873da6532c349332daf8db8ec67080019ae89172e990ee65c423f3492e",
-      "lines": 1031
+      "sha256": "53ebce0efe6ad47a0f5a54f47de02bdb1537070fb6327525be558e2d91945f31",
+      "lines": 1038
     },
     {
       "file": "crates/ordo-conformance/src/membership.rs",
@@ -305,8 +325,8 @@
     },
     {
       "file": "crates/ordo-conformance/src/write.rs",
-      "sha256": "327a5e01e7a32ba63df27b0a6b97abeeab5b3cc151416e68f6958c1afcfcd621",
-      "lines": 5427
+      "sha256": "ebe0ed6e151b94555c9a0ad73645f2125d053a164533a9582f759951fb6aa6aa",
+      "lines": 5531
     },
     {
       "file": "crates/ordo-console/src/codes.rs",
@@ -390,8 +410,8 @@
     },
     {
       "file": "crates/ordo-console/src/server.rs",
-      "sha256": "c586e5bd263f588510ba88e8ceba1ff1e64bd642af0a06c6b241e30fb1a6c239",
-      "lines": 2113
+      "sha256": "fd60c79df925f8159676f30207cc936da36ff848fc225d6dbbd25ab9dce347f2",
+      "lines": 2119
     },
     {
       "file": "crates/ordo-console/src/server/admins.rs",
@@ -399,14 +419,24 @@
       "lines": 291
     },
     {
+      "file": "crates/ordo-console/src/server/builds.rs",
+      "sha256": "4a1cd05722f985a9ea1e1ea25bdfe5c77c17053ca4a593eda343cf0e09a5fe59",
+      "lines": 192
+    },
+    {
       "file": "crates/ordo-console/src/server/deploys.rs",
-      "sha256": "248c7f097c22b1093e9437f59daf204514665baba077fe7cd11d24fe8340b2ef",
-      "lines": 596
+      "sha256": "87d35ac3a8cc59e36d100e8eb81e09367431abc9d2756073bfe46aeffbf5bb6a",
+      "lines": 606
     },
     {
       "file": "crates/ordo-console/src/server/people.rs",
       "sha256": "0a3027bf48f1daa05df4314f23723643821df590a5c1ac67b8907f4b142e4718",
       "lines": 1097
+    },
+    {
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "sha256": "b62de069f239fa396737103ca5ded6d66c93c323fd1217aef22f25ab4c3cb827",
+      "lines": 421
     },
     {
       "file": "crates/ordo-console/src/server/settings.rs",
@@ -445,8 +475,8 @@
     },
     {
       "file": "crates/ordo-crypto/src/custody.rs",
-      "sha256": "17d229ec6d223855844b1c2c21b7b6fdc9b40981294d9420e88ed1e5d66eac76",
-      "lines": 1246
+      "sha256": "0c94017a4cbf670a95d221f5f15542ba74184a832e2ae1796521a4577bf0d467",
+      "lines": 1251
     },
     {
       "file": "crates/ordo-crypto/src/inline.rs",
@@ -500,8 +530,8 @@
     },
     {
       "file": "crates/ordo-egress/src/function.rs",
-      "sha256": "eaae5d08a965683596308235c254d8bf507806c241c29c84ad1f5bb888883571",
-      "lines": 1312
+      "sha256": "4b5b3bdc05c6ea7025664368a0b5fbbae1e6748f99f5a690abc56c0201aef38b",
+      "lines": 1325
     },
     {
       "file": "crates/ordo-egress/src/lib.rs",
@@ -570,13 +600,13 @@
     },
     {
       "file": "crates/ordo-exec/src/erase.rs",
-      "sha256": "5fc9d6bfa48cf65848610fa358a49cc717799816d8e0cbcdebd9345a964670b8",
-      "lines": 708
+      "sha256": "550ec1d60e6a659bb520916739f7c96f580354d61954bf9d2883d7dce1dc1ca8",
+      "lines": 756
     },
     {
       "file": "crates/ordo-exec/src/export.rs",
-      "sha256": "c612a6ba4e7d3f2fa9d099e23d3d9258a36d8ca85946e61b0059073daa83a2e4",
-      "lines": 1719
+      "sha256": "2dacab0fbd74f963213a9b54e085f51a06efc77ab6978f13522b235c67a2fc8c",
+      "lines": 1832
     },
     {
       "file": "crates/ordo-exec/src/fleet.rs",
@@ -590,8 +620,8 @@
     },
     {
       "file": "crates/ordo-exec/src/import.rs",
-      "sha256": "52df9b9bd218a0bfe074875088c7c79fdb74cef0341c0c95e99b3b7213c96083",
-      "lines": 2664
+      "sha256": "217f826904a231cd893eaa9ee1cd777c9a75c1bac3b89ff1e92f7f04cca6b233",
+      "lines": 2726
     },
     {
       "file": "crates/ordo-exec/src/incident.rs",
@@ -610,8 +640,8 @@
     },
     {
       "file": "crates/ordo-exec/src/lib.rs",
-      "sha256": "78f8e1256392b330d7d4e6ac6ae2178e5b970a312d86c04e8cd44c3c7cd4112b",
-      "lines": 3509
+      "sha256": "70222e338edb048b3c5391f564a0aeaad879e55f96652f7bc8af642cb011e820",
+      "lines": 4084
     },
     {
       "file": "crates/ordo-exec/src/metrics.rs",
@@ -620,8 +650,8 @@
     },
     {
       "file": "crates/ordo-exec/src/migrate.rs",
-      "sha256": "ea9b720651450dce2b780facb42c355ca3ab2eb841c48a5242f505c56530b8fb",
-      "lines": 1180
+      "sha256": "23cab9bdbf7cbb4fe866ca3523490d270242f5ba3f63ac205b99d9bd980e9c4c",
+      "lines": 1244
     },
     {
       "file": "crates/ordo-exec/src/nfc.rs",
@@ -634,9 +664,29 @@
       "lines": 308
     },
     {
+      "file": "crates/ordo-exec/src/orphans.rs",
+      "sha256": "71404ef59f232e71ec15a2d32537c67227c8daf4de1231c1054dde41242328ed",
+      "lines": 369
+    },
+    {
+      "file": "crates/ordo-exec/src/overlay.rs",
+      "sha256": "b5b7c09155a048e8b252aa6e3e4b7fd55d177d913e7a176876015c145179674c",
+      "lines": 2139
+    },
+    {
       "file": "crates/ordo-exec/src/peer.rs",
-      "sha256": "d5fa1e2ea26ff616880eeec140a02156d8b3c817f1192827ad54c97b655e2799",
-      "lines": 1599
+      "sha256": "2fadd09464d794825154bd45f7246686f02a138c7c4575a33cb14a8b28d0ea2f",
+      "lines": 1972
+    },
+    {
+      "file": "crates/ordo-exec/src/peer_reads.rs",
+      "sha256": "2fb117c6fb128f0beec360d8f5fa7bdc4459e42af27c9efdbdcc3ef352f09998",
+      "lines": 1178
+    },
+    {
+      "file": "crates/ordo-exec/src/pick.rs",
+      "sha256": "8690903c0853cab314540ea724493d385c5a3466284def5e94da5ed1c2763851",
+      "lines": 563
     },
     {
       "file": "crates/ordo-exec/src/pool_error.rs",
@@ -650,8 +700,8 @@
     },
     {
       "file": "crates/ordo-exec/src/registry.rs",
-      "sha256": "d34e010f202402f94f5522d9304297fe344ec37b725b84a52046524e546eced1",
-      "lines": 675
+      "sha256": "62d8726ed87e102525c7da11402d8c6ac3926b26fdb2ae7e5523be618ec2d3d6",
+      "lines": 747
     },
     {
       "file": "crates/ordo-exec/src/reseal.rs",
@@ -675,8 +725,13 @@
     },
     {
       "file": "crates/ordo-exec/src/shape.rs",
-      "sha256": "8957807af48f5871669a2e8641a618da54b704ef9792895d1578ae8acee8f85d",
-      "lines": 582
+      "sha256": "3f9710bf2814b368496c5458a56f057a6f57691d771df10868bea7a60eb9eddf",
+      "lines": 779
+    },
+    {
+      "file": "crates/ordo-exec/src/sign_in_contract.rs",
+      "sha256": "4227167348e1c84b8b2a3d59ba8ec462a9956a1db6d382c8a43c03a2f82f23ac",
+      "lines": 290
     },
     {
       "file": "crates/ordo-exec/src/spacedb.rs",
@@ -690,8 +745,8 @@
     },
     {
       "file": "crates/ordo-exec/src/undo.rs",
-      "sha256": "b9c716383299f5dd07d70f9d0d0cc499a228219b752b86803829124545cd244f",
-      "lines": 4522
+      "sha256": "63f5fde1ebfd2859415775c427aea1b07b4cff2bb917eaae2c8d90e43a998959",
+      "lines": 4552
     },
     {
       "file": "crates/ordo-exec/src/usage.rs",
@@ -765,8 +820,8 @@
     },
     {
       "file": "crates/ordo-gen/src/emit.rs",
-      "sha256": "bab0f189b7ab9a58ea58a62edc3fe124b6fcde380331cafdb27ba701c374b2ee",
-      "lines": 1312
+      "sha256": "56fd12554ad46e0d5044fc4dfde706d4e26049b602c1f39cc4f21a78dc33fcec",
+      "lines": 1349
     },
     {
       "file": "crates/ordo-gen/src/lib.rs",
@@ -805,8 +860,8 @@
     },
     {
       "file": "crates/ordo-host/src/apply_op.rs",
-      "sha256": "f348f8346853ed2ac511290246e5979662e5e437fe94404770704d2eec6dfec4",
-      "lines": 2184
+      "sha256": "63b317c4796ce92bf6929ad127ebdb15e916f8d14a52e5b08325d831ee2bd20e",
+      "lines": 2637
     },
     {
       "file": "crates/ordo-host/src/attest.rs",
@@ -940,8 +995,8 @@
     },
     {
       "file": "crates/ordo-host/src/backfill.rs",
-      "sha256": "55fb418a96f1d1d368fa7b51e6902ffcc9dffa1eccc003e9afecc2dbe845998f",
-      "lines": 1167
+      "sha256": "1f1da35d781d90ca8d4acaed74a94fdf5050778f4d542e8be0b90a313d021780",
+      "lines": 2057
     },
     {
       "file": "crates/ordo-host/src/blob.rs",
@@ -952,6 +1007,11 @@
       "file": "crates/ordo-host/src/boot_record.rs",
       "sha256": "d02448b0c81a6511693ded7249ee192109478117bce8d0a6322b448239279de8",
       "lines": 261
+    },
+    {
+      "file": "crates/ordo-host/src/branches.rs",
+      "sha256": "16c4e9917e0c6506d55fff79fbadd7318ddc3a3408edfd2596c5d526894122a1",
+      "lines": 953
     },
     {
       "file": "crates/ordo-host/src/bucket_ops.rs",
@@ -965,8 +1025,8 @@
     },
     {
       "file": "crates/ordo-host/src/clones.rs",
-      "sha256": "6c8a392ac7a55ab37f62770d798a542fbe2ecfd9f591bdd1cc4c3e6c19448f14",
-      "lines": 1921
+      "sha256": "9ad9364965575b8353c77a4746083c9fa9349f8768896e6cd4b8adb05b234e35",
+      "lines": 2330
     },
     {
       "file": "crates/ordo-host/src/consent.rs",
@@ -975,8 +1035,13 @@
     },
     {
       "file": "crates/ordo-host/src/console_keys.rs",
-      "sha256": "a438bb55e6b3cfcd8c7a6eb79d664232ac0d40b70e6f49cdfa66b7c420b40fbb",
-      "lines": 1135
+      "sha256": "d6554529fa12e71d3fed1fba269689c75a026d2a6dc83796f74d58cdf66b927f",
+      "lines": 1137
+    },
+    {
+      "file": "crates/ordo-host/src/consumer_grants.rs",
+      "sha256": "a7c3f179be35cf962dfee59d321be255f077443a5f06bfead6a5eb7ac6ee29a1",
+      "lines": 710
     },
     {
       "file": "crates/ordo-host/src/contact_email.rs",
@@ -1010,18 +1075,18 @@
     },
     {
       "file": "crates/ordo-host/src/deploy.rs",
-      "sha256": "c09c37c9cbe90389c36f71776abb4106a31c42e3808351b1cf2bb27a3e504ec7",
-      "lines": 1966
+      "sha256": "75e36cf04e27d3b6b16b40a716d3801f50adaa5f9189aab90d8ead6abde68f6e",
+      "lines": 2253
     },
     {
       "file": "crates/ordo-host/src/deploy_ops.rs",
-      "sha256": "5bba22933718f7a4222e298101517b0a5e3b0fe1b070353edb3ba74443f0b06b",
-      "lines": 1454
+      "sha256": "216748caa06a0df103800465811403a35ad11e686044009024fad7601094fa8e",
+      "lines": 2017
     },
     {
       "file": "crates/ordo-host/src/deployment_access.rs",
-      "sha256": "9d46c5d5f2ad11f3a87f3a006bf307ec4f19ce9752d2604395dbcd8e32e68740",
-      "lines": 310
+      "sha256": "12af0a0cc6ba1a7cbf2d91331bfd40ea4750e5b3a53938347168bf0245e4f91f",
+      "lines": 341
     },
     {
       "file": "crates/ordo-host/src/direct_uses.rs",
@@ -1030,8 +1095,13 @@
     },
     {
       "file": "crates/ordo-host/src/directory.rs",
-      "sha256": "625b6af9e6f2cc14b023dcabd1200b0086bd9a2cce8efb55fa8b8d8a25033c42",
-      "lines": 569
+      "sha256": "ccd1f1109960ae36b7f22a617baa941bf97f254e49712d50f5ce7b5582b65480",
+      "lines": 576
+    },
+    {
+      "file": "crates/ordo-host/src/dual_writes.rs",
+      "sha256": "f85219d2ce793fd95aa9cf6389fecb9074e1952a003260201f390adbbfdc9c69",
+      "lines": 1915
     },
     {
       "file": "crates/ordo-host/src/email_code.rs",
@@ -1045,23 +1115,28 @@
     },
     {
       "file": "crates/ordo-host/src/environments.rs",
-      "sha256": "a139c573f82bf1531111af47133d7d747b66c2842ecd52996625b45b23ad45ad",
-      "lines": 851
+      "sha256": "1a5f28ffe27dd7cf1f83a3f30973bf092b166c430f96e2efd3262a5e1b87dfe9",
+      "lines": 1054
+    },
+    {
+      "file": "crates/ordo-host/src/every_tenant.rs",
+      "sha256": "6a8f0f9120ae80ca8051203706280e243a6bf443404316517f34784ac725f761",
+      "lines": 799
     },
     {
       "file": "crates/ordo-host/src/evolve.rs",
-      "sha256": "93d18caef2bb6cbc7204a055ef268d01f05ee78195fd05af75a779580018f784",
-      "lines": 2286
+      "sha256": "5dab637ac7af5ee960e5d39cf94b78fa884524acd0f57734c8ea1597d078d2aa",
+      "lines": 3995
     },
     {
       "file": "crates/ordo-host/src/exit_ops.rs",
-      "sha256": "4591b611decdd88b05ebfa694f3ae94c5de8857d96cdd2bb955aab1c42c2e34f",
-      "lines": 830
+      "sha256": "b60ca36b31d0a69ca38badb118fa0f7d6fc0a2250411195735aac19231754448",
+      "lines": 992
     },
     {
       "file": "crates/ordo-host/src/external_check.rs",
-      "sha256": "01b33898bc6698c3b85c67701b31d22f2288ae151c9583d192504792bc276f95",
-      "lines": 831
+      "sha256": "e9fc1bd6dff6d333959aec2b77565a52915b119c803ee52757622194279c63a0",
+      "lines": 1125
     },
     {
       "file": "crates/ordo-host/src/federation.rs",
@@ -1070,8 +1145,8 @@
     },
     {
       "file": "crates/ordo-host/src/fleet.rs",
-      "sha256": "aa28c7218b715e98f3224a03754d6d6c65abefa63c051d8287998cf3803806ae",
-      "lines": 439
+      "sha256": "f70e4c67cf2658e95246f9bdea76993dab538f467efa2c4b94bcd76e8876f0d6",
+      "lines": 443
     },
     {
       "file": "crates/ordo-host/src/fn_runs.rs",
@@ -1084,9 +1159,14 @@
       "lines": 1326
     },
     {
+      "file": "crates/ordo-host/src/grant_kills.rs",
+      "sha256": "7158367507cffd0e41e6600d47a99241093ffc070c7802749b604b7594dc67c3",
+      "lines": 167
+    },
+    {
       "file": "crates/ordo-host/src/grants.rs",
-      "sha256": "6b9735c699e30a92bc15abb5720742e3140151d8e14c537257dbc550acd51a6b",
-      "lines": 296
+      "sha256": "a476b89930bc797689ea189b8d8d912f8ba7ec4f49d0f02b8d3d87f1dec969be",
+      "lines": 317
     },
     {
       "file": "crates/ordo-host/src/guess_limits.rs",
@@ -1095,8 +1175,8 @@
     },
     {
       "file": "crates/ordo-host/src/identity_keys.rs",
-      "sha256": "85985b8547f30c7b123512fe08b358996f5df8a0240b81cefa759920b238ebde",
-      "lines": 875
+      "sha256": "a0dbae9d070e7c3fa5edd8de975be6e8c25d9e35191c369d63cb39571a2de165",
+      "lines": 900
     },
     {
       "file": "crates/ordo-host/src/identity_ops.rs",
@@ -1107,6 +1187,11 @@
       "file": "crates/ordo-host/src/identity_removal.rs",
       "sha256": "02a547216a8bbd676cf815f1df8089461be8ee6ad4cc7bf4b97937441463de5c",
       "lines": 145
+    },
+    {
+      "file": "crates/ordo-host/src/input_caps.rs",
+      "sha256": "f407fe0673ae504566f5f06a75c2f294fbd31eb15005335e7ddae046709ff099",
+      "lines": 285
     },
     {
       "file": "crates/ordo-host/src/invalidation.rs",
@@ -1125,8 +1210,8 @@
     },
     {
       "file": "crates/ordo-host/src/lib.rs",
-      "sha256": "361deff665787ea099f0bcd0b0dfb27df1183b03c55a3fa7f43c710ed29e2dff",
-      "lines": 3579
+      "sha256": "fb95c63213cfa40e9781971da8fa536252a18f0c55bd378caaf8006e377d1d1a",
+      "lines": 3985
     },
     {
       "file": "crates/ordo-host/src/link_password.rs",
@@ -1135,13 +1220,13 @@
     },
     {
       "file": "crates/ordo-host/src/mail.rs",
-      "sha256": "6ff0c020f81eff8be57a923ceaca7ed197357d321774b279451356d60691336f",
-      "lines": 2126
+      "sha256": "a2382224846e74fae0d2e9f9d0d968e7c391af7cc056d4b463d81874ec54abe4",
+      "lines": 2132
     },
     {
       "file": "crates/ordo-host/src/main.rs",
-      "sha256": "9e72e13a204cf94463be82b6a8cdbb852e5b92c63d17714ce6d2a85f6aa901b3",
-      "lines": 54
+      "sha256": "0a923084a4eec5e081e81679207c9ff25da35f77100734c6c2314c11e4c9a8ed",
+      "lines": 73
     },
     {
       "file": "crates/ordo-host/src/member_ops.rs",
@@ -1150,8 +1235,8 @@
     },
     {
       "file": "crates/ordo-host/src/metrics.rs",
-      "sha256": "6183abf64e7b52815ddd2a6bef4de6b82581898e68af8f996f250c0003aa79b5",
-      "lines": 2052
+      "sha256": "06b4a904f56e5e464f620782fa608f40058393e7d514b111f7fb4674cc294d28",
+      "lines": 2053
     },
     {
       "file": "crates/ordo-host/src/node_status.rs",
@@ -1160,13 +1245,18 @@
     },
     {
       "file": "crates/ordo-host/src/observed_cost.rs",
-      "sha256": "2f9ff56317bde6318d19e6687648f6befd7bca96f3462a373cabf9a55f92f96c",
-      "lines": 633
+      "sha256": "ba43627e606caeee8bbcd961e215ae6d86dd5aa89ce0cbef6456d41f310fb4f8",
+      "lines": 658
     },
     {
       "file": "crates/ordo-host/src/oidc.rs",
       "sha256": "26c34fb63f30ea65154aaae6c23debde2e4e5dbc7febfff14e37961c6aa2e5f9",
       "lines": 804
+    },
+    {
+      "file": "crates/ordo-host/src/orphan_ops.rs",
+      "sha256": "a1028cc34744da426379759127e21373352a3cccd726fd348f9cc1250304a5ed",
+      "lines": 594
     },
     {
       "file": "crates/ordo-host/src/own_download.rs",
@@ -1184,6 +1274,26 @@
       "lines": 909
     },
     {
+      "file": "crates/ordo-host/src/peer_client.rs",
+      "sha256": "90c695c07d96009225164974c0e26d87cb93e84810551d45ce87d1a677ff6b0a",
+      "lines": 1020
+    },
+    {
+      "file": "crates/ordo-host/src/peer_door.rs",
+      "sha256": "ba26f7df7b79ec84f43f1e68b05704b1f29fc34d588791fa279ff86e3326027f",
+      "lines": 722
+    },
+    {
+      "file": "crates/ordo-host/src/peer_ops.rs",
+      "sha256": "b4100f0bf60f0151d7c6ebc43385c6e83ba26c4fce4d98439a82bdd952c79894",
+      "lines": 588
+    },
+    {
+      "file": "crates/ordo-host/src/peer_reads.rs",
+      "sha256": "a3fa06c29c37c962727a5258fd07d231df6449c38364ad427996a4e2e32e3cd5",
+      "lines": 231
+    },
+    {
       "file": "crates/ordo-host/src/people_ops.rs",
       "sha256": "1d457e2973c11c9dae840bd31f462afe959e5c6a1e76ed7abdfd8a0730d53237",
       "lines": 423
@@ -1195,23 +1305,28 @@
     },
     {
       "file": "crates/ordo-host/src/pin_stream.rs",
-      "sha256": "b58d16d2adac1fc466bd46b54167507c9d71730f776a494a0c107e6dc0448ad0",
-      "lines": 524
+      "sha256": "ca6b354981227ca62ce312677a53af922c970112dc90a98b409bcc44f5437c81",
+      "lines": 488
     },
     {
       "file": "crates/ordo-host/src/platform_ops.rs",
-      "sha256": "8bf75c66098a0f1bccc33e3e0bac0ea4ac05c9d94f24dafd94e781023a780ab6",
-      "lines": 3347
+      "sha256": "d5ea61d00a6ad3ee5b5df65b3644b6fbc4d231651c5e1caa2db5bf1884867b3e",
+      "lines": 3491
     },
     {
       "file": "crates/ordo-host/src/precheck.rs",
-      "sha256": "f447cd70ef61ac862a4eb734159497ebcffe1fdaeb0f1db6e2d5331f991f6a08",
-      "lines": 547
+      "sha256": "6f399d835ae110eef8d39449e7833f83e15018e07dcd90b710c8d4c2f992be20",
+      "lines": 997
     },
     {
       "file": "crates/ordo-host/src/presence.rs",
-      "sha256": "32027005763ff7b262b6a993852066c153c6e307d381faafc07109949bdbbacf",
+      "sha256": "518a899f0604b62d56422f1eadf44e50d533238bb11254850e99a7cc0934a344",
       "lines": 412
+    },
+    {
+      "file": "crates/ordo-host/src/prev_offer.rs",
+      "sha256": "161135d22c2abbdef04bc07c8ebadca65a42bc57c5b7578ae03b1226813c3d1e",
+      "lines": 64
     },
     {
       "file": "crates/ordo-host/src/principal_directory.rs",
@@ -1225,8 +1340,8 @@
     },
     {
       "file": "crates/ordo-host/src/promotion.rs",
-      "sha256": "472560b59fc85a86b492135dff687c4046fec988d37e66011e71903caa67eac0",
-      "lines": 712
+      "sha256": "fc6ff00b3569be8d4e78f4cdac076808a6ce63e3a67f5bb7f399795545186741",
+      "lines": 807
     },
     {
       "file": "crates/ordo-host/src/provision.rs",
@@ -1275,8 +1390,8 @@
     },
     {
       "file": "crates/ordo-host/src/refine_call.rs",
-      "sha256": "e70188cdd5581384a1c86fd3e7adc7b13c9708819a4782f1968d0c065cd18d54",
-      "lines": 506
+      "sha256": "10ff430e940065d35977c386f5743b37dd42990f72d9f4dcfb2a1ab370334a62",
+      "lines": 536
     },
     {
       "file": "crates/ordo-host/src/registrations.rs",
@@ -1284,9 +1399,14 @@
       "lines": 451
     },
     {
+      "file": "crates/ordo-host/src/rehearsals.rs",
+      "sha256": "454ab50882cdb2fd3a91ba99c3089b6edfb0dd23242cee3fc87caa0c85ff0252",
+      "lines": 1811
+    },
+    {
       "file": "crates/ordo-host/src/release_check.rs",
-      "sha256": "6d671424623856ab0aa1b1bf7664600119a40631a9c8c1046bd5ac5fe304549c",
-      "lines": 1003
+      "sha256": "9204b9e1e4580396ba322c52cfbbd1a8704526ce94fd7de28cc465287fb303d3",
+      "lines": 1239
     },
     {
       "file": "crates/ordo-host/src/release_ops.rs",
@@ -1305,23 +1425,33 @@
     },
     {
       "file": "crates/ordo-host/src/revoked_moves.rs",
-      "sha256": "66439b14cbed8f42ddd4a3343fbaa57fab31aa282815cd4da4b4b6fd37b539d5",
-      "lines": 471
+      "sha256": "4634c6062c0248df8eb6078192a054bc065ae461a6ee8e57c8c75cdccbefc34d",
+      "lines": 477
+    },
+    {
+      "file": "crates/ordo-host/src/rollout_strategies.rs",
+      "sha256": "4d24347fd2f39e3e8658fea7ea56265c996303b338a3f7769ca8f5c7dec79961",
+      "lines": 1024
+    },
+    {
+      "file": "crates/ordo-host/src/rollouts.rs",
+      "sha256": "27e812e2a6731b308719663fc3ae519eb3c088002792a2c51f033db509f36851",
+      "lines": 3680
     },
     {
       "file": "crates/ordo-host/src/routines.rs",
-      "sha256": "0d348fc6f63a7ae54553eb696259f8d104a01686e556cb9fd272abf7ac6f51bf",
-      "lines": 1358
+      "sha256": "3d4ffbb38082e7f9954e92e4c2410f195870fe5e51ce840a07b0942052139296",
+      "lines": 1418
     },
     {
       "file": "crates/ordo-host/src/runtime.rs",
-      "sha256": "6fd5b37b6bdfebc9b3ef4a5a8fc7de7d7e04c94cc9705204d95949d65c9752c7",
-      "lines": 8222
+      "sha256": "0c63f5146c1f353502abb2a93036a827f14ebcb382455ce75cc5b98e63203be7",
+      "lines": 8590
     },
     {
       "file": "crates/ordo-host/src/schema_apply.rs",
-      "sha256": "7e1fed4beff5fbcac15736eb510fd706a107289b20e091e40e68dcc0b989b747",
-      "lines": 4031
+      "sha256": "bd7f5cdfce4f067750cd9ce28e53b70cfdb0072d138001646ba0d26e0aaa739f",
+      "lines": 8404
     },
     {
       "file": "crates/ordo-host/src/secdrain.rs",
@@ -1340,8 +1470,8 @@
     },
     {
       "file": "crates/ordo-host/src/secrets.rs",
-      "sha256": "73c18962631729d7328a63827166cf2b4ce892df7cd36c42490d02a889f3c3c2",
-      "lines": 846
+      "sha256": "f3896b5a327376da8164fa5af64b992e9a02a01f271558742e8f9d951dc25e47",
+      "lines": 861
     },
     {
       "file": "crates/ordo-host/src/security_key.rs",
@@ -1350,8 +1480,8 @@
     },
     {
       "file": "crates/ordo-host/src/security_level.rs",
-      "sha256": "dde912f73719be2fb7250145e79ecba2bb5dcb80f6fbf098eef13fae862d7511",
-      "lines": 430
+      "sha256": "859e8d81374909e08dd6fec00c4231f7221ae5598c5d0bc9b3ddd60448dc22c0",
+      "lines": 441
     },
     {
       "file": "crates/ordo-host/src/security_record.rs",
@@ -1365,8 +1495,8 @@
     },
     {
       "file": "crates/ordo-host/src/serve.rs",
-      "sha256": "32e72845ecbeb7d6a5413ccfbc9c45495d9265d53a8553e2a80e110b5341e11f",
-      "lines": 1543
+      "sha256": "798a30cab1025f48308304653ed28f351382a516b22db2c9bbf59fac465e93b7",
+      "lines": 1623
     },
     {
       "file": "crates/ordo-host/src/session_policy.rs",
@@ -1380,18 +1510,18 @@
     },
     {
       "file": "crates/ordo-host/src/settings.rs",
-      "sha256": "8f6b2879243780c68aa9f44daeba9ae16e3a2129394086b306a1fb73ae4ae9da",
-      "lines": 2657
+      "sha256": "830d5631208a787be1ca3861c3821994fa004ebf090f65d24942b7a569c70e3c",
+      "lines": 2735
     },
     {
       "file": "crates/ordo-host/src/shape.rs",
-      "sha256": "d7771784b26ba0c17eeccf7299a9d4ac13e315130c8cb93c7015c968d8c8107a",
-      "lines": 535
+      "sha256": "215033d0afec58b49bb42fcda0644ca18a3ca530b01f7ec3bb437e35bf7929b5",
+      "lines": 558
     },
     {
       "file": "crates/ordo-host/src/share_accept.rs",
-      "sha256": "282ee9228dcd218c18cc60cce4a455124d46970f894dd1f53a55399715ed2d48",
-      "lines": 729
+      "sha256": "fc04eb0575022be25274405b3d6b8fc568ffd4fbc60a902c9e2c4cfb944a8375",
+      "lines": 749
     },
     {
       "file": "crates/ordo-host/src/share_links.rs",
@@ -1400,18 +1530,23 @@
     },
     {
       "file": "crates/ordo-host/src/share_ops.rs",
-      "sha256": "b284880e9131b7b5ffe8dda92358f48dbf71def479d772b0c1586fedb600da17",
-      "lines": 960
+      "sha256": "18d7f0284003f7af15ca48fcda56b208387b4dd2fe66529f0d296fedcb1dbb4e",
+      "lines": 962
+    },
+    {
+      "file": "crates/ordo-host/src/sinks.rs",
+      "sha256": "353c1e6ff0f15e1636debb46e89510fbef5718230e590f635f6eaa1153f582ef",
+      "lines": 374
     },
     {
       "file": "crates/ordo-host/src/spaces.rs",
-      "sha256": "f45d0bc25e04d7595a6b9a0ce6cacda8069960a8c0de22b06c7e7e3f366b7697",
-      "lines": 1188
+      "sha256": "6ab69b1a36e3f23864dd958850dc892ef398db0c6e988cf7f3ff1fe760c02d56",
+      "lines": 1393
     },
     {
       "file": "crates/ordo-host/src/step_door.rs",
-      "sha256": "d7be4b258b6b31910ea703e30cdbdf8ac350a2054ec9b7d5e8162f95d8e30ef1",
-      "lines": 355
+      "sha256": "b30742f98cbe7afbce7dbb039db2cbf5a034fdbf3997159257388839641e8cc8",
+      "lines": 417
     },
     {
       "file": "crates/ordo-host/src/supervisor.rs",
@@ -1419,9 +1554,14 @@
       "lines": 1300
     },
     {
+      "file": "crates/ordo-host/src/tenant_builds.rs",
+      "sha256": "d2d2490c2da8790c27eac28f1043348e105e9d84299047f41f1f18db367555ef",
+      "lines": 862
+    },
+    {
       "file": "crates/ordo-host/src/tenant_forward.rs",
-      "sha256": "5ab29b69abb276d819a4db9da30db4b755dda30e3b4516499e01db2348c2a125",
-      "lines": 710
+      "sha256": "14b37c8fd21edc2ac57cd500fefecb13d6d3e2114e4332070f1a3fcd569a1602",
+      "lines": 819
     },
     {
       "file": "crates/ordo-host/src/tenant_identities.rs",
@@ -1430,8 +1570,8 @@
     },
     {
       "file": "crates/ordo-host/src/tenant_ops.rs",
-      "sha256": "1cb3ab236d0a4ec247fd0409f5340da7d05d5cfb395f95c51f9b2cc71e338cc6",
-      "lines": 1618
+      "sha256": "90a299360f2eef6b9d4be9303df1331e10a7d836921eaf54b3210aa85eb5f6b2",
+      "lines": 1673
     },
     {
       "file": "crates/ordo-host/src/tenant_origins.rs",
@@ -1455,8 +1595,8 @@
     },
     {
       "file": "crates/ordo-host/src/tenants.rs",
-      "sha256": "ec304cf5d1b85fb2edc9fcf70653579d8fdfb80746cb085b9170716056c4a9d8",
-      "lines": 971
+      "sha256": "26c2a23439a8a33e85b26470028135ba79f378188c52bc08bee24c27d2039a65",
+      "lines": 989
     },
     {
       "file": "crates/ordo-host/src/tickets.rs",
@@ -1469,9 +1609,14 @@
       "lines": 158
     },
     {
+      "file": "crates/ordo-host/src/version_removal.rs",
+      "sha256": "853798fc2b53fc2af2d4cdfe49a679acdf56a930d53643d503bd8c12173b5680",
+      "lines": 546
+    },
+    {
       "file": "crates/ordo-host/src/versions.rs",
-      "sha256": "bbd0a7a38f068431cc51a92e04a10ebb4fbedf6358d7eee763bd2106aa606e3b",
-      "lines": 3645
+      "sha256": "fc0ce0535eb01854c4fdc19ca8ace0f72f914b9fa139cd4a8de7b11c65e2d6a8",
+      "lines": 5450
     },
     {
       "file": "crates/ordo-host/src/versions_diff.rs",
@@ -1485,8 +1630,8 @@
     },
     {
       "file": "crates/ordo-host/src/windows.rs",
-      "sha256": "37e8d0dcbcbdc900b2de74c73074fc058d561776b52eec66c22b3be1ea64c317",
-      "lines": 1708
+      "sha256": "7da1f5b4c84d7971f692e076bf2ffc7e311e5e6c2d757cd009e52c1084e4d2ef",
+      "lines": 1970
     },
     {
       "file": "crates/ordo-host/src/workers.rs",
@@ -1505,28 +1650,33 @@
     },
     {
       "file": "crates/ordo-identity-service/src/commands.rs",
-      "sha256": "d19243db89e5554e0ee25632f018161401a2575c49f7733096684692ccaef5f1",
-      "lines": 440
+      "sha256": "e612d51b8319cef1b0d9a4888d528e5fb7a34b98917c67f37cfd1a38b4dcd8fe",
+      "lines": 473
     },
     {
       "file": "crates/ordo-identity-service/src/config.rs",
-      "sha256": "334158298014abc35e7b14720a514a2e3d357a4f214a8faae79e8ecf23b35f2e",
-      "lines": 904
+      "sha256": "cf752a268136fcd4bb04991663106cfddc72c6122ebb5f73491e9e15a15d3d69",
+      "lines": 938
     },
     {
       "file": "crates/ordo-identity-service/src/deployments.rs",
-      "sha256": "c0082007564601ef31d7bec085ea75e4ead6816dc3fe6d2b9735996f889fc156",
-      "lines": 1110
+      "sha256": "ae6e750ec1fb3f18a83bc8286ca24b787148fb556a5c0239df4f474a738ed26f",
+      "lines": 1220
     },
     {
       "file": "crates/ordo-identity-service/src/error.rs",
-      "sha256": "5fecf2d0eede3aeea3973f289596811190c949697c0ee0d6cdfb39edf29266a8",
-      "lines": 570
+      "sha256": "e53a4d8f5006f590ad94f4e9048933bd9f34a18be4870f431c37399f33d5e7ef",
+      "lines": 605
+    },
+    {
+      "file": "crates/ordo-identity-service/src/exchange.rs",
+      "sha256": "98cbb5f0dfbadb01fff0fe859352623a3b01b93272e2f24305fafc1e4f70f411",
+      "lines": 557
     },
     {
       "file": "crates/ordo-identity-service/src/flows.rs",
-      "sha256": "1ddbccc2efe0af6eb00c4624dcd5b40ea4a60b1648e34a7c91dd8416e0edd141",
-      "lines": 1449
+      "sha256": "00d63fdf8dc166db8621481fb36def799795cd58c6d833b3dce58b4805d26c47",
+      "lines": 1470
     },
     {
       "file": "crates/ordo-identity-service/src/import.rs",
@@ -1545,8 +1695,8 @@
     },
     {
       "file": "crates/ordo-identity-service/src/lib.rs",
-      "sha256": "296a64b729a224273884f864f61167bcf3f81178357aa2b580d6818bd6b0fe2b",
-      "lines": 61
+      "sha256": "2f353bedd9360582c2efe95764efb4e9503d16d9b718f2ad07e3a68f8b56f584",
+      "lines": 62
     },
     {
       "file": "crates/ordo-identity-service/src/machine.rs",
@@ -1560,8 +1710,8 @@
     },
     {
       "file": "crates/ordo-identity-service/src/oidc.rs",
-      "sha256": "7a978008b2ff9960485ee1b8d4dc4e1d2e4dc2caa5a90f4417a1f825743eee3e",
-      "lines": 517
+      "sha256": "15a4c02729389f057db927628cd7b218bc18a0404cb59efbadc74f79752bb96b",
+      "lines": 529
     },
     {
       "file": "crates/ordo-identity-service/src/page.rs",
@@ -1585,18 +1735,18 @@
     },
     {
       "file": "crates/ordo-identity-service/src/routes.rs",
-      "sha256": "70d722ea6f36000c74baa02fdaf5fa1fc3160feb119fdab63b095697fee671d4",
-      "lines": 1197
+      "sha256": "2bd8fa4fc10f41e92d40e2d34bf869f46eb39c885cfa23ace15742aa82f106eb",
+      "lines": 1239
     },
     {
       "file": "crates/ordo-identity-service/src/secrets.rs",
-      "sha256": "8633278382963f09ca25039adee5f7edf33d1a3f70adfb4d059ec81749282a3c",
-      "lines": 47
+      "sha256": "670ff3df17f102d0bbaa5d27d58f5eff5ff416ce68f2a9da0ba84c4e4e77923a",
+      "lines": 52
     },
     {
       "file": "crates/ordo-identity-service/src/server.rs",
-      "sha256": "dcaa9b32944603366fe19e634c73fed9b7b7a8cc70a0776d74f46ef8e2f0cd67",
-      "lines": 731
+      "sha256": "e973e081a6b874cfc2d1484cc8510875ba76add5041526f9e2e7043dbcea137c",
+      "lines": 732
     },
     {
       "file": "crates/ordo-identity-service/src/sessions.rs",
@@ -1605,8 +1755,8 @@
     },
     {
       "file": "crates/ordo-identity-service/src/store.rs",
-      "sha256": "9b154dc6f8afcb4449ee9012172ab7e36cfd060fd36a705c228c44ba41b7402a",
-      "lines": 411
+      "sha256": "1b5ddf8eafc042acb307f3f6a8a684783b8fcb72cb380b7436a4d1871f03bfd6",
+      "lines": 429
     },
     {
       "file": "crates/ordo-identity-service/src/throttle.rs",
@@ -1620,8 +1770,8 @@
     },
     {
       "file": "crates/ordo-identity/src/access.rs",
-      "sha256": "318cab0fb55605907094e7b094562285838c2ce0af17e8e533aa927b9e5fe459",
-      "lines": 1386
+      "sha256": "c7e060bc568f8becede5c39a90d5d87608363ab9a8a941422cdbd6099d4c6689",
+      "lines": 1586
     },
     {
       "file": "crates/ordo-identity/src/ceremony.rs",
@@ -1665,8 +1815,8 @@
     },
     {
       "file": "crates/ordo-identity/src/grants.rs",
-      "sha256": "a34afc88675adb87136faf03e84c15157b9d33ff40785340e29ff81b753a5f95",
-      "lines": 380
+      "sha256": "3b3bd8e88850fb38b2acef616de2c5d04591fa9790f0b6ead4e5e7f175ac57ce",
+      "lines": 397
     },
     {
       "file": "crates/ordo-identity/src/jose.rs",
@@ -1675,8 +1825,8 @@
     },
     {
       "file": "crates/ordo-identity/src/lib.rs",
-      "sha256": "62525eea981c19940d095dae7b29eb63498706b1c5c3df884f299bf4d1c2e8eb",
-      "lines": 118
+      "sha256": "bd1a5d93b94f834faed1ee607a47703cfb950f7258031fdc59ce23cfaa188f14",
+      "lines": 122
     },
     {
       "file": "crates/ordo-identity/src/oauth2.rs",
@@ -1705,13 +1855,18 @@
     },
     {
       "file": "crates/ordo-identity/src/passkey_tests.rs",
-      "sha256": "81e07903cd3568d856ffd3f618d64f276d7c1af1b74f52c3853e6145b14a6f70",
-      "lines": 2207
+      "sha256": "5e3aad89347938d8ffe58ed2192f5319228b8405e602296473f9f540615435f4",
+      "lines": 2209
+    },
+    {
+      "file": "crates/ordo-identity/src/peer_token.rs",
+      "sha256": "e6d6a50be869dc58035cfeae1ab3f1c96adb248f6ed6185fea7dceafffa7048d",
+      "lines": 464
     },
     {
       "file": "crates/ordo-identity/src/pins.rs",
-      "sha256": "2d3006f1c94e995837d2eb81fe451c7f920792d82c6f9e7af600014a75c1e70c",
-      "lines": 493
+      "sha256": "618d657464480d7c46e9ca682c5fe811d04eb8d44248d2207856d6db56261e0d",
+      "lines": 695
     },
     {
       "file": "crates/ordo-identity/src/principal.rs",
@@ -1750,13 +1905,13 @@
     },
     {
       "file": "crates/ordo-identity/src/tests.rs",
-      "sha256": "1809638a06c857aa64a8e9d7981b291467cd4c7fa2a7d534e97ddeccbab2c153",
-      "lines": 3221
+      "sha256": "f541823f9c3604731808571662b673f2b158a14a0600162393dfe76572cef71f",
+      "lines": 3598
     },
     {
       "file": "crates/ordo-identity/src/token.rs",
-      "sha256": "26e9b23a827da7ba77140bbf49fdbf8e7adda8676265e4151337fbe6f2c03f9c",
-      "lines": 825
+      "sha256": "d91ee389fc9864d368443873ce0a8fa2ab23486242be8c224b11afaabd3b6710",
+      "lines": 831
     },
     {
       "file": "crates/ordo-identity/src/totp.rs",
@@ -1775,8 +1930,8 @@
     },
     {
       "file": "crates/ordo-plan/src/artifact.rs",
-      "sha256": "aeb069dbf351baadb85523aa45f618ae1a58388aa71affd507a62e6aab4b74ab",
-      "lines": 3459
+      "sha256": "7a1c02cb2709b2ca6cb6b54af014139c2145a2e41529c627d9661af83534ae95",
+      "lines": 3479
     },
     {
       "file": "crates/ordo-plan/src/blind.rs",
@@ -1810,8 +1965,8 @@
     },
     {
       "file": "crates/ordo-plan/src/lib.rs",
-      "sha256": "7218e5e5a8e9ab424516143a3c8ac1ecb8954f1dd4efbc85b8e5cbaf88abf9d0",
-      "lines": 2950
+      "sha256": "c9bd805ef1a024774aa615fc9a751e11bb51fd060c562dc87118ac8c68c8123c",
+      "lines": 3053
     },
     {
       "file": "crates/ordo-plan/src/public.rs",
@@ -1850,18 +2005,18 @@
     },
     {
       "file": "crates/ordo-schema/src/check.rs",
-      "sha256": "02552dd95be3444b2993e7291fd2dec97338e8ec0fedf54931ad69c257de7d9f",
-      "lines": 550
+      "sha256": "28ae81705f2a315bdf300f186189f49c0baaaec62533302923b32bc56a55c5c8",
+      "lines": 920
     },
     {
       "file": "crates/ordo-schema/src/ddl.rs",
-      "sha256": "842eb6e55599397b46019afea1c26ff5fdfc96320d13d722ccb1330e2965b56b",
-      "lines": 883
+      "sha256": "ffbe27846420e9d557bc14b633ceec6abf2bfd9c1c7f5c89a6553f8b95fcb812",
+      "lines": 895
     },
     {
       "file": "crates/ordo-schema/src/diff.rs",
-      "sha256": "de3291e50a2049c342088ff5d6c496ca3d1001e8fb45665a107017f0835ebb13",
-      "lines": 1274
+      "sha256": "e0c704a3bbeea0159be7d6025a6aed40539d15fdb7c4823c6047751f707516f6",
+      "lines": 1527
     },
     {
       "file": "crates/ordo-schema/src/function.rs",
@@ -1880,8 +2035,13 @@
     },
     {
       "file": "crates/ordo-schema/src/lib.rs",
-      "sha256": "6ef10f6aeb2b622e6e6a98ebf840d021949a0de19f091b790a1f4910eba84377",
-      "lines": 3812
+      "sha256": "bbd957150fa4502e0dbd0fd3eac3410b6856b2dfb893ddf7b6d0adc29c48a9ff",
+      "lines": 3902
+    },
+    {
+      "file": "crates/ordo-schema/src/prev.rs",
+      "sha256": "2d44aafcc5a7e7b32eb09fcd3a15fb8d3c4115e11333c77bd7342f2695c09a05",
+      "lines": 740
     },
     {
       "file": "crates/ordo-schema/src/routine.rs",
@@ -1910,8 +2070,8 @@
     },
     {
       "file": "crates/ordo-secevent/src/event.rs",
-      "sha256": "314a59b360b6236cb77559e56b6ca10b7998e6123ec7bd99e94454b326f94c7c",
-      "lines": 1053
+      "sha256": "d4fe8f0154fa4b4736f62088943fdd596ca03d5cd889a4a0a82e43990e99edfe",
+      "lines": 1091
     },
     {
       "file": "crates/ordo-secevent/src/lib.rs",
@@ -1930,18 +2090,18 @@
     },
     {
       "file": "crates/ordo-secevent/src/tests.rs",
-      "sha256": "2db808d3416dd09b2a00d2838ba1dc13ead891033afc1aa356b79f7990f0c767",
-      "lines": 1760
+      "sha256": "cafa530dcdde629ea4790d42f67f1f3b68d8efc48a1361de87eebcb02b14c959",
+      "lines": 1778
     },
     {
       "file": "crates/ordo-sema/src/ir.rs",
-      "sha256": "a4fc15c23b233d1d19eb15271aec049110a62c2ed7616889da91d116cad6eeaf",
-      "lines": 481
+      "sha256": "1954c63b1b25b002db1f083db82cdd9879623a89c31d078c4187152f9957eea9",
+      "lines": 496
     },
     {
       "file": "crates/ordo-sema/src/lib.rs",
-      "sha256": "a40cf9fde8f8103a39137c89198a1d21a2fcb37af314d3c2c53c37283d915ab4",
-      "lines": 7708
+      "sha256": "7ce08e84bb5f8955c636cf27a7944ee076461779428ec1eb8839e4d5901f1286",
+      "lines": 7718
     },
     {
       "file": "crates/ordo-sema/src/prune.rs",
@@ -2025,13 +2185,13 @@
     },
     {
       "file": "crates/ordo-syntax/src/decl.rs",
-      "sha256": "d66f8deb06f521759eb617419dbc8e852c8f7453ddfe46e653187f6408e34e5f",
-      "lines": 1134
+      "sha256": "ac26f0123812d78f11b0f1fe0079ee39fef2b023b3926c4586a5badf8e4c707b",
+      "lines": 1255
     },
     {
       "file": "crates/ordo-syntax/src/declparse.rs",
-      "sha256": "d646fb14002f848c359b96c73ef26b6a7b7ad522dcf8f50a807d8c448f4b8fe4",
-      "lines": 5382
+      "sha256": "6b8bfd5f45b5adc6774a411be9797cbb70ecd637e6e5da7455b12c3336f54fef",
+      "lines": 5868
     },
     {
       "file": "crates/ordo-syntax/src/function_tests.rs",
@@ -2040,13 +2200,13 @@
     },
     {
       "file": "crates/ordo-syntax/src/lexer.rs",
-      "sha256": "e323cd5455d1c6e470504ab0d70ebf13b34b19cbbd9f83f9e0211cac4488c1d3",
-      "lines": 996
+      "sha256": "1359aa418f374400a7a0382f6965f0905767fd0718970983e7ff65f5fadee9d9",
+      "lines": 1092
     },
     {
       "file": "crates/ordo-syntax/src/lib.rs",
-      "sha256": "5d5e064dfc6cd408374c67e875293cb294b042717148b06c379a6475890e2b1a",
-      "lines": 55
+      "sha256": "31c9cc8655c87aa1124230865ed608a4e2312a9850b74ecf11fab439016a5390",
+      "lines": 57
     },
     {
       "file": "crates/ordo-syntax/src/numeric.rs",
@@ -2055,8 +2215,8 @@
     },
     {
       "file": "crates/ordo-syntax/src/parser.rs",
-      "sha256": "61683b56f27cd558adef3dfc7941d77d804d7691a16f6b69c43d87032693dc18",
-      "lines": 1491
+      "sha256": "030bbef912ea3aba7ce37f76cf050f29d6b529c79c55e993f00c2740e15baf60",
+      "lines": 1526
     },
     {
       "file": "crates/ordo-syntax/src/span.rs",
@@ -2070,8 +2230,8 @@
     },
     {
       "file": "crates/ordo-syntax/src/token.rs",
-      "sha256": "9bb19d1d854315fe38a6b7762d2b2308e6e94f506980afee3fdddb6f73ca2202",
-      "lines": 233
+      "sha256": "c67d927fd6dd823288c6ae923f9d15993eee54f206e5724d0c75de05bd0299c3",
+      "lines": 239
     },
     {
       "file": "crates/ordo-syntax/src/trigger.rs",
@@ -2111,7 +2271,7 @@
     },
     {
       "file": "Cargo.lock",
-      "sha256": "88c78fc92e8329389557b26f434023188a0ac1bf362c90c3e2cb2648824049fe"
+      "sha256": "dcf244302544bf977b06defe68ea94cd7d70186368fca448382684936d17de99"
     },
     {
       "file": "Cargo.toml",
@@ -2179,7 +2339,7 @@
     },
     {
       "file": "crates/ordo-host/Cargo.toml",
-      "sha256": "37672681af40b7ee5cfa40cecded3c73a9c69caac1628ca819017bd44e01256a"
+      "sha256": "28f47c4ee38caf73991c9d403d4303adcf7398a7776a1403fb59aca6989502b0"
     },
     {
       "file": "crates/ordo-identity-service/Cargo.toml",
@@ -2355,380 +2515,380 @@
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
-      "line": 648,
+      "line": 652,
       "expression": "\"/d/{handle}/api/owners\", get(owners_route)",
       "path": "\"/d/{handle}/api/owners\"",
       "handler": "get(owners_route)",
-      "id": "crates/ordo-console/src/server.rs:648:route-candidate"
-    },
-    {
-      "kind": "route-candidate",
-      "file": "crates/ordo-console/src/server.rs",
-      "line": 649,
-      "expression": "\"/d/{handle}/api/setup/begin\", post(setup_begin_route)",
-      "path": "\"/d/{handle}/api/setup/begin\"",
-      "handler": "post(setup_begin_route)",
-      "id": "crates/ordo-console/src/server.rs:649:route-candidate"
-    },
-    {
-      "kind": "route-candidate",
-      "file": "crates/ordo-console/src/server.rs",
-      "line": 650,
-      "expression": "\"/d/{handle}/api/setup/finish\", post(setup_finish_route)",
-      "path": "\"/d/{handle}/api/setup/finish\"",
-      "handler": "post(setup_finish_route)",
-      "id": "crates/ordo-console/src/server.rs:650:route-candidate"
-    },
-    {
-      "kind": "route-candidate",
-      "file": "crates/ordo-console/src/server.rs",
-      "line": 651,
-      "expression": "\"/d/{handle}/api/signin/begin\", post(signin_begin_route)",
-      "path": "\"/d/{handle}/api/signin/begin\"",
-      "handler": "post(signin_begin_route)",
-      "id": "crates/ordo-console/src/server.rs:651:route-candidate"
-    },
-    {
-      "kind": "route-candidate",
-      "file": "crates/ordo-console/src/server.rs",
-      "line": 652,
-      "expression": "\"/d/{handle}/api/signin/finish\", post(signin_finish_route)",
-      "path": "\"/d/{handle}/api/signin/finish\"",
-      "handler": "post(signin_finish_route)",
       "id": "crates/ordo-console/src/server.rs:652:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 653,
-      "expression": "\"/d/{handle}/api/stepup/begin\", post(stepup_begin_route)",
-      "path": "\"/d/{handle}/api/stepup/begin\"",
-      "handler": "post(stepup_begin_route)",
+      "expression": "\"/d/{handle}/api/setup/begin\", post(setup_begin_route)",
+      "path": "\"/d/{handle}/api/setup/begin\"",
+      "handler": "post(setup_begin_route)",
       "id": "crates/ordo-console/src/server.rs:653:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 654,
-      "expression": "\"/d/{handle}/api/stepup/finish\", post(stepup_finish_route)",
-      "path": "\"/d/{handle}/api/stepup/finish\"",
-      "handler": "post(stepup_finish_route)",
+      "expression": "\"/d/{handle}/api/setup/finish\", post(setup_finish_route)",
+      "path": "\"/d/{handle}/api/setup/finish\"",
+      "handler": "post(setup_finish_route)",
       "id": "crates/ordo-console/src/server.rs:654:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 655,
-      "expression": "\"/d/{handle}/api/recovery\", post(recovery_route)",
-      "path": "\"/d/{handle}/api/recovery\"",
-      "handler": "post(recovery_route)",
+      "expression": "\"/d/{handle}/api/signin/begin\", post(signin_begin_route)",
+      "path": "\"/d/{handle}/api/signin/begin\"",
+      "handler": "post(signin_begin_route)",
       "id": "crates/ordo-console/src/server.rs:655:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 656,
-      "expression": "\"/d/{handle}/api/passkeys/begin\", post(passkeys_begin_route)",
-      "path": "\"/d/{handle}/api/passkeys/begin\"",
-      "handler": "post(passkeys_begin_route)",
+      "expression": "\"/d/{handle}/api/signin/finish\", post(signin_finish_route)",
+      "path": "\"/d/{handle}/api/signin/finish\"",
+      "handler": "post(signin_finish_route)",
       "id": "crates/ordo-console/src/server.rs:656:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 657,
-      "expression": "\"/d/{handle}/api/passkeys/finish\", post(passkeys_finish_route),",
-      "path": "\"/d/{handle}/api/passkeys/finish\"",
-      "handler": "post(passkeys_finish_route)",
+      "expression": "\"/d/{handle}/api/stepup/begin\", post(stepup_begin_route)",
+      "path": "\"/d/{handle}/api/stepup/begin\"",
+      "handler": "post(stepup_begin_route)",
       "id": "crates/ordo-console/src/server.rs:657:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
+      "line": 658,
+      "expression": "\"/d/{handle}/api/stepup/finish\", post(stepup_finish_route)",
+      "path": "\"/d/{handle}/api/stepup/finish\"",
+      "handler": "post(stepup_finish_route)",
+      "id": "crates/ordo-console/src/server.rs:658:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server.rs",
+      "line": 659,
+      "expression": "\"/d/{handle}/api/recovery\", post(recovery_route)",
+      "path": "\"/d/{handle}/api/recovery\"",
+      "handler": "post(recovery_route)",
+      "id": "crates/ordo-console/src/server.rs:659:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server.rs",
+      "line": 660,
+      "expression": "\"/d/{handle}/api/passkeys/begin\", post(passkeys_begin_route)",
+      "path": "\"/d/{handle}/api/passkeys/begin\"",
+      "handler": "post(passkeys_begin_route)",
+      "id": "crates/ordo-console/src/server.rs:660:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server.rs",
       "line": 661,
-      "expression": "\"/d/{handle}/api/recovery-codes\", post(recovery_renew_route)",
-      "path": "\"/d/{handle}/api/recovery-codes\"",
-      "handler": "post(recovery_renew_route)",
+      "expression": "\"/d/{handle}/api/passkeys/finish\", post(passkeys_finish_route),",
+      "path": "\"/d/{handle}/api/passkeys/finish\"",
+      "handler": "post(passkeys_finish_route)",
       "id": "crates/ordo-console/src/server.rs:661:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
-      "line": 662,
-      "expression": "\"/d/{handle}/api/owners/invite\", post(invite_route)",
-      "path": "\"/d/{handle}/api/owners/invite\"",
-      "handler": "post(invite_route)",
-      "id": "crates/ordo-console/src/server.rs:662:route-candidate"
-    },
-    {
-      "kind": "route-candidate",
-      "file": "crates/ordo-console/src/server.rs",
-      "line": 663,
-      "expression": "\"/d/{handle}/api/owners/remove\", post(remove_route)",
-      "path": "\"/d/{handle}/api/owners/remove\"",
-      "handler": "post(remove_route)",
-      "id": "crates/ordo-console/src/server.rs:663:route-candidate"
-    },
-    {
-      "kind": "route-candidate",
-      "file": "crates/ordo-console/src/server.rs",
-      "line": 664,
-      "expression": "\"/d/{handle}/api/signout\", post(signout_route)",
-      "path": "\"/d/{handle}/api/signout\"",
-      "handler": "post(signout_route)",
-      "id": "crates/ordo-console/src/server.rs:664:route-candidate"
-    },
-    {
-      "kind": "route-candidate",
-      "file": "crates/ordo-console/src/server.rs",
       "line": 665,
-      "expression": "\"/d/{handle}/api/door/link/begin\", post(link_begin_route)",
-      "path": "\"/d/{handle}/api/door/link/begin\"",
-      "handler": "post(link_begin_route)",
+      "expression": "\"/d/{handle}/api/recovery-codes\", post(recovery_renew_route)",
+      "path": "\"/d/{handle}/api/recovery-codes\"",
+      "handler": "post(recovery_renew_route)",
       "id": "crates/ordo-console/src/server.rs:665:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 666,
-      "expression": "\"/d/{handle}/api/door/link/finish\", post(link_finish_route)",
-      "path": "\"/d/{handle}/api/door/link/finish\"",
-      "handler": "post(link_finish_route)",
+      "expression": "\"/d/{handle}/api/owners/invite\", post(invite_route)",
+      "path": "\"/d/{handle}/api/owners/invite\"",
+      "handler": "post(invite_route)",
       "id": "crates/ordo-console/src/server.rs:666:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 667,
-      "expression": "\"/d/{handle}/api/door/stepup/begin\", post(door_stepup_begin_route),",
-      "path": "\"/d/{handle}/api/door/stepup/begin\"",
-      "handler": "post(door_stepup_begin_route)",
+      "expression": "\"/d/{handle}/api/owners/remove\", post(remove_route)",
+      "path": "\"/d/{handle}/api/owners/remove\"",
+      "handler": "post(remove_route)",
       "id": "crates/ordo-console/src/server.rs:667:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
+      "line": 668,
+      "expression": "\"/d/{handle}/api/signout\", post(signout_route)",
+      "path": "\"/d/{handle}/api/signout\"",
+      "handler": "post(signout_route)",
+      "id": "crates/ordo-console/src/server.rs:668:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server.rs",
+      "line": 669,
+      "expression": "\"/d/{handle}/api/door/link/begin\", post(link_begin_route)",
+      "path": "\"/d/{handle}/api/door/link/begin\"",
+      "handler": "post(link_begin_route)",
+      "id": "crates/ordo-console/src/server.rs:669:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server.rs",
+      "line": 670,
+      "expression": "\"/d/{handle}/api/door/link/finish\", post(link_finish_route)",
+      "path": "\"/d/{handle}/api/door/link/finish\"",
+      "handler": "post(link_finish_route)",
+      "id": "crates/ordo-console/src/server.rs:670:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server.rs",
       "line": 671,
-      "expression": "\"/d/{handle}/api/door/stepup/finish\", post(door_stepup_finish_route),",
-      "path": "\"/d/{handle}/api/door/stepup/finish\"",
-      "handler": "post(door_stepup_finish_route)",
+      "expression": "\"/d/{handle}/api/door/stepup/begin\", post(door_stepup_begin_route),",
+      "path": "\"/d/{handle}/api/door/stepup/begin\"",
+      "handler": "post(door_stepup_begin_route)",
       "id": "crates/ordo-console/src/server.rs:671:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 675,
-      "expression": "\"/d/{handle}/api/door/rotate\", post(door_rotate_route)",
-      "path": "\"/d/{handle}/api/door/rotate\"",
-      "handler": "post(door_rotate_route)",
+      "expression": "\"/d/{handle}/api/door/stepup/finish\", post(door_stepup_finish_route),",
+      "path": "\"/d/{handle}/api/door/stepup/finish\"",
+      "handler": "post(door_stepup_finish_route)",
       "id": "crates/ordo-console/src/server.rs:675:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
-      "line": 676,
-      "expression": "\"/d/{handle}/api/door/unlink\", post(door_unlink_route)",
-      "path": "\"/d/{handle}/api/door/unlink\"",
-      "handler": "post(door_unlink_route)",
-      "id": "crates/ordo-console/src/server.rs:676:route-candidate"
-    },
-    {
-      "kind": "route-candidate",
-      "file": "crates/ordo-console/src/server.rs",
-      "line": 677,
-      "expression": "\"/d/{handle}/api/door/keys\", get(door_keys_route)",
-      "path": "\"/d/{handle}/api/door/keys\"",
-      "handler": "get(door_keys_route)",
-      "id": "crates/ordo-console/src/server.rs:677:route-candidate"
-    },
-    {
-      "kind": "route-candidate",
-      "file": "crates/ordo-console/src/server.rs",
-      "line": 678,
-      "expression": "\"/d/{handle}/api/door/keys/revoke\", post(door_revoke_route)",
-      "path": "\"/d/{handle}/api/door/keys/revoke\"",
-      "handler": "post(door_revoke_route)",
-      "id": "crates/ordo-console/src/server.rs:678:route-candidate"
-    },
-    {
-      "kind": "route-candidate",
-      "file": "crates/ordo-console/src/server.rs",
       "line": 679,
-      "expression": "\"/d/{handle}/api/door/forget\", post(door_forget_route)",
-      "path": "\"/d/{handle}/api/door/forget\"",
-      "handler": "post(door_forget_route)",
+      "expression": "\"/d/{handle}/api/door/rotate\", post(door_rotate_route)",
+      "path": "\"/d/{handle}/api/door/rotate\"",
+      "handler": "post(door_rotate_route)",
       "id": "crates/ordo-console/src/server.rs:679:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
-      "line": 685,
-      "expression": "\"/health/live\", get(live)",
-      "path": "\"/health/live\"",
-      "handler": "get(live)",
-      "id": "crates/ordo-console/src/server.rs:685:route-candidate"
+      "line": 680,
+      "expression": "\"/d/{handle}/api/door/unlink\", post(door_unlink_route)",
+      "path": "\"/d/{handle}/api/door/unlink\"",
+      "handler": "post(door_unlink_route)",
+      "id": "crates/ordo-console/src/server.rs:680:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
-      "line": 686,
-      "expression": "\"/health/ready\", get(ready)",
-      "path": "\"/health/ready\"",
-      "handler": "get(ready)",
-      "id": "crates/ordo-console/src/server.rs:686:route-candidate"
+      "line": 681,
+      "expression": "\"/d/{handle}/api/door/keys\", get(door_keys_route)",
+      "path": "\"/d/{handle}/api/door/keys\"",
+      "handler": "get(door_keys_route)",
+      "id": "crates/ordo-console/src/server.rs:681:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
-      "line": 687,
-      "expression": "\"/\", get(root)",
-      "path": "\"/\"",
-      "handler": "get(root)",
-      "id": "crates/ordo-console/src/server.rs:687:route-candidate"
+      "line": 682,
+      "expression": "\"/d/{handle}/api/door/keys/revoke\", post(door_revoke_route)",
+      "path": "\"/d/{handle}/api/door/keys/revoke\"",
+      "handler": "post(door_revoke_route)",
+      "id": "crates/ordo-console/src/server.rs:682:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
-      "line": 688,
-      "expression": "\"/assets/{*path}\", get(asset)",
-      "path": "\"/assets/{*path}\"",
-      "handler": "get(asset)",
-      "id": "crates/ordo-console/src/server.rs:688:route-candidate"
+      "line": 683,
+      "expression": "\"/d/{handle}/api/door/forget\", post(door_forget_route)",
+      "path": "\"/d/{handle}/api/door/forget\"",
+      "handler": "post(door_forget_route)",
+      "id": "crates/ordo-console/src/server.rs:683:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 689,
-      "expression": "\"/d/{handle}\", get(to_page)",
-      "path": "\"/d/{handle}\"",
-      "handler": "get(to_page)",
+      "expression": "\"/health/live\", get(live)",
+      "path": "\"/health/live\"",
+      "handler": "get(live)",
       "id": "crates/ordo-console/src/server.rs:689:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 690,
-      "expression": "\"/d/{handle}/\", get(page)",
-      "path": "\"/d/{handle}/\"",
-      "handler": "get(page)",
+      "expression": "\"/health/ready\", get(ready)",
+      "path": "\"/health/ready\"",
+      "handler": "get(ready)",
       "id": "crates/ordo-console/src/server.rs:690:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 691,
-      "expression": "\"/d/{handle}/{*rest}\", get(page_deep)",
-      "path": "\"/d/{handle}/{*rest}\"",
-      "handler": "get(page_deep)",
+      "expression": "\"/\", get(root)",
+      "path": "\"/\"",
+      "handler": "get(root)",
       "id": "crates/ordo-console/src/server.rs:691:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 692,
-      "expression": "\"/d/{handle}/api/status\", get(status)",
-      "path": "\"/d/{handle}/api/status\"",
-      "handler": "get(status)",
+      "expression": "\"/assets/{*path}\", get(asset)",
+      "path": "\"/assets/{*path}\"",
+      "handler": "get(asset)",
       "id": "crates/ordo-console/src/server.rs:692:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 693,
-      "expression": "\"/d/{handle}/api/session\", get(session_route)",
-      "path": "\"/d/{handle}/api/session\"",
-      "handler": "get(session_route)",
+      "expression": "\"/d/{handle}\", get(to_page)",
+      "path": "\"/d/{handle}\"",
+      "handler": "get(to_page)",
       "id": "crates/ordo-console/src/server.rs:693:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 694,
-      "expression": "\"/d/{handle}/api/runtime\", get(runtime_route)",
-      "path": "\"/d/{handle}/api/runtime\"",
-      "handler": "get(runtime_route)",
+      "expression": "\"/d/{handle}/\", get(page)",
+      "path": "\"/d/{handle}/\"",
+      "handler": "get(page)",
       "id": "crates/ordo-console/src/server.rs:694:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 695,
-      "expression": "\"/d/{handle}/api/runtime/revisions\", get(revisions_route)",
-      "path": "\"/d/{handle}/api/runtime/revisions\"",
-      "handler": "get(revisions_route)",
+      "expression": "\"/d/{handle}/{*rest}\", get(page_deep)",
+      "path": "\"/d/{handle}/{*rest}\"",
+      "handler": "get(page_deep)",
       "id": "crates/ordo-console/src/server.rs:695:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 696,
-      "expression": "\"/d/{handle}/api/runtime/apply\", post(apply_route)",
-      "path": "\"/d/{handle}/api/runtime/apply\"",
-      "handler": "post(apply_route)",
+      "expression": "\"/d/{handle}/api/status\", get(status)",
+      "path": "\"/d/{handle}/api/status\"",
+      "handler": "get(status)",
       "id": "crates/ordo-console/src/server.rs:696:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 697,
-      "expression": "\"/d/{handle}/api/runtime/rollback\", post(rollback_route)",
-      "path": "\"/d/{handle}/api/runtime/rollback\"",
-      "handler": "post(rollback_route)",
+      "expression": "\"/d/{handle}/api/session\", get(session_route)",
+      "path": "\"/d/{handle}/api/session\"",
+      "handler": "get(session_route)",
       "id": "crates/ordo-console/src/server.rs:697:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 698,
-      "expression": "\"/d/{handle}/api/runtime/restart\", post(restart_route)",
-      "path": "\"/d/{handle}/api/runtime/restart\"",
-      "handler": "post(restart_route)",
+      "expression": "\"/d/{handle}/api/runtime\", get(runtime_route)",
+      "path": "\"/d/{handle}/api/runtime\"",
+      "handler": "get(runtime_route)",
       "id": "crates/ordo-console/src/server.rs:698:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 699,
-      "expression": "\"/d/{handle}/api/door\", get(door_route)",
-      "path": "\"/d/{handle}/api/door\"",
-      "handler": "get(door_route)",
+      "expression": "\"/d/{handle}/api/runtime/revisions\", get(revisions_route)",
+      "path": "\"/d/{handle}/api/runtime/revisions\"",
+      "handler": "get(revisions_route)",
       "id": "crates/ordo-console/src/server.rs:699:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
       "line": 700,
-      "expression": "\"/d/{handle}/api/door/health\", get(door_health_route)",
-      "path": "\"/d/{handle}/api/door/health\"",
-      "handler": "get(door_health_route)",
+      "expression": "\"/d/{handle}/api/runtime/apply\", post(apply_route)",
+      "path": "\"/d/{handle}/api/runtime/apply\"",
+      "handler": "post(apply_route)",
       "id": "crates/ordo-console/src/server.rs:700:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
-      "line": 729,
+      "line": 701,
+      "expression": "\"/d/{handle}/api/runtime/rollback\", post(rollback_route)",
+      "path": "\"/d/{handle}/api/runtime/rollback\"",
+      "handler": "post(rollback_route)",
+      "id": "crates/ordo-console/src/server.rs:701:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server.rs",
+      "line": 702,
+      "expression": "\"/d/{handle}/api/runtime/restart\", post(restart_route)",
+      "path": "\"/d/{handle}/api/runtime/restart\"",
+      "handler": "post(restart_route)",
+      "id": "crates/ordo-console/src/server.rs:702:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server.rs",
+      "line": 703,
+      "expression": "\"/d/{handle}/api/door\", get(door_route)",
+      "path": "\"/d/{handle}/api/door\"",
+      "handler": "get(door_route)",
+      "id": "crates/ordo-console/src/server.rs:703:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server.rs",
+      "line": 704,
+      "expression": "\"/d/{handle}/api/door/health\", get(door_health_route)",
+      "path": "\"/d/{handle}/api/door/health\"",
+      "handler": "get(door_health_route)",
+      "id": "crates/ordo-console/src/server.rs:704:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server.rs",
+      "line": 735,
       "expression": "&base, axum::routing::any(identity_passthrough)",
       "path": "&base",
       "handler": "axum::routing::any(identity_passthrough)",
-      "id": "crates/ordo-console/src/server.rs:729:route-candidate"
+      "id": "crates/ordo-console/src/server.rs:735:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
-      "line": 730,
+      "line": 736,
       "expression": "&format!(\"{base}/\"), axum::routing::any(identity_passthrough),",
       "path": "&format!(\"{base}/\")",
       "handler": "axum::routing::any(identity_passthrough)",
-      "id": "crates/ordo-console/src/server.rs:730:route-candidate"
+      "id": "crates/ordo-console/src/server.rs:736:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-console/src/server.rs",
-      "line": 734,
+      "line": 740,
       "expression": "&format!(\"{base}/{{*rest}}\"), axum::routing::any(identity_passthrough),",
       "path": "&format!(\"{base}/{{*rest}}\")",
       "handler": "axum::routing::any(identity_passthrough)",
-      "id": "crates/ordo-console/src/server.rs:734:route-candidate"
+      "id": "crates/ordo-console/src/server.rs:740:route-candidate"
     },
     {
       "kind": "route-candidate",
@@ -2792,6 +2952,91 @@
       "path": "\"/d/{handle}/api/admins/machine-keys/end\"",
       "handler": "post(key_end_route)",
       "id": "crates/ordo-console/src/server/admins.rs:52:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server/builds.rs",
+      "line": 45,
+      "expression": "\"/d/{handle}/api/builds\", get(builds_route)",
+      "path": "\"/d/{handle}/api/builds\"",
+      "handler": "get(builds_route)",
+      "id": "crates/ordo-console/src/server/builds.rs:45:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server/builds.rs",
+      "line": 46,
+      "expression": "\"/d/{handle}/api/builds/set\", post(set_route)",
+      "path": "\"/d/{handle}/api/builds/set\"",
+      "handler": "post(set_route)",
+      "id": "crates/ordo-console/src/server/builds.rs:46:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server/builds.rs",
+      "line": 47,
+      "expression": "\"/d/{handle}/api/builds/join\", post(join_route)",
+      "path": "\"/d/{handle}/api/builds/join\"",
+      "handler": "post(join_route)",
+      "id": "crates/ordo-console/src/server/builds.rs:47:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server/builds.rs",
+      "line": 48,
+      "expression": "\"/d/{handle}/api/builds/leave\", post(leave_route)",
+      "path": "\"/d/{handle}/api/builds/leave\"",
+      "handler": "post(leave_route)",
+      "id": "crates/ordo-console/src/server/builds.rs:48:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server/builds.rs",
+      "line": 49,
+      "expression": "\"/d/{handle}/api/builds/remove\", post(remove_route)",
+      "path": "\"/d/{handle}/api/builds/remove\"",
+      "handler": "post(remove_route)",
+      "id": "crates/ordo-console/src/server/builds.rs:49:route-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-console/src/server/builds.rs",
+      "line": 29,
+      "expression": "std.deployment.tenantBuilds",
+      "symbol": "BUILDS",
+      "id": "crates/ordo-console/src/server/builds.rs:29:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-console/src/server/builds.rs",
+      "line": 31,
+      "expression": "std.deployment.setTenantBuild",
+      "symbol": "SET_BUILD",
+      "id": "crates/ordo-console/src/server/builds.rs:31:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-console/src/server/builds.rs",
+      "line": 33,
+      "expression": "std.deployment.joinTenantBuild",
+      "symbol": "JOIN_BUILD",
+      "id": "crates/ordo-console/src/server/builds.rs:33:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-console/src/server/builds.rs",
+      "line": 35,
+      "expression": "std.deployment.leaveTenantBuild",
+      "symbol": "LEAVE_BUILD",
+      "id": "crates/ordo-console/src/server/builds.rs:35:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-console/src/server/builds.rs",
+      "line": 37,
+      "expression": "std.deployment.removeTenantBuild",
+      "symbol": "REMOVE_BUILD",
+      "id": "crates/ordo-console/src/server/builds.rs:37:operation-candidate"
     },
     {
       "kind": "route-candidate",
@@ -3255,6 +3500,193 @@
       "path": "\"/d/{handle}/api/people/recovery-policy\"",
       "handler": "post(recovery_policy_route)",
       "id": "crates/ordo-console/src/server/people.rs:201:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 68,
+      "expression": "\"/d/{handle}/api/rollouts\", get(status_route)",
+      "path": "\"/d/{handle}/api/rollouts\"",
+      "handler": "get(status_route)",
+      "id": "crates/ordo-console/src/server/rollouts.rs:68:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 69,
+      "expression": "\"/d/{handle}/api/rollouts/start\", post(start_route)",
+      "path": "\"/d/{handle}/api/rollouts/start\"",
+      "handler": "post(start_route)",
+      "id": "crates/ordo-console/src/server/rollouts.rs:69:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 70,
+      "expression": "\"/d/{handle}/api/rollouts/resume\", post(resume_route)",
+      "path": "\"/d/{handle}/api/rollouts/resume\"",
+      "handler": "post(resume_route)",
+      "id": "crates/ordo-console/src/server/rollouts.rs:70:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 71,
+      "expression": "\"/d/{handle}/api/rollouts/skip\", post(skip_route)",
+      "path": "\"/d/{handle}/api/rollouts/skip\"",
+      "handler": "post(skip_route)",
+      "id": "crates/ordo-console/src/server/rollouts.rs:71:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 72,
+      "expression": "\"/d/{handle}/api/rollouts/retry\", post(retry_route)",
+      "path": "\"/d/{handle}/api/rollouts/retry\"",
+      "handler": "post(retry_route)",
+      "id": "crates/ordo-console/src/server/rollouts.rs:72:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 73,
+      "expression": "\"/d/{handle}/api/rollouts/abort\", post(abort_route)",
+      "path": "\"/d/{handle}/api/rollouts/abort\"",
+      "handler": "post(abort_route)",
+      "id": "crates/ordo-console/src/server/rollouts.rs:73:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 74,
+      "expression": "\"/d/{handle}/api/rollouts/finish\", post(finish_route)",
+      "path": "\"/d/{handle}/api/rollouts/finish\"",
+      "handler": "post(finish_route)",
+      "id": "crates/ordo-console/src/server/rollouts.rs:74:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 75,
+      "expression": "\"/d/{handle}/api/rollouts/hold\", post(hold_route)",
+      "path": "\"/d/{handle}/api/rollouts/hold\"",
+      "handler": "post(hold_route)",
+      "id": "crates/ordo-console/src/server/rollouts.rs:75:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 76,
+      "expression": "\"/d/{handle}/api/rollouts/check\", get(check_route)",
+      "path": "\"/d/{handle}/api/rollouts/check\"",
+      "handler": "get(check_route)",
+      "id": "crates/ordo-console/src/server/rollouts.rs:76:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 77,
+      "expression": "\"/d/{handle}/api/moves/close-soak\", post(close_soak_route)",
+      "path": "\"/d/{handle}/api/moves/close-soak\"",
+      "handler": "post(close_soak_route)",
+      "id": "crates/ordo-console/src/server/rollouts.rs:77:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 78,
+      "expression": "\"/d/{handle}/api/moves/revert-soak\", post(revert_soak_route)",
+      "path": "\"/d/{handle}/api/moves/revert-soak\"",
+      "handler": "post(revert_soak_route)",
+      "id": "crates/ordo-console/src/server/rollouts.rs:78:route-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 41,
+      "expression": "std.deployment.rollout.status",
+      "symbol": "STATUS",
+      "id": "crates/ordo-console/src/server/rollouts.rs:41:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 43,
+      "expression": "std.deployment.rollout.start",
+      "symbol": "START",
+      "id": "crates/ordo-console/src/server/rollouts.rs:43:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 45,
+      "expression": "std.deployment.rollout.resume",
+      "symbol": "RESUME",
+      "id": "crates/ordo-console/src/server/rollouts.rs:45:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 47,
+      "expression": "std.deployment.rollout.skip",
+      "symbol": "SKIP",
+      "id": "crates/ordo-console/src/server/rollouts.rs:47:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 49,
+      "expression": "std.deployment.rollout.retry",
+      "symbol": "RETRY",
+      "id": "crates/ordo-console/src/server/rollouts.rs:49:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 51,
+      "expression": "std.deployment.rollout.abort",
+      "symbol": "ABORT",
+      "id": "crates/ordo-console/src/server/rollouts.rs:51:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 53,
+      "expression": "std.deployment.rollout.finish",
+      "symbol": "FINISH",
+      "id": "crates/ordo-console/src/server/rollouts.rs:53:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 55,
+      "expression": "std.deployment.rollout.hold",
+      "symbol": "HOLD",
+      "id": "crates/ordo-console/src/server/rollouts.rs:55:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 57,
+      "expression": "std.deployment.rollbackCheck",
+      "symbol": "ROLLBACK_CHECK",
+      "id": "crates/ordo-console/src/server/rollouts.rs:57:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 59,
+      "expression": "std.deployment.closeSoak",
+      "symbol": "CLOSE_SOAK",
+      "id": "crates/ordo-console/src/server/rollouts.rs:59:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-console/src/server/rollouts.rs",
+      "line": 61,
+      "expression": "std.deployment.revertSoak",
+      "symbol": "REVERT_SOAK",
+      "id": "crates/ordo-console/src/server/rollouts.rs:61:operation-candidate"
     },
     {
       "kind": "route-candidate",
@@ -4125,6 +4557,38 @@
     },
     {
       "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/branches.rs",
+      "line": 54,
+      "expression": "std.deployment.branches",
+      "symbol": "BRANCHES",
+      "id": "crates/ordo-host/src/branches.rs:54:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/branches.rs",
+      "line": 56,
+      "expression": "std.deployment.deleteBranch",
+      "symbol": "DELETE_BRANCH",
+      "id": "crates/ordo-host/src/branches.rs:56:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/branches.rs",
+      "line": 58,
+      "expression": "std.deployment.setBranchSetting",
+      "symbol": "SET_SETTING",
+      "id": "crates/ordo-host/src/branches.rs:58:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/branches.rs",
+      "line": 68,
+      "expression": "std.deployment.apply --branch",
+      "symbol": "BRANCH_OP_LABEL",
+      "id": "crates/ordo-host/src/branches.rs:68:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
       "file": "crates/ordo-host/src/bucket_ops.rs",
       "line": 100,
       "expression": "std.space.attachBucket",
@@ -4142,50 +4606,58 @@
     {
       "kind": "operation-candidate",
       "file": "crates/ordo-host/src/clones.rs",
-      "line": 68,
+      "line": 70,
       "expression": "std.deployment.cloneKey",
       "symbol": "CLONE_KEY",
-      "id": "crates/ordo-host/src/clones.rs:68:operation-candidate"
-    },
-    {
-      "kind": "operation-candidate",
-      "file": "crates/ordo-host/src/clones.rs",
-      "line": 70,
-      "expression": "std.deployment.setCloneKey",
-      "symbol": "SET_CLONE_KEY",
       "id": "crates/ordo-host/src/clones.rs:70:operation-candidate"
     },
     {
       "kind": "operation-candidate",
       "file": "crates/ordo-host/src/clones.rs",
       "line": 72,
-      "expression": "std.deployment.cloneOut",
-      "symbol": "CLONE_OUT",
+      "expression": "std.deployment.setCloneKey",
+      "symbol": "SET_CLONE_KEY",
       "id": "crates/ordo-host/src/clones.rs:72:operation-candidate"
     },
     {
       "kind": "operation-candidate",
       "file": "crates/ordo-host/src/clones.rs",
       "line": 74,
-      "expression": "std.deployment.cloneIn",
-      "symbol": "CLONE_IN",
+      "expression": "std.deployment.cloneOut",
+      "symbol": "CLONE_OUT",
       "id": "crates/ordo-host/src/clones.rs:74:operation-candidate"
     },
     {
       "kind": "operation-candidate",
       "file": "crates/ordo-host/src/clones.rs",
       "line": 76,
-      "expression": "std.deployment.clones",
-      "symbol": "CLONES",
+      "expression": "std.deployment.cloneIn",
+      "symbol": "CLONE_IN",
       "id": "crates/ordo-host/src/clones.rs:76:operation-candidate"
     },
     {
       "kind": "operation-candidate",
       "file": "crates/ordo-host/src/clones.rs",
       "line": 78,
+      "expression": "std.deployment.clones",
+      "symbol": "CLONES",
+      "id": "crates/ordo-host/src/clones.rs:78:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/clones.rs",
+      "line": 80,
       "expression": "std.deployment.setCloneSetting",
       "symbol": "SET_CLONE_SETTING",
-      "id": "crates/ordo-host/src/clones.rs:78:operation-candidate"
+      "id": "crates/ordo-host/src/clones.rs:80:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/clones.rs",
+      "line": 83,
+      "expression": "std.deployment.sinks",
+      "symbol": "SINKS",
+      "id": "crates/ordo-host/src/clones.rs:83:operation-candidate"
     },
     {
       "kind": "operation-candidate",
@@ -4478,34 +4950,50 @@
     {
       "kind": "operation-candidate",
       "file": "crates/ordo-host/src/evolve.rs",
-      "line": 1871,
+      "line": 3090,
       "expression": "std.deployment.evolve",
       "symbol": "EVOLVE",
-      "id": "crates/ordo-host/src/evolve.rs:1871:operation-candidate"
+      "id": "crates/ordo-host/src/evolve.rs:3090:operation-candidate"
     },
     {
       "kind": "operation-candidate",
       "file": "crates/ordo-host/src/evolve.rs",
-      "line": 1873,
+      "line": 3092,
       "expression": "std.deployment.plans",
       "symbol": "PLANS",
-      "id": "crates/ordo-host/src/evolve.rs:1873:operation-candidate"
+      "id": "crates/ordo-host/src/evolve.rs:3092:operation-candidate"
     },
     {
       "kind": "operation-candidate",
       "file": "crates/ordo-host/src/evolve.rs",
-      "line": 1876,
+      "line": 3095,
       "expression": "std.deployment.replay",
       "symbol": "REPLAY",
-      "id": "crates/ordo-host/src/evolve.rs:1876:operation-candidate"
+      "id": "crates/ordo-host/src/evolve.rs:3095:operation-candidate"
     },
     {
       "kind": "operation-candidate",
       "file": "crates/ordo-host/src/evolve.rs",
-      "line": 1879,
+      "line": 3098,
       "expression": "std.deployment.rollbackCheck",
       "symbol": "ROLLBACK_CHECK",
-      "id": "crates/ordo-host/src/evolve.rs:1879:operation-candidate"
+      "id": "crates/ordo-host/src/evolve.rs:3098:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/evolve.rs",
+      "line": 3101,
+      "expression": "std.deployment.revertSoak",
+      "symbol": "REVERT_SOAK",
+      "id": "crates/ordo-host/src/evolve.rs:3101:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/evolve.rs",
+      "line": 3104,
+      "expression": "std.deployment.closeSoak",
+      "symbol": "CLOSE_SOAK",
+      "id": "crates/ordo-host/src/evolve.rs:3104:operation-candidate"
     },
     {
       "kind": "operation-candidate",
@@ -4741,6 +5229,22 @@
     },
     {
       "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/orphan_ops.rs",
+      "line": 40,
+      "expression": "std.deployment.orphans",
+      "symbol": "ORPHANS",
+      "id": "crates/ordo-host/src/orphan_ops.rs:40:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/orphan_ops.rs",
+      "line": 42,
+      "expression": "std.deployment.prune",
+      "symbol": "PRUNE",
+      "id": "crates/ordo-host/src/orphan_ops.rs:42:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
       "file": "crates/ordo-host/src/own_download.rs",
       "line": 32,
       "expression": "std.space.download",
@@ -4778,6 +5282,30 @@
       "expression": "std.deployment.resumeTenant",
       "symbol": "RESUME_TENANT",
       "id": "crates/ordo-host/src/pause.rs:79:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/peer_ops.rs",
+      "line": 57,
+      "expression": "std.peer.grant",
+      "symbol": "GRANT",
+      "id": "crates/ordo-host/src/peer_ops.rs:57:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/peer_ops.rs",
+      "line": 60,
+      "expression": "std.peer.recordUse",
+      "symbol": "RECORD_USE",
+      "id": "crates/ordo-host/src/peer_ops.rs:60:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/peer_ops.rs",
+      "line": 63,
+      "expression": "std.peer.registerKey",
+      "symbol": "REGISTER_KEY",
+      "id": "crates/ordo-host/src/peer_ops.rs:63:operation-candidate"
     },
     {
       "kind": "operation-candidate",
@@ -4909,6 +5437,14 @@
     },
     {
       "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/promotion.rs",
+      "line": 63,
+      "expression": "std.deployment.cloneIn",
+      "symbol": "CLONE_OP_LABEL",
+      "id": "crates/ordo-host/src/promotion.rs:63:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
       "file": "crates/ordo-host/src/quotas.rs",
       "line": 379,
       "expression": "std.deployment.quotas",
@@ -4933,6 +5469,38 @@
     },
     {
       "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/rehearsals.rs",
+      "line": 73,
+      "expression": "std.deployment.rehearse",
+      "symbol": "REHEARSE",
+      "id": "crates/ordo-host/src/rehearsals.rs:73:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/rehearsals.rs",
+      "line": 75,
+      "expression": "std.deployment.rehearsals",
+      "symbol": "REHEARSALS",
+      "id": "crates/ordo-host/src/rehearsals.rs:75:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/rehearsals.rs",
+      "line": 77,
+      "expression": "std.deployment.acceptRehearsal",
+      "symbol": "ACCEPT",
+      "id": "crates/ordo-host/src/rehearsals.rs:77:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/rehearsals.rs",
+      "line": 82,
+      "expression": "std.deployment.breakGlassRehearsal",
+      "symbol": "BREAK_GLASS",
+      "id": "crates/ordo-host/src/rehearsals.rs:82:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
       "file": "crates/ordo-host/src/release_ops.rs",
       "line": 74,
       "expression": "std.space.leave",
@@ -4954,6 +5522,70 @@
       "expression": "std.space.version",
       "symbol": "VERSION_SELF",
       "id": "crates/ordo-host/src/revoked_moves.rs:52:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/rollouts.rs",
+      "line": 73,
+      "expression": "std.deployment.rollout.start",
+      "symbol": "START",
+      "id": "crates/ordo-host/src/rollouts.rs:73:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/rollouts.rs",
+      "line": 75,
+      "expression": "std.deployment.rollout.status",
+      "symbol": "STATUS",
+      "id": "crates/ordo-host/src/rollouts.rs:75:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/rollouts.rs",
+      "line": 77,
+      "expression": "std.deployment.rollout.resume",
+      "symbol": "RESUME",
+      "id": "crates/ordo-host/src/rollouts.rs:77:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/rollouts.rs",
+      "line": 79,
+      "expression": "std.deployment.rollout.skip",
+      "symbol": "SKIP",
+      "id": "crates/ordo-host/src/rollouts.rs:79:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/rollouts.rs",
+      "line": 81,
+      "expression": "std.deployment.rollout.retry",
+      "symbol": "RETRY",
+      "id": "crates/ordo-host/src/rollouts.rs:81:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/rollouts.rs",
+      "line": 83,
+      "expression": "std.deployment.rollout.abort",
+      "symbol": "ABORT",
+      "id": "crates/ordo-host/src/rollouts.rs:83:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/rollouts.rs",
+      "line": 85,
+      "expression": "std.deployment.rollout.finish",
+      "symbol": "FINISH",
+      "id": "crates/ordo-host/src/rollouts.rs:85:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/rollouts.rs",
+      "line": 87,
+      "expression": "std.deployment.rollout.hold",
+      "symbol": "HOLD",
+      "id": "crates/ordo-host/src/rollouts.rs:87:operation-candidate"
     },
     {
       "kind": "operation-candidate",
@@ -4998,110 +5630,110 @@
     {
       "kind": "route-candidate",
       "file": "crates/ordo-host/src/serve.rs",
-      "line": 348,
+      "line": 365,
       "expression": "\"/health/live\", get(health_live)",
       "path": "\"/health/live\"",
       "handler": "get(health_live)",
-      "id": "crates/ordo-host/src/serve.rs:348:route-candidate"
+      "id": "crates/ordo-host/src/serve.rs:365:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-host/src/serve.rs",
-      "line": 349,
+      "line": 366,
       "expression": "\"/health/ready\", get(health_ready)",
       "path": "\"/health/ready\"",
       "handler": "get(health_ready)",
-      "id": "crates/ordo-host/src/serve.rs:349:route-candidate"
+      "id": "crates/ordo-host/src/serve.rs:366:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-host/src/serve.rs",
-      "line": 350,
+      "line": 367,
       "expression": "\"/health/deep\", get(health_deep)",
       "path": "\"/health/deep\"",
       "handler": "get(health_deep)",
-      "id": "crates/ordo-host/src/serve.rs:350:route-candidate"
+      "id": "crates/ordo-host/src/serve.rs:367:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-host/src/serve.rs",
-      "line": 351,
+      "line": 368,
       "expression": "\"/health/deploy\", get(health_deploy)",
       "path": "\"/health/deploy\"",
       "handler": "get(health_deploy)",
-      "id": "crates/ordo-host/src/serve.rs:351:route-candidate"
+      "id": "crates/ordo-host/src/serve.rs:368:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-host/src/serve.rs",
-      "line": 352,
+      "line": 369,
       "expression": "\"/metrics\", get(metrics_route)",
       "path": "\"/metrics\"",
       "handler": "get(metrics_route)",
-      "id": "crates/ordo-host/src/serve.rs:352:route-candidate"
+      "id": "crates/ordo-host/src/serve.rs:369:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-host/src/serve.rs",
-      "line": 353,
+      "line": 370,
       "expression": "\"/security/alerts\", get(alerts_route)",
       "path": "\"/security/alerts\"",
       "handler": "get(alerts_route)",
-      "id": "crates/ordo-host/src/serve.rs:353:route-candidate"
+      "id": "crates/ordo-host/src/serve.rs:370:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-host/src/serve.rs",
-      "line": 354,
+      "line": 371,
       "expression": "\"/security/events\", get(secevents_route)",
       "path": "\"/security/events\"",
       "handler": "get(secevents_route)",
-      "id": "crates/ordo-host/src/serve.rs:354:route-candidate"
+      "id": "crates/ordo-host/src/serve.rs:371:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-host/src/serve.rs",
-      "line": 355,
+      "line": 372,
       "expression": "\"/usage\", get(usage_route)",
       "path": "\"/usage\"",
       "handler": "get(usage_route)",
-      "id": "crates/ordo-host/src/serve.rs:355:route-candidate"
+      "id": "crates/ordo-host/src/serve.rs:372:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-host/src/serve.rs",
-      "line": 362,
+      "line": 379,
       "expression": "\"/.well-known/ordo-catalog\", get(catalog_route)",
       "path": "\"/.well-known/ordo-catalog\"",
       "handler": "get(catalog_route)",
-      "id": "crates/ordo-host/src/serve.rs:362:route-candidate"
+      "id": "crates/ordo-host/src/serve.rs:379:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-host/src/serve.rs",
-      "line": 363,
+      "line": 380,
       "expression": "\"/catalog\", get(catalog_route)",
       "path": "\"/catalog\"",
       "handler": "get(catalog_route)",
-      "id": "crates/ordo-host/src/serve.rs:363:route-candidate"
+      "id": "crates/ordo-host/src/serve.rs:380:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-host/src/serve.rs",
-      "line": 364,
+      "line": 381,
       "expression": "\"/.well-known/ordo-interface\", get(interface_route)",
       "path": "\"/.well-known/ordo-interface\"",
       "handler": "get(interface_route)",
-      "id": "crates/ordo-host/src/serve.rs:364:route-candidate"
+      "id": "crates/ordo-host/src/serve.rs:381:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-host/src/serve.rs",
-      "line": 365,
+      "line": 382,
       "expression": "\"/interface\", get(interface_route)",
       "path": "\"/interface\"",
       "handler": "get(interface_route)",
-      "id": "crates/ordo-host/src/serve.rs:365:route-candidate"
+      "id": "crates/ordo-host/src/serve.rs:382:route-candidate"
     },
     {
       "kind": "operation-candidate",
@@ -5225,6 +5857,46 @@
     },
     {
       "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/tenant_builds.rs",
+      "line": 54,
+      "expression": "std.deployment.tenantBuilds",
+      "symbol": "BUILDS",
+      "id": "crates/ordo-host/src/tenant_builds.rs:54:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/tenant_builds.rs",
+      "line": 56,
+      "expression": "std.deployment.setTenantBuild",
+      "symbol": "SET_BUILD",
+      "id": "crates/ordo-host/src/tenant_builds.rs:56:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/tenant_builds.rs",
+      "line": 58,
+      "expression": "std.deployment.joinTenantBuild",
+      "symbol": "JOIN_BUILD",
+      "id": "crates/ordo-host/src/tenant_builds.rs:58:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/tenant_builds.rs",
+      "line": 60,
+      "expression": "std.deployment.leaveTenantBuild",
+      "symbol": "LEAVE_BUILD",
+      "id": "crates/ordo-host/src/tenant_builds.rs:60:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/tenant_builds.rs",
+      "line": 62,
+      "expression": "std.deployment.removeTenantBuild",
+      "symbol": "REMOVE_BUILD",
+      "id": "crates/ordo-host/src/tenant_builds.rs:62:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
       "file": "crates/ordo-host/src/tenant_ops.rs",
       "line": 74,
       "expression": "std.space.create",
@@ -5313,6 +5985,14 @@
     },
     {
       "kind": "operation-candidate",
+      "file": "crates/ordo-host/src/version_removal.rs",
+      "line": 47,
+      "expression": "std.deployment.removeVersion",
+      "symbol": "REMOVE_VERSION",
+      "id": "crates/ordo-host/src/version_removal.rs:47:operation-candidate"
+    },
+    {
+      "kind": "operation-candidate",
       "file": "crates/ordo-host/src/window_ops.rs",
       "line": 31,
       "expression": "std.deployment.windows",
@@ -5381,389 +6061,398 @@
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
-      "line": 174,
+      "line": 175,
       "expression": "\"/health/live\", get(live)",
       "path": "\"/health/live\"",
       "handler": "get(live)",
-      "id": "crates/ordo-identity-service/src/routes.rs:174:route-candidate"
-    },
-    {
-      "kind": "route-candidate",
-      "file": "crates/ordo-identity-service/src/routes.rs",
-      "line": 175,
-      "expression": "\"/health/ready\", get(ready)",
-      "path": "\"/health/ready\"",
-      "handler": "get(ready)",
       "id": "crates/ordo-identity-service/src/routes.rs:175:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 176,
-      "expression": "\"/.well-known/jwks.json\", get(jwks)",
-      "path": "\"/.well-known/jwks.json\"",
-      "handler": "get(jwks)",
+      "expression": "\"/health/ready\", get(ready)",
+      "path": "\"/health/ready\"",
+      "handler": "get(ready)",
       "id": "crates/ordo-identity-service/src/routes.rs:176:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 177,
-      "expression": "\"/.well-known/ordo-audit-keys.json\", get(audit_keys)",
-      "path": "\"/.well-known/ordo-audit-keys.json\"",
-      "handler": "get(audit_keys)",
+      "expression": "\"/.well-known/jwks.json\", get(jwks)",
+      "path": "\"/.well-known/jwks.json\"",
+      "handler": "get(jwks)",
       "id": "crates/ordo-identity-service/src/routes.rs:177:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 178,
-      "expression": "oidc::DISCOVERY_PATH, get(discovery)",
-      "path": "oidc::DISCOVERY_PATH",
-      "handler": "get(discovery)",
+      "expression": "\"/.well-known/ordo-audit-keys.json\", get(audit_keys)",
+      "path": "\"/.well-known/ordo-audit-keys.json\"",
+      "handler": "get(audit_keys)",
       "id": "crates/ordo-identity-service/src/routes.rs:178:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 179,
-      "expression": "oidc::AUTHORIZE_PATH, get(authorize)",
-      "path": "oidc::AUTHORIZE_PATH",
-      "handler": "get(authorize)",
+      "expression": "oidc::DISCOVERY_PATH, get(discovery)",
+      "path": "oidc::DISCOVERY_PATH",
+      "handler": "get(discovery)",
       "id": "crates/ordo-identity-service/src/routes.rs:179:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 180,
-      "expression": "oidc::TOKEN_PATH, post(oidc_token)",
-      "path": "oidc::TOKEN_PATH",
-      "handler": "post(oidc_token)",
+      "expression": "oidc::AUTHORIZE_PATH, get(authorize)",
+      "path": "oidc::AUTHORIZE_PATH",
+      "handler": "get(authorize)",
       "id": "crates/ordo-identity-service/src/routes.rs:180:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 181,
-      "expression": "\"/join/begin\", post(join_begin)",
-      "path": "\"/join/begin\"",
-      "handler": "post(join_begin)",
+      "expression": "oidc::TOKEN_PATH, post(oidc_token)",
+      "path": "oidc::TOKEN_PATH",
+      "handler": "post(oidc_token)",
       "id": "crates/ordo-identity-service/src/routes.rs:181:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 182,
-      "expression": "\"/join/finish\", post(join_finish)",
-      "path": "\"/join/finish\"",
-      "handler": "post(join_finish)",
+      "expression": "\"/join/begin\", post(join_begin)",
+      "path": "\"/join/begin\"",
+      "handler": "post(join_begin)",
       "id": "crates/ordo-identity-service/src/routes.rs:182:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 183,
-      "expression": "\"/sign-up/begin\", post(sign_up_begin)",
-      "path": "\"/sign-up/begin\"",
-      "handler": "post(sign_up_begin)",
+      "expression": "\"/join/finish\", post(join_finish)",
+      "path": "\"/join/finish\"",
+      "handler": "post(join_finish)",
       "id": "crates/ordo-identity-service/src/routes.rs:183:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 184,
-      "expression": "\"/sign-up/finish\", post(sign_up_finish)",
-      "path": "\"/sign-up/finish\"",
-      "handler": "post(sign_up_finish)",
+      "expression": "\"/sign-up/begin\", post(sign_up_begin)",
+      "path": "\"/sign-up/begin\"",
+      "handler": "post(sign_up_begin)",
       "id": "crates/ordo-identity-service/src/routes.rs:184:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 185,
-      "expression": "\"/sign-up/join\", post(sign_up_join)",
-      "path": "\"/sign-up/join\"",
-      "handler": "post(sign_up_join)",
+      "expression": "\"/sign-up/finish\", post(sign_up_finish)",
+      "path": "\"/sign-up/finish\"",
+      "handler": "post(sign_up_finish)",
       "id": "crates/ordo-identity-service/src/routes.rs:185:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 186,
-      "expression": "\"/sign-in/begin\", post(sign_in_begin)",
-      "path": "\"/sign-in/begin\"",
-      "handler": "post(sign_in_begin)",
+      "expression": "\"/sign-up/join\", post(sign_up_join)",
+      "path": "\"/sign-up/join\"",
+      "handler": "post(sign_up_join)",
       "id": "crates/ordo-identity-service/src/routes.rs:186:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 187,
-      "expression": "\"/sign-in/finish\", post(sign_in_finish)",
-      "path": "\"/sign-in/finish\"",
-      "handler": "post(sign_in_finish)",
+      "expression": "\"/sign-in/begin\", post(sign_in_begin)",
+      "path": "\"/sign-in/begin\"",
+      "handler": "post(sign_in_begin)",
       "id": "crates/ordo-identity-service/src/routes.rs:187:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 188,
-      "expression": "\"/sign-in/return\", post(sign_in_return)",
-      "path": "\"/sign-in/return\"",
-      "handler": "post(sign_in_return)",
+      "expression": "\"/sign-in/finish\", post(sign_in_finish)",
+      "path": "\"/sign-in/finish\"",
+      "handler": "post(sign_in_finish)",
       "id": "crates/ordo-identity-service/src/routes.rs:188:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 189,
-      "expression": "\"/recover\", post(recover)",
-      "path": "\"/recover\"",
-      "handler": "post(recover)",
+      "expression": "\"/sign-in/return\", post(sign_in_return)",
+      "path": "\"/sign-in/return\"",
+      "handler": "post(sign_in_return)",
       "id": "crates/ordo-identity-service/src/routes.rs:189:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 190,
-      "expression": "\"/token\", post(token)",
-      "path": "\"/token\"",
-      "handler": "post(token)",
+      "expression": "\"/recover\", post(recover)",
+      "path": "\"/recover\"",
+      "handler": "post(recover)",
       "id": "crates/ordo-identity-service/src/routes.rs:190:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 191,
-      "expression": "\"/sessions/end\", post(sign_out)",
-      "path": "\"/sessions/end\"",
-      "handler": "post(sign_out)",
+      "expression": "\"/token\", post(token)",
+      "path": "\"/token\"",
+      "handler": "post(token)",
       "id": "crates/ordo-identity-service/src/routes.rs:191:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 192,
-      "expression": "\"/touch/begin\", post(touch_begin)",
-      "path": "\"/touch/begin\"",
-      "handler": "post(touch_begin)",
+      "expression": "\"/sessions/end\", post(sign_out)",
+      "path": "\"/sessions/end\"",
+      "handler": "post(sign_out)",
       "id": "crates/ordo-identity-service/src/routes.rs:192:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 193,
-      "expression": "\"/touch/finish\", post(touch_finish)",
-      "path": "\"/touch/finish\"",
-      "handler": "post(touch_finish)",
+      "expression": "\"/touch/begin\", post(touch_begin)",
+      "path": "\"/touch/begin\"",
+      "handler": "post(touch_begin)",
       "id": "crates/ordo-identity-service/src/routes.rs:193:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 194,
-      "expression": "\"/passkeys/begin\", post(passkeys_begin)",
-      "path": "\"/passkeys/begin\"",
-      "handler": "post(passkeys_begin)",
+      "expression": "\"/touch/finish\", post(touch_finish)",
+      "path": "\"/touch/finish\"",
+      "handler": "post(touch_finish)",
       "id": "crates/ordo-identity-service/src/routes.rs:194:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 195,
-      "expression": "\"/passkeys/finish\", post(passkeys_finish)",
-      "path": "\"/passkeys/finish\"",
-      "handler": "post(passkeys_finish)",
+      "expression": "\"/passkeys/begin\", post(passkeys_begin)",
+      "path": "\"/passkeys/begin\"",
+      "handler": "post(passkeys_begin)",
       "id": "crates/ordo-identity-service/src/routes.rs:195:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 196,
-      "expression": "\"/recovery-codes\", post(recovery_codes)",
-      "path": "\"/recovery-codes\"",
-      "handler": "post(recovery_codes)",
+      "expression": "\"/passkeys/finish\", post(passkeys_finish)",
+      "path": "\"/passkeys/finish\"",
+      "handler": "post(passkeys_finish)",
       "id": "crates/ordo-identity-service/src/routes.rs:196:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 197,
-      "expression": "\"/me\", post(me)",
-      "path": "\"/me\"",
-      "handler": "post(me)",
+      "expression": "\"/recovery-codes\", post(recovery_codes)",
+      "path": "\"/recovery-codes\"",
+      "handler": "post(recovery_codes)",
       "id": "crates/ordo-identity-service/src/routes.rs:197:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 198,
-      "expression": "\"/passkeys/{id}/remove\", post(passkey_remove)",
-      "path": "\"/passkeys/{id}/remove\"",
-      "handler": "post(passkey_remove)",
+      "expression": "\"/me\", post(me)",
+      "path": "\"/me\"",
+      "handler": "post(me)",
       "id": "crates/ordo-identity-service/src/routes.rs:198:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 199,
-      "expression": "\"/cli/approve\", post(cli_approve)",
-      "path": "\"/cli/approve\"",
-      "handler": "post(cli_approve)",
+      "expression": "\"/passkeys/{id}/remove\", post(passkey_remove)",
+      "path": "\"/passkeys/{id}/remove\"",
+      "handler": "post(passkey_remove)",
       "id": "crates/ordo-identity-service/src/routes.rs:199:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 200,
-      "expression": "\"/cli/redeem\", post(cli_redeem)",
-      "path": "\"/cli/redeem\"",
-      "handler": "post(cli_redeem)",
+      "expression": "\"/cli/approve\", post(cli_approve)",
+      "path": "\"/cli/approve\"",
+      "handler": "post(cli_approve)",
       "id": "crates/ordo-identity-service/src/routes.rs:200:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 201,
-      "expression": "\"/machine/begin\", post(machine_begin)",
-      "path": "\"/machine/begin\"",
-      "handler": "post(machine_begin)",
+      "expression": "\"/cli/redeem\", post(cli_redeem)",
+      "path": "\"/cli/redeem\"",
+      "handler": "post(cli_redeem)",
       "id": "crates/ordo-identity-service/src/routes.rs:201:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 202,
-      "expression": "\"/machine/complete\", post(machine_complete)",
-      "path": "\"/machine/complete\"",
-      "handler": "post(machine_complete)",
+      "expression": "\"/machine/begin\", post(machine_begin)",
+      "path": "\"/machine/begin\"",
+      "handler": "post(machine_begin)",
       "id": "crates/ordo-identity-service/src/routes.rs:202:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 203,
-      "expression": "\"/invites\", get(invites_list).post(invites_create)",
-      "path": "\"/invites\"",
-      "handler": "get(invites_list).post(invites_create)",
+      "expression": "\"/machine/complete\", post(machine_complete)",
+      "path": "\"/machine/complete\"",
+      "handler": "post(machine_complete)",
       "id": "crates/ordo-identity-service/src/routes.rs:203:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 204,
-      "expression": "\"/invites/{id}/revoke\", post(invite_revoke)",
-      "path": "\"/invites/{id}/revoke\"",
-      "handler": "post(invite_revoke)",
+      "expression": "\"/invites\", get(invites_list).post(invites_create)",
+      "path": "\"/invites\"",
+      "handler": "get(invites_list).post(invites_create)",
       "id": "crates/ordo-identity-service/src/routes.rs:204:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 205,
-      "expression": "\"/people\", get(people_list)",
-      "path": "\"/people\"",
-      "handler": "get(people_list)",
+      "expression": "\"/invites/{id}/revoke\", post(invite_revoke)",
+      "path": "\"/invites/{id}/revoke\"",
+      "handler": "post(invite_revoke)",
       "id": "crates/ordo-identity-service/src/routes.rs:205:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 206,
-      "expression": "\"/people/{id}/end\", post(person_end)",
-      "path": "\"/people/{id}/end\"",
-      "handler": "post(person_end)",
+      "expression": "\"/people\", get(people_list)",
+      "path": "\"/people\"",
+      "handler": "get(people_list)",
       "id": "crates/ordo-identity-service/src/routes.rs:206:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 207,
-      "expression": "\"/machine-keys\", get(machine_keys_list).post(machine_keys_create),",
-      "path": "\"/machine-keys\"",
-      "handler": "get(machine_keys_list).post(machine_keys_create)",
+      "expression": "\"/people/{id}/end\", post(person_end)",
+      "path": "\"/people/{id}/end\"",
+      "handler": "post(person_end)",
       "id": "crates/ordo-identity-service/src/routes.rs:207:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
-      "line": 211,
-      "expression": "\"/machine-keys/{id}/end\", post(machine_key_end)",
-      "path": "\"/machine-keys/{id}/end\"",
-      "handler": "post(machine_key_end)",
-      "id": "crates/ordo-identity-service/src/routes.rs:211:route-candidate"
+      "line": 208,
+      "expression": "\"/machine-keys\", get(machine_keys_list).post(machine_keys_create),",
+      "path": "\"/machine-keys\"",
+      "handler": "get(machine_keys_list).post(machine_keys_create)",
+      "id": "crates/ordo-identity-service/src/routes.rs:208:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 212,
-      "expression": "\"/audit\", get(audit_page)",
-      "path": "\"/audit\"",
-      "handler": "get(audit_page)",
+      "expression": "\"/machine-keys/{id}/end\", post(machine_key_end)",
+      "path": "\"/machine-keys/{id}/end\"",
+      "handler": "post(machine_key_end)",
       "id": "crates/ordo-identity-service/src/routes.rs:212:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 213,
-      "expression": "\"/deployments\", get(deployments_list).post(deployments_register),",
-      "path": "\"/deployments\"",
-      "handler": "get(deployments_list).post(deployments_register)",
+      "expression": "\"/audit\", get(audit_page)",
+      "path": "\"/audit\"",
+      "handler": "get(audit_page)",
       "id": "crates/ordo-identity-service/src/routes.rs:213:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
-      "line": 217,
-      "expression": "\"/deployments/{handle}/end\", post(deployment_end)",
-      "path": "\"/deployments/{handle}/end\"",
-      "handler": "post(deployment_end)",
-      "id": "crates/ordo-identity-service/src/routes.rs:217:route-candidate"
+      "line": 214,
+      "expression": "\"/deployments\", get(deployments_list).post(deployments_register),",
+      "path": "\"/deployments\"",
+      "handler": "get(deployments_list).post(deployments_register)",
+      "id": "crates/ordo-identity-service/src/routes.rs:214:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 218,
-      "expression": "\"/deployments/{handle}/sign-up\", post(deployment_sign_up)",
-      "path": "\"/deployments/{handle}/sign-up\"",
-      "handler": "post(deployment_sign_up)",
+      "expression": "\"/deployments/{handle}/end\", post(deployment_end)",
+      "path": "\"/deployments/{handle}/end\"",
+      "handler": "post(deployment_end)",
       "id": "crates/ordo-identity-service/src/routes.rs:218:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
       "line": 219,
-      "expression": "\"/deployments/{handle}/addresses\", post(deployment_addresses),",
-      "path": "\"/deployments/{handle}/addresses\"",
-      "handler": "post(deployment_addresses)",
+      "expression": "\"/deployments/{handle}/sign-up\", post(deployment_sign_up)",
+      "path": "\"/deployments/{handle}/sign-up\"",
+      "handler": "post(deployment_sign_up)",
       "id": "crates/ordo-identity-service/src/routes.rs:219:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
-      "line": 223,
-      "expression": "\"/deployments/{handle}/members\", get(members_list).post(member_add),",
-      "path": "\"/deployments/{handle}/members\"",
-      "handler": "get(members_list).post(member_add)",
-      "id": "crates/ordo-identity-service/src/routes.rs:223:route-candidate"
+      "line": 220,
+      "expression": "\"/deployments/{handle}/addresses\", post(deployment_addresses),",
+      "path": "\"/deployments/{handle}/addresses\"",
+      "handler": "post(deployment_addresses)",
+      "id": "crates/ordo-identity-service/src/routes.rs:220:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/routes.rs",
-      "line": 227,
+      "line": 224,
+      "expression": "\"/deployments/{handle}/consumer-key\", post(deployment_consumer_key),",
+      "path": "\"/deployments/{handle}/consumer-key\"",
+      "handler": "post(deployment_consumer_key)",
+      "id": "crates/ordo-identity-service/src/routes.rs:224:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-identity-service/src/routes.rs",
+      "line": 228,
+      "expression": "\"/deployments/{handle}/members\", get(members_list).post(member_add),",
+      "path": "\"/deployments/{handle}/members\"",
+      "handler": "get(members_list).post(member_add)",
+      "id": "crates/ordo-identity-service/src/routes.rs:228:route-candidate"
+    },
+    {
+      "kind": "route-candidate",
+      "file": "crates/ordo-identity-service/src/routes.rs",
+      "line": 232,
       "expression": "\"/deployments/{handle}/members/{person}/end\", post(member_end),",
       "path": "\"/deployments/{handle}/members/{person}/end\"",
       "handler": "post(member_end)",
-      "id": "crates/ordo-identity-service/src/routes.rs:227:route-candidate"
+      "id": "crates/ordo-identity-service/src/routes.rs:232:route-candidate"
     },
     {
       "kind": "route-candidate",
       "file": "crates/ordo-identity-service/src/server.rs",
-      "line": 392,
+      "line": 393,
       "expression": "&format!(\"{base}/\"), axum::routing::get(crate::page::home)",
       "path": "&format!(\"{base}/\")",
       "handler": "axum::routing::get(crate::page::home)",
-      "id": "crates/ordo-identity-service/src/server.rs:392:route-candidate"
+      "id": "crates/ordo-identity-service/src/server.rs:393:route-candidate"
     },
     {
       "kind": "route-candidate",

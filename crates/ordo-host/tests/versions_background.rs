@@ -133,15 +133,20 @@ fn pg_cfg(db: &str) -> PoolConfig {
 }
 
 async fn apply(pool: &Pool, source: &str) {
+    store(pool, source, true).await;
+}
+
+/// Store `source`, and make it the active version when `activate`.
+async fn store(pool: &Pool, source: &str, activate: bool) {
     let program = Program::compile(source).expect("compiles");
-    ordo_host::apply_op::run_program(
+    run_all_at_once(
         pool,
         &SinglePool::new(pool.clone()),
         &program,
         vec![],
         "dev:ada",
         "t",
-        true,
+        activate,
     )
     .await
     .expect("applies");
@@ -217,6 +222,7 @@ struct Node {
     app: axum::Router,
     pool: Pool,
     deployment: std::sync::Arc<ordo_host::deploy::Deployment>,
+    access: std::sync::Arc<ordo_host::runtime::SwappableAccess>,
     serving: tokio::task::JoinHandle<()>,
 }
 
@@ -283,6 +289,7 @@ async fn boot_with(stem: &str, residency: Option<&str>) -> Node {
     }
     let app = runtime::door(&rt);
     let deployment = rt.deployment.clone();
+    let access = rt.access.clone();
     let serving = tokio::spawn(async move {
         let _ = runtime::serve(rt).await;
     });
@@ -291,6 +298,7 @@ async fn boot_with(stem: &str, residency: Option<&str>) -> Node {
         app,
         pool,
         deployment,
+        access,
         serving,
     };
     wait(|| node.deployment.loaded("0.1.0").is_some()).await;
@@ -717,10 +725,45 @@ async fn a_version_stays_loaded_for_min_residency() {
     wait(|| node.deployment.loaded("0.1.0").is_none()).await;
 }
 
+/// **The version a node booted on keeps `versions.min_residency` too**
+/// (Reported fix, 2026-11-24). It is installed by no swap, and its load
+/// clock was left at 0, so it read as loaded since 1970: the moment no pin
+/// named it, it dropped, and a pin moved back had it compiled again while
+/// its tenants answered `space_unavailable`. Here the node boots on 0.2.0,
+/// 0.1.0 is activated again and every pin leaves 0.2.0: at the default
+/// residency, 0.2.0 stays loaded.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_version_a_node_booted_on_stays_loaded_for_min_residency() {
+    let node = boot_with("ordo_vbg_boot_residency", None).await;
+    assert_eq!(
+        node.deployment.current().version,
+        "0.2.0",
+        "booted on 0.2.0"
+    );
+    Versions::on(&node.pool)
+        .activate(
+            "0.1.0",
+            "deployment-owner:ada",
+            ordo_commandlog::Timestamp(70),
+        )
+        .await
+        .expect("0.1.0 active again");
+    wait(|| node.deployment.current().version == "0.1.0").await;
+    // Every pin is on 0.1.0 now; reads of the pins have run since.
+    for _ in 0..3 {
+        nudge(&node).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(
+        node.deployment.loaded("0.2.0").is_some(),
+        "the boot version is kept for versions.min_residency"
+    );
+}
+
 /// **`versions.idle_evict_after`**: 0.1.0 serves nothing for a second and
 /// is unloaded. Nothing loads it again by itself. The next signed-in
 /// request for its tenant wakes it, waits for the load and is answered as
-/// ever, by 0.1.0. Past `WAKE_WAIT` it would answer `server_busy` with
+/// ever, by 0.1.0. Past `versions.wake_wait` it would answer `server_busy` with
 /// `Retry-After`, which the SDK retries.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_idle_version_is_unloaded_and_a_signed_in_request_loads_it_again() {
@@ -757,6 +800,80 @@ async fn an_idle_version_is_unloaded_and_a_signed_in_request_loads_it_again() {
     assert!(node.deployment.loaded("0.1.0").is_some());
 }
 
+/// **`versions.min_residency` counts from the last tenant leaving**
+/// (owner, 2026-11-25: "a version stays loaded at least 10 minutes after
+/// its last tenant moves off it"), not from the load. 0.1.0 has been
+/// loaded longer than the residency when its last tenant moves off; it
+/// stays all the same, and drops once the residency has passed since the
+/// move.
+///
+/// A regression looks like a version loaded long ago dropping at the
+/// first read after its last tenant leaves, so a quick move back compiles
+/// it again while its tenants answer `space_unavailable`.
+#[tokio::test(flavor = "multi_thread")]
+async fn min_residency_counts_from_when_the_last_tenant_left() {
+    let node = boot_with("ordo_vbg_residency_leave", Some("4s")).await;
+    // Loaded longer than the residency before anyone leaves.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    Versions::on(&node.pool)
+        .pin(SPC_A, "0.2.0", "deployment-owner:ada", 60)
+        .await
+        .expect("moved");
+    nudge(&node).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    nudge(&node).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(
+        node.deployment.loaded("0.1.0").is_some(),
+        "kept for versions.min_residency after its last tenant left"
+    );
+    let dropped = eventually(20, || async {
+        nudge(&node).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        node.deployment.loaded("0.1.0").is_none()
+    })
+    .await;
+    assert!(dropped, "dropped once the residency passed since the move");
+}
+
+/// **`versions.wake_wait`** (owner, 2026-11-25: no number is hard coded):
+/// at `0` a request that wakes an evicted version does not wait for the
+/// load. It answers `server_busy` with `Retry-After` at once, and the
+/// same request lands once the version has loaded. At its default, 5
+/// seconds, the test above sees the request wait and answer 200.
+#[tokio::test(flavor = "multi_thread")]
+async fn wake_wait_sets_how_long_a_waking_request_waits() {
+    use ordo_host::versions::VersionSetting;
+    let node = boot("ordo_vbg_wake_wait").await;
+    set_guard(&node, VersionSetting::IdleEvictAfter, "1s").await;
+    let evicted = eventually(30, || async {
+        nudge(&node).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        node.deployment.loaded("0.1.0").is_none()
+    })
+    .await;
+    assert!(evicted, "0.1.0 was never idle for a second");
+    set_guard(&node, VersionSetting::IdleEvictAfter, "off").await;
+    set_guard(&node, VersionSetting::WakeWait, "0").await;
+    let took = eventually(10, || async {
+        nudge(&node).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        node.deployment.guards().wake_wait == 0
+    })
+    .await;
+    assert!(took, "the node read versions.wake_wait");
+    let first = call(&node, "GET", "/op/cardList", SPC_A, "ada", None).await;
+    assert_ne!(first.status, 200, "{}", first.body);
+    assert_eq!(first.code(), "server_busy", "{}", first.body);
+    assert!(first.header("retry-after").is_some());
+    let landed = eventually(20, || async {
+        let again = call(&node, "GET", "/op/cardList", SPC_A, "ada", None).await;
+        again.status == 200
+    })
+    .await;
+    assert!(landed, "the same request lands once 0.1.0 has loaded");
+}
+
 /// **Per-node health shows a version still loading apart from one
 /// loaded**: `$nodes.loading` round-trips, and `/health/deploy` carries it
 /// beside `alsoServing`.
@@ -789,4 +906,107 @@ async fn a_node_says_which_versions_it_is_still_loading() {
     })
     .await;
     assert!(landed, "{:?}", ordo_exec::nodes::live(&node.pool).await);
+}
+
+// ── a version's new ops while the door rebuilds ──────────────────────────
+
+/// 0.3.0: 0.2.0 and `onlyThree`, an op no earlier version declares.
+fn v030() -> String {
+    V020.replace("domain board @ 0.2.0", "domain board @ 0.3.0")
+        + "\nop onlyThree =\n  cards[title]\n  sort title\n  take 5\n"
+}
+
+/// `spc_a` served 0.3.0 by this node.
+fn on_v030(node: &Node) -> bool {
+    node.deployment
+        .serving(SPC_A)
+        .is_some_and(|l| l.version == "0.3.0")
+}
+
+/// **A version's new op is never denied while the door rebuilds**
+/// (reported fix new-ops-denied-during-rebuild). `spc_a` moves to 0.3.0,
+/// which adds `onlyThree`. Every rebuild is held, so the door serving is
+/// the one built before 0.3.0 loaded: `ada`, the tenant's owner, is told
+/// `server_busy` with a `Retry-After`, never `access_denied`. Once the
+/// rebuild installs she is answered, and `bo`, no member, is denied.
+///
+/// A regression looks like `access_denied` for `ada` while the rebuild is
+/// held.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_versions_op_is_busy_not_denied_until_the_door_rebuilds() {
+    let node = boot("ordo_vbg_newop").await;
+    store(&node.pool, &v030(), false).await;
+    let held = node.access.hold_rebuilds().await;
+    Versions::on(&node.pool)
+        .pin(SPC_A, "0.3.0", "deployment-owner:ada", 60)
+        .await
+        .expect("moved");
+    wait(|| on_v030(&node)).await;
+
+    let busy = call(&node, "GET", "/op/onlyThree", SPC_A, "ada", None).await;
+    assert_eq!(busy.code(), "server_busy", "{}", busy.body);
+    assert_eq!(busy.status, 503, "{}", busy.body);
+    assert!(busy.header("retry-after").is_some(), "{:?}", busy.headers);
+
+    drop(held);
+    let answered = eventually(30, || async {
+        call(&node, "GET", "/op/onlyThree", SPC_A, "ada", None)
+            .await
+            .status
+            == 200
+    })
+    .await;
+    assert!(answered, "the rebuild installed and ada was answered");
+    let stranger = call(&node, "GET", "/op/onlyThree", SPC_A, "bo", None).await;
+    assert_eq!(stranger.code(), "access_denied", "{}", stranger.body);
+}
+
+/// The same move with nothing held: the first call after 0.3.0 loads, and
+/// every call after it until one is answered, is answered or busy, and
+/// never denied.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_versions_op_called_the_moment_it_loads_is_never_denied() {
+    let node = boot("ordo_vbg_newop_now").await;
+    store(&node.pool, &v030(), false).await;
+    Versions::on(&node.pool)
+        .pin(SPC_A, "0.3.0", "deployment-owner:ada", 60)
+        .await
+        .expect("moved");
+    wait(|| on_v030(&node)).await;
+    let until = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let a = call(&node, "GET", "/op/onlyThree", SPC_A, "ada", None).await;
+        if a.status == 200 {
+            break;
+        }
+        assert_eq!(a.code(), "server_busy", "{}", a.body);
+        assert!(std::time::Instant::now() < until, "never answered");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// `apply_op::run_program` with `rollout.strategy` set to `all` first. With
+/// it unset, a deployment that is not dev rolls an apply out a batch at a
+/// time (ruled 2026-11-25); these tests apply and expect every tenant on
+/// the new version at once.
+async fn run_all_at_once(
+    pool: &ordo_exec::Pool,
+    pools: &dyn ordo_exec::route::PoolResolver,
+    program: &ordo_host::schema_apply::Program,
+    notes: Vec<String>,
+    actor: &str,
+    op: &str,
+    activate: bool,
+) -> Result<ordo_host::apply_op::Report, ordo_host::apply_op::ApplyRefused> {
+    ordo_host::rollouts::Rollouts::on(pool)
+        .set_setting(
+            "rollout.strategy",
+            Some("all"),
+            "test",
+            "every tenant at once",
+            0,
+        )
+        .await
+        .expect("rollout.strategy all");
+    ordo_host::apply_op::run_program(pool, pools, program, notes, actor, op, activate).await
 }

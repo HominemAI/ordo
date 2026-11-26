@@ -25,6 +25,11 @@
 //!   member outside the group is still refused.
 //! - **Invite-only.** Under `ORDO_AUTH_PROVISIONING=invite-only`, a newcomer
 //!   with an invitation joins, and a stranger without one is refused.
+//! - **A rolling rollout** (`plan-versions.md` §3.7, increment 10). Three
+//!   teams; teamspace 0.2.0 adds an op; a rolling rollout moves one team a
+//!   batch. During it each team is served its own version: the moved team
+//!   answers the new op, the others do not and still serve 0.1.0. Then
+//!   every team moves and the rollout finishes.
 //!
 //! Needs the conformance cluster (`scripts/conformance-pg.sh start`).
 
@@ -267,6 +272,9 @@ impl Deployment {
             .env("ORDO_AUTH_PROVISIONING", provisioning)
             .env("ORDO_PROVISION_SELF_SERVE", "on-signup")
             .env("ORDO_ACCESS_TEMPLATE", TEMPLATE)
+            // The rollout worker's turn, short so a rollout test waits
+            // seconds and not minutes (`plan-versions.md` §3.7).
+            .env("ORDO_ROLLOUT_TICK_SECS", "1")
             .env_remove("ORDO_PG_ROUTING")
             .env_remove("ORDO_TENANT_CREDENTIALS")
             .env_remove("ORDO_TENANT_CREDENTIALS_DIR")
@@ -1196,4 +1204,301 @@ async fn a_new_tenant_and_a_new_colleague_are_served_on_their_first_call() {
             });
         }
     });
+}
+
+/// Teamspace 0.2.0: 0.1.0 and one read the rollout test can tell apart.
+fn teamspace_v2() -> String {
+    assert!(SOURCE.contains("domain teamspace @ 0.1.0"));
+    SOURCE.replace("domain teamspace @ 0.1.0", "domain teamspace @ 0.2.0")
+        + "\n# Added by 0.2.0: the projects' names, A to Z.\n\
+           op projectNames unbounded =\n  projects[name]\n  sort name\n"
+}
+
+/// **A rolling rollout over three teams** (`plan-versions.md` §3.7 and §4,
+/// increment 10). Each team is served its own version while the rollout
+/// runs: the team that moved answers 0.2.0's new op, and the two that have
+/// not refuse it and keep serving 0.1.0. The worker in the running binary
+/// moves them; this test only stores the version, starts the rollout, and
+/// makes the next batch due.
+#[tokio::test(flavor = "multi_thread")]
+async fn during_a_rolling_rollout_each_team_is_served_its_own_version() {
+    let _serial = SERIAL.lock().await;
+    const DB: &str = "ordo_teamspace_rollout";
+    let d = Deployment::boot(DB, "auto-onboard").await;
+    let teams = [
+        found(&d, &device(61, "ana"), "Ana"),
+        found(&d, &device(62, "bo"), "Bo"),
+        found(&d, &device(63, "cy"), "Cy"),
+    ];
+    for t in &teams {
+        new_project(&d, t, &format!("{} launch", t.who));
+    }
+
+    // `ordo apply --no-activate` of 0.2.0, then `ordo rollout start 0.2.0
+    // --strategy rolling --batch-size 1 --batch-interval 1h`.
+    let pool = Pool::connect(PoolConfig { size: 4, ..cfg(DB) })
+        .await
+        .expect("pool");
+    let v2 = ordo_host::schema_apply::Program::compile(&teamspace_v2()).expect("0.2.0 compiles");
+    ordo_host::apply_op::run_program(
+        &pool,
+        &ordo_exec::route::SinglePool::new(pool.clone()),
+        &v2,
+        vec![],
+        "operator:teamspace-test",
+        "test.apply",
+        false,
+    )
+    .await
+    .expect("0.2.0 stored");
+    let rollouts = ordo_host::rollouts::Rollouts::on(&pool);
+    let started = rollouts
+        .start(
+            "0.2.0",
+            &ordo_host::rollouts::StartOptions {
+                strategy: Some(ordo_host::rollouts::Strategy::Rolling),
+                batch_interval: Some(3_600),
+                batch_size: Some(1),
+                ..Default::default()
+            },
+            "operator:teamspace-test",
+            ordo_host::runtime::now_secs(),
+        )
+        .await
+        .expect("the rollout starts");
+
+    // The binary's worker moves the deployment's own space and one team.
+    let moved = eventually("the first batch", || {
+        let rt = tokio::runtime::Handle::current();
+        let s = tokio::task::block_in_place(|| rt.block_on(rollouts.status(Some(started.id))))
+            .expect("status")
+            .expect("the rollout");
+        (s.counts["moved"] == 1).then(|| {
+            s.tenants
+                .iter()
+                .find(|t| t.state == ordo_host::rollouts::TenantState::Moved)
+                .expect("the moved team")
+                .space
+                .clone()
+        })
+    });
+    for t in &teams {
+        if t.space == moved {
+            let names = eventually(&format!("{} serves 0.2.0", t.who), || {
+                let (status, body) = d.op(t, "GET", "projectNames", json!({}));
+                (status == 200).then_some(body)
+            });
+            assert_eq!(
+                names["rows"][0]["name"],
+                format!("{} launch", t.who),
+                "{names}"
+            );
+        } else {
+            let (status, body) = d.op(t, "GET", "projectNames", json!({}));
+            assert_ne!(status, 200, "{} is still on 0.1.0: {body}", t.who);
+            // 0.1.0 still serves it: its own ops answer.
+            let (status, body) = d.op(t, "GET", "myProjects", json!({}));
+            assert_eq!(status, 200, "{} on 0.1.0: {body}", t.who);
+        }
+    }
+
+    // Mid-rollout (Q4, Q5): the deployment's own space is on 0.2.0, and
+    // "active" is still 0.1.0, so a team founded now starts on 0.1.0.
+    let own = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current()
+            .block_on(ordo_host::versions::Versions::on(&pool).own_pin())
+    })
+    .expect("the own space's pin");
+    assert_eq!(
+        own.map(|(s, v, _)| (s, v)),
+        Some((HOME.to_string(), "0.2.0".to_string()))
+    );
+    let late = found(&d, &device(64, "di"), "Di");
+    let (status, body) = d.op(&late, "GET", "projectNames", json!({}));
+    assert_ne!(
+        status, 200,
+        "a team founded mid-rollout starts on 0.1.0: {body}"
+    );
+
+    // The next batches come due; the worker moves the other teams.
+    pool.rows(&format!(
+        "UPDATE \"$rollouts\" SET \"batch_interval\" = 1 WHERE \"id\" = {}",
+        started.id
+    ))
+    .await
+    .expect("due");
+    eventually("the rollout finishes", || {
+        let rt = tokio::runtime::Handle::current();
+        let s = tokio::task::block_in_place(|| rt.block_on(rollouts.status(Some(started.id))))
+            .expect("status")
+            .expect("the rollout");
+        (s.rollout.state == ordo_host::rollouts::RolloutState::Finished).then_some(())
+    });
+    for t in teams.iter().chain([&late]) {
+        eventually(&format!("{} serves 0.2.0", t.who), || {
+            let (status, _) = d.op(t, "GET", "projectNames", json!({}));
+            (status == 200).then_some(())
+        });
+    }
+}
+
+/// Teamspace 0.2.0 with milestones: a table only 0.2.0 reads, which the
+/// canary test then takes away to make the new version fail on the server.
+fn teamspace_v2_milestones() -> String {
+    assert!(SOURCE.contains("domain teamspace @ 0.1.0"));
+    SOURCE.replace("domain teamspace @ 0.1.0", "domain teamspace @ 0.2.0")
+        + "\n# Added by 0.2.0: milestones.\n\
+           entity milestones {\n  name: text\n}\n\n\
+           op milestoneNames unbounded =\n  milestones[name]\n  sort name\n\n\
+           op addMilestone($name: text) =\n  set milestones { name: $name }\n"
+}
+
+/// **A canary that fails its health check pauses the rest**
+/// (`plan-versions.md` §3.5, §4, increment 10c). Three teams. One moves
+/// alone to 0.2.0. Its calls then fail on the server, the running
+/// binary's nodes count them, and the leader pauses the rollout naming
+/// `rollout.health_error_rate`. The other two teams stay on 0.1.0 and keep
+/// working, and "active" stays 0.1.0.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_canary_that_fails_its_health_check_pauses_the_rest() {
+    let _serial = SERIAL.lock().await;
+    const DB: &str = "ordo_teamspace_canary";
+    let d = Deployment::boot(DB, "auto-onboard").await;
+    let teams = [
+        found(&d, &device(71, "eve"), "Eve"),
+        found(&d, &device(72, "fay"), "Fay"),
+        found(&d, &device(73, "gus"), "Gus"),
+    ];
+    for t in &teams {
+        new_project(&d, t, &format!("{} launch", t.who));
+    }
+
+    // `ordo apply --no-activate` of 0.2.0, then `ordo rollout start 0.2.0
+    // --strategy canary --canary-wait 1h`.
+    let pool = Pool::connect(PoolConfig { size: 4, ..cfg(DB) })
+        .await
+        .expect("pool");
+    let v2 = ordo_host::schema_apply::Program::compile(&teamspace_v2_milestones())
+        .expect("0.2.0 compiles");
+    ordo_host::apply_op::run_program(
+        &pool,
+        &ordo_exec::route::SinglePool::new(pool.clone()),
+        &v2,
+        vec![],
+        "operator:teamspace-test",
+        "test.apply",
+        false,
+    )
+    .await
+    .expect("0.2.0 stored");
+    let rollouts = ordo_host::rollouts::Rollouts::on(&pool);
+    let started = rollouts
+        .start(
+            "0.2.0",
+            &ordo_host::rollouts::StartOptions {
+                strategy: Some(ordo_host::rollouts::Strategy::Canary),
+                canary_wait: Some(3_600),
+                ..Default::default()
+            },
+            "operator:teamspace-test",
+            ordo_host::runtime::now_secs(),
+        )
+        .await
+        .expect("the rollout starts");
+    // The worker moves one team, the canary, and no other.
+    let canary_space = eventually("the canary moves", || {
+        let s = rollout_status(&pool, started.id);
+        (s.counts["moved"] == 1).then(|| {
+            s.tenants
+                .iter()
+                .find(|t| t.state == ordo_host::rollouts::TenantState::Moved)
+                .expect("the canary")
+                .space
+                .clone()
+        })
+    });
+    let canary = teams
+        .iter()
+        .find(|t| t.space == canary_space)
+        .expect("a team");
+    eventually("the canary serves 0.2.0", || {
+        let (status, _) = d.op(canary, "GET", "milestoneNames", json!({}));
+        (status == 200).then_some(())
+    });
+
+    // 0.2.0 breaks on the server: the milestones table is gone from the
+    // canary's database (its own, when it has one).
+    let own = pool
+        .rows(&format!(
+            "SELECT \"db\" FROM \"$spacedb\" WHERE \"$space\" = '{canary_space}'"
+        ))
+        .await
+        .ok()
+        .and_then(|r| r.first().and_then(|r| r.first().cloned().flatten()));
+    let canary_db = match &own {
+        Some(db) => Pool::connect(PoolConfig { size: 1, ..cfg(db) })
+            .await
+            .expect("the canary's database"),
+        None => pool.clone(),
+    };
+    let tables = canary_db
+        .rows(
+            "SELECT format('%I.%I', table_schema, table_name) FROM information_schema.tables \
+             WHERE table_name = 'milestones'",
+        )
+        .await
+        .expect("find the table");
+    assert!(!tables.is_empty(), "milestones is a table");
+    for t in tables {
+        let t = t[0].clone().expect("a name");
+        canary_db
+            .rows(&format!("DROP TABLE {t}"))
+            .await
+            .expect("dropped");
+    }
+
+    // The canary's people keep calling; the calls fail on the server, and
+    // the leader pauses the rest.
+    let paused = eventually("the canary's health pauses the rollout", || {
+        let (status, body) = d.op(canary, "POST", "addMilestone", json!({"name": "beta"}));
+        assert!(status >= 500 || status == 200, "{status}: {body}");
+        let s = rollout_status(&pool, started.id);
+        (s.rollout.state == ordo_host::rollouts::RolloutState::Paused).then_some(s)
+    });
+    assert!(
+        paused
+            .rollout
+            .reason
+            .contains(ordo_host::rollouts::HEALTH_ERROR_RATE_SETTING),
+        "{}",
+        paused.rollout.reason
+    );
+    assert!(paused.health.1 > 0, "faults counted: {:?}", paused.health);
+    assert_eq!(paused.counts["moved"], 1, "only the canary moved");
+
+    // The rest stay on 0.1.0 and keep working; "active" is still 0.1.0.
+    for t in teams.iter().filter(|t| t.space != canary_space) {
+        let (status, body) = d.op(t, "GET", "milestoneNames", json!({}));
+        assert_ne!(status, 200, "{} is still on 0.1.0: {body}", t.who);
+        let (status, body) = d.op(t, "GET", "myProjects", json!({}));
+        assert_eq!(status, 200, "{} on 0.1.0: {body}", t.who);
+    }
+    let active = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current()
+            .block_on(ordo_host::versions::Versions::on(&pool).active_version())
+    })
+    .expect("active");
+    assert_eq!(
+        active, started.from,
+        "\"active\" is still the version it started from"
+    );
+}
+
+fn rollout_status(pool: &Pool, id: i64) -> ordo_host::rollouts::Status {
+    let rt = tokio::runtime::Handle::current();
+    tokio::task::block_in_place(|| {
+        rt.block_on(ordo_host::rollouts::Rollouts::on(pool).status(Some(id)))
+    })
+    .expect("status")
+    .expect("the rollout")
 }

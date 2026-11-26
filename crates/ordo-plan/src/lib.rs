@@ -1349,6 +1349,20 @@ pub const EXTERNAL_KEY: &str = "$key";
 // the program is applied, before any op reading the entity is served.
 pub fn external_source(r: &ExternalRead, alias: &str) -> String {
     let inner = q("$ext");
+    // A peer read through its door (step G5): the rows the holder answered
+    // for this alias, as a list of typed literals, never its table. A
+    // statement nobody served names why it cannot run.
+    let from = match &r.door {
+        None => format!("{}.{}", q(&r.schema), q(&r.table)),
+        Some(peer) => match r.served.as_ref().and_then(|s| s.get(alias)) {
+            Some(rows) => served_rows(r, rows),
+            None => format!(
+                "{}.{}",
+                q(&format!("$peer {peer} is read through its door")),
+                q(&r.table)
+            ),
+        },
+    };
     let col = |c: &str| format!("{inner}.{}", q(c));
     let typed = |prefix: &str, c: &str| format!("'{prefix}_' || {}::text", col(c));
     let mut cols = vec![
@@ -1363,12 +1377,69 @@ pub fn external_source(r: &ExternalRead, alias: &str) -> String {
         cols.push(format!("{value} AS {}", q(&c.field)));
     }
     format!(
-        "(SELECT {} FROM {}.{} AS {inner}) AS {}",
+        "(SELECT {} FROM {from} AS {inner}) AS {}",
         cols.join(", "),
-        q(&r.schema),
-        q(&r.table),
         q(alias)
     )
+}
+
+/// The Postgres type a door-served value is cast to: the column type the
+/// holder stores it as.
+fn served_type(ty: ScalarTy) -> String {
+    match ty {
+        ScalarTy::Int | ScalarTy::Money(_) | ScalarTy::Duration(_) => "bigint".into(),
+        ScalarTy::Bool => "boolean".into(),
+        ScalarTy::Date => "date".into(),
+        ScalarTy::Datetime => "timestamptz".into(),
+        ScalarTy::Decimal(p) => format!("numeric(1000, {p})"),
+        ScalarTy::Json => "jsonb".into(),
+        ScalarTy::Text | ScalarTy::Id | ScalarTy::Uri | ScalarTy::Blob => "text".into(),
+    }
+}
+
+/// The rows a holder answered, as a sub-select of typed literals with the
+/// table's column names: `(SELECT CAST('a' AS text) AS "id", … UNION ALL
+/// …)`. No rows is the same columns with `WHERE false`. Every value is a
+/// quoted literal, so nothing the holder sent is read as SQL.
+fn served_rows(r: &ExternalRead, rows: &[Vec<Option<String>>]) -> String {
+    let key_ty = match r.key_ty {
+        ExternalKeyTy::Int => "bigint".to_string(),
+        ExternalKeyTy::Uuid => "uuid".to_string(),
+        ExternalKeyTy::Text => "text".to_string(),
+    };
+    // Each column once, with the place of its value in a served row: the
+    // key first, then each declared column in order.
+    let mut names: Vec<(String, String)> = vec![(r.key_column.clone(), key_ty)];
+    let mut at: Vec<usize> = vec![0];
+    for (i, c) in r.columns.iter().enumerate() {
+        if c.column != r.key_column && !names.iter().any(|(n, _)| n == &c.column) {
+            names.push((c.column.clone(), served_type(c.ty)));
+            at.push(i + 1);
+        }
+    }
+    let lit = |v: &Option<String>, ty: &str| match v {
+        None => format!("CAST(NULL AS {ty})"),
+        Some(s) => format!("CAST('{}' AS {ty})", s.replace('\'', "''")),
+    };
+    let select = |row: Option<&Vec<Option<String>>>| {
+        names
+            .iter()
+            .zip(&at)
+            .map(|((name, ty), i)| {
+                let v = row.and_then(|r| r.get(*i)).cloned().flatten();
+                format!("{} AS {}", lit(&v, ty), q(name))
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if rows.is_empty() {
+        return format!("(SELECT {} WHERE false)", select(None));
+    }
+    let arms: Vec<String> = rows
+        .iter()
+        .map(|row| format!("SELECT {}", select(Some(row))))
+        .collect();
+    format!("({})", arms.join(" UNION ALL "))
 }
 
 /// A typed id, as SQL, decoded to an external entity's raw key: the prefix
@@ -2696,6 +2767,38 @@ impl Planner {
             // spellings that look equivalent and are not.
             "hash" => hash64_sql(&a[0]),
             "trim" => format!("btrim({})", a[0]),
+            // The part before or after the first separator; null when the
+            // separator is not there, so a split's unparsed rows show.
+            "before" => ordo_schema::check::before_sql(&a[0], &a[1]),
+            "after" => ordo_schema::check::after_sql(&a[0], &a[1]),
+            // Conversions: null where the value does not convert.
+            "text" => format!("({})::text", a[0]),
+            "int" => ordo_schema::check::int_sql(&format!("({})::text", a[0])),
+            "bool" => ordo_schema::check::bool_sql(&a[0]),
+            // A date in the format named, or ISO's; null where the text
+            // spells none. The format is a literal, checked here.
+            "date" => {
+                let format = match args.get(1) {
+                    None => ordo_schema::check::ISO_DATE,
+                    Some(BExpr::Lit {
+                        value: ordo_syntax::Expr::StrLit { value, .. },
+                        ..
+                    }) => value.as_str(),
+                    Some(_) => {
+                        return Err(PlanError {
+                            code: "unsupported",
+                            message: "`date(t, format)` takes its format as a string literal, \
+                                      `date(t, \"DD/MM/YYYY\")`"
+                                .into(),
+                        })
+                    }
+                };
+                ordo_schema::check::date_sql(&a[0], format).map_err(|message| PlanError {
+                    code: "unsupported",
+                    message,
+                })?
+            }
+            "datetime" => ordo_schema::check::datetime_sql(&a[0]),
             other => {
                 return Err(PlanError {
                     code: "unsupported",

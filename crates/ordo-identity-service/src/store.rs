@@ -24,6 +24,7 @@ const MIGRATIONS: &[(i32, &str)] = &[
     (4, MIGRATION_4),
     (5, MIGRATION_5),
     (6, MIGRATION_6),
+    (7, MIGRATION_7),
 ];
 
 /// Open sign-up, per deployment (owner, 2026-11-17). Every deployment
@@ -54,6 +55,23 @@ CREATE TABLE oidc_codes (
   expires_at     bigint NOT NULL,
   used_at        bigint,
   created_at     bigint NOT NULL
+);
+"#;
+
+/// Federation between deployments (`plan-federation-grants.md` 5, G2).
+/// `consumer_key` is the public half of a registered deployment's consumer
+/// key, base64url, or NULL with none: it signs the client assertions the
+/// token exchange takes. `client_assertions` holds each spent assertion's
+/// `jti` until the assertion expires, so none is taken twice.
+const MIGRATION_7: &str = r#"
+ALTER TABLE deployments ADD COLUMN consumer_key text;
+CREATE TABLE client_assertions (
+  deployment text   NOT NULL,
+  client     text   NOT NULL,
+  jti_hash   text   NOT NULL,
+  expires_at bigint NOT NULL,
+  created_at bigint NOT NULL,
+  PRIMARY KEY (deployment, client, jti_hash)
 );
 "#;
 

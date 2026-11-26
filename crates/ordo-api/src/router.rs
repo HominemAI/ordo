@@ -544,11 +544,21 @@ async fn blob_gate(
 /// a tenant not ready, a store behind, a presence touch owed, or the
 /// door's one denial.
 fn access_refusal(state: &ApiState, token: &str, space: &str, op: &str) -> ApiError {
+    // Another deployment's call the holder refused by name (G3).
+    if let Some(why) = state.access.peer_refused(token, space, op) {
+        return ApiError::new(ErrorCode::AccessDenied, why).with_op(op);
+    }
     match state.access.not_ready(token, space) {
         Some(wait) => ApiError::tenant_not_ready(op, wait),
         None if state.access.behind(token, space) => ApiError::server_busy().with_op(op),
         None if state.access.presence_required(token, space, op) => ApiError::presence_required(op),
-        None => denied_after_check(op, Some(token)),
+        None => match state.access.grant_killed(token, space, op) {
+            Some(why) => ApiError::new(ErrorCode::AccessDenied, why).with_op(op),
+            None => match state.access.versions_disagree(token, space, op) {
+                Some(why) => ApiError::new(ErrorCode::VersionsDisagree, why).with_op(op),
+                None => denied_after_check(op, Some(token)),
+            },
+        },
     }
 }
 
@@ -1287,6 +1297,9 @@ struct Gate {
     /// The principal presenting the token when it acts for `principal`
     /// under a delegation ([`AccessDecision::Allow`]). Never a guard input.
     agent: Option<String>,
+    /// Another deployment's call: the deployments it passed through, the
+    /// caller last ([`AccessChecker::peer_chain`]). Empty otherwise.
+    chain: Vec<String>,
     params: Map<String, Value>,
     refine_raw: Option<Value>,
     page_raw: Option<Value>,
@@ -1331,6 +1344,17 @@ impl Gate {
                 .0
                 .insert(AGENT_PARAM.into(), serde_json::Value::String(agent.clone()));
         }
+        if !self.chain.is_empty() {
+            bound.0.insert(
+                CHAIN_PARAM.into(),
+                serde_json::Value::Array(
+                    self.chain
+                        .iter()
+                        .map(|d| serde_json::Value::String(d.clone()))
+                        .collect(),
+                ),
+            );
+        }
     }
 
     /// Whose replay cache and page cursors this call uses: the principal,
@@ -1360,6 +1384,13 @@ fn delegated_key(principal: &str, agent: &str) -> String {
 /// executor, beside `$caller` (the delegator). Read only where a command
 /// group's actor is built; no guard or op body can name it.
 pub const AGENT_PARAM: &str = "$agent";
+
+/// The reserved key under which another deployment's call hands the
+/// executor its chain: the deployments the call passed through, oldest
+/// first, the caller last (step G5b). Every peer call the op makes passes
+/// it on, so a cycle of deployments is refused by name at once. Read only
+/// by the client to other deployments; no guard or op body can name it.
+pub const CHAIN_PARAM: &str = "$chain";
 
 /// Method enforcement → envelope split → space bind → access check.
 ///
@@ -1413,6 +1444,9 @@ fn gate(
         _ => bind_space(op, headers, envelope.space_raw)?,
     };
     let (principal, agent, checked_space) = check_access(state, op, &space, headers)?;
+    let chain = bearer(headers)
+        .map(|t| state.access.peer_chain(t))
+        .unwrap_or_default();
     // 17n M2: the quota gate, **after** access and never before — a quota
     // refusal handed to a caller with no membership in the space would
     // disclose that the space exists and is busy, which is exactly what
@@ -1431,6 +1465,7 @@ fn gate(
         checked_space,
         principal,
         agent,
+        chain,
         params: envelope.params,
         refine_raw: envelope.refine_raw,
         page_raw: envelope.page_raw,
@@ -1676,20 +1711,40 @@ pub(crate) fn check_access(
         )),
         Some(token) => match state.access.check(token, space, &op.name) {
             AccessDecision::Allow { principal, agent } => Ok((principal, agent, space.to_string())),
-            AccessDecision::Deny => match state.access.not_ready(token, space) {
-                // The person's own tenant, still being set up: a retryable
-                // refusal rather than the uniform denial.
-                Some(wait) => Err(ApiError::tenant_not_ready(&op.name, wait)),
-                // The door's member list for this tenant is behind its
-                // database: a retryable 503, never a denial it cannot back.
-                None if state.access.behind(token, space) => {
-                    Err(ApiError::server_busy().with_op(&op.name))
+            AccessDecision::Deny => {
+                match state.access.peer_refused(token, space, &op.name) {
+                    // Another deployment's call the holder refused by name: which
+                    // consumer, which op, the grant line to add (G3).
+                    Some(why) => Err(ApiError::new(ErrorCode::AccessDenied, why).with_op(&op.name)),
+                    None => match state.access.not_ready(token, space) {
+                        // The person's own tenant, still being set up: a retryable
+                        // refusal rather than the uniform denial.
+                        Some(wait) => Err(ApiError::tenant_not_ready(&op.name, wait)),
+                        // The door's member list for this tenant is behind its
+                        // database: a retryable 503, never a denial it cannot back.
+                        None if state.access.behind(token, space) => {
+                            Err(ApiError::server_busy().with_op(&op.name))
+                        }
+                        None if state.access.presence_required(token, space, &op.name) => {
+                            Err(ApiError::presence_required(&op.name))
+                        }
+                        // A grant pinned under another program version that
+                        // disagrees with the tenant's (`plan-versions.md` §1.7).
+                        // A grant a move killed: dead as a revoked share is
+                        // (`plan-versions.md` §2.5).
+                        None => match state.access.grant_killed(token, space, &op.name) {
+                            Some(why) => {
+                                Err(ApiError::new(ErrorCode::AccessDenied, why).with_op(&op.name))
+                            }
+                            None => match state.access.versions_disagree(token, space, &op.name) {
+                                Some(why) => Err(ApiError::new(ErrorCode::VersionsDisagree, why)
+                                    .with_op(&op.name)),
+                                None => Err(denied_after_check(&op.name, Some(token))),
+                            },
+                        },
+                    },
                 }
-                None if state.access.presence_required(token, space, &op.name) => {
-                    Err(ApiError::presence_required(&op.name))
-                }
-                None => Err(denied_after_check(&op.name, Some(token))),
-            },
+            }
         },
     }
 }
@@ -2027,6 +2082,17 @@ async fn run_call(
     let space = gate.approved_space(op)?.to_string();
     let refinement = parse_refinement(op, gate.refine_raw.take(), &state.refine_limits)?;
     let keyed_as = gate.keyed_as();
+    let sorted = refinement.as_ref().is_some_and(|r| r.sort.is_some());
+    if sorted && gate.page_raw.is_some() {
+        // A cursor's keys are the op's own order (`page.rs`, point 2), so a
+        // read in another order is answered once, to its `limit`.
+        return Err(ApiError::for_op(
+            ErrorCode::InvalidRefinement,
+            op,
+            "a refinement with `sort` is read in one answer and never paged: drop `$page`, \
+             or drop `sort` and page in the op's own order",
+        ));
+    }
     let cursor = parse_cursor(state, &space, op, &keyed_as, gate.page_raw.take())?;
     let bound = bind::bind_params(op, &gate.params)?;
 
@@ -2130,12 +2196,17 @@ async fn run_call(
         .join("\u{1f}"),
         fingerprint: f.hex(),
     });
+    // A refinement's `limit` is the rows of this one answer.
+    let limit = refinement.as_ref().and_then(|r| r.limit);
     match state
         .executor
-        .execute(op, &space, bound, refinement, cursor, lease)
+        .execute_sized(op, &space, bound, refinement, cursor, lease, limit)
         .await
     {
-        Ok(ExecOutcome::Ran(result)) => {
+        Ok(ExecOutcome::Ran(mut result)) => {
+            if sorted {
+                result.next_cursor = None;
+            }
             let position = result.position;
             let body = success_envelope(state, &space, op, &keyed_as, result);
             if let Some((replay_key, fingerprint)) = slot {

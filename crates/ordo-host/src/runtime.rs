@@ -1317,6 +1317,19 @@ impl RuntimeConfig {
                 });
             }
         }
+        // `orphans.drop_after`: an orphan's drop date, in days.
+        if let Ok(v) = std::env::var(ordo_exec::orphans::drop_after_var()) {
+            if ordo_exec::orphans::drop_after_value(Some(&v)).is_none() {
+                return Err(BootRefusal::Invalid {
+                    var: ordo_exec::orphans::drop_after_var(),
+                    detail: format!(
+                        "`{v}` is not a number of days, such as `30` or `30d`; unset it for \
+                         the default, {}",
+                        ordo_exec::orphans::DROP_AFTER_DEFAULT_DAYS
+                    ),
+                });
+            }
+        }
         // The shared live stream's idle window and read cap (27s), read by
         // `ordo_api::LiveSettings::from_env` where the door is built.
         // Refused here for the reason above, and a cap of zero refuses too:
@@ -1367,6 +1380,7 @@ impl RuntimeConfig {
                 "ORDO_REFINE_MAX_IN_VALUES",
                 ordo_api::refine::DEFAULT_MAX_IN_VALUES,
             ),
+            ("ORDO_REFINE_MAX_LIMIT", ordo_api::refine::DEFAULT_MAX_LIMIT),
         ] {
             refine_limit(var, std::env::var(var).ok().as_deref(), default)?;
         }
@@ -2104,11 +2118,20 @@ fn platform_specs(exit: bool, imports: bool, attest: bool, buckets: bool) -> Vec
             apply_op::APPLY => true,
             // G1 to G3, wired with `APPLY`'s state.
             name if crate::deploy_ops::OPS.contains(&name) => true,
+            // Between Ordo deployments (step G4), wired beside `APPLY`.
+            name if crate::peer_ops::OPS.contains(&name) => true,
             // Staging clones (versions increment 12), wired with
             // `APPLY`'s state and the deployment's keys.
             name if crate::clones::OPS.contains(&name) => true,
+            // Dev branches (versions increment 5), wired with `APPLY`'s
+            // state, the tenant ops and reap.
+            name if crate::branches::OPS.contains(&name) => true,
+            // The signed rehearsal (12b), wired with the clone ops' state.
+            name if crate::rehearsals::OPS.contains(&name) => true,
             // Maintenance windows, wired with the same state.
             name if crate::window_ops::OPS.contains(&name) => true,
+            // Tenant builds (16), the same state.
+            name if crate::tenant_builds::OPS.contains(&name) => true,
             // The tenant's own move off a revoked version, the same state.
             crate::revoked_moves::MOVE_SELF => true,
             crate::revoked_moves::VERSION_SELF => true,
@@ -2363,6 +2386,20 @@ impl ordo_commandlog::Signer for SharedSigner {
 
 // ── the door, rebuildable ────────────────────────────────────────────────
 
+/// The versions one door was built over, held weakly.
+type BuiltOver = Arc<[std::sync::Weak<crate::deploy::Loaded>]>;
+
+thread_local! {
+    /// The space of the last denial [`SwappableAccess::check`] gave on this
+    /// thread, and whether the door that gave it predated the version
+    /// serving that space. [`AccessChecker::behind`] is asked right after,
+    /// on the same thread with no await between, and reads it: a rebuild
+    /// that installs between the two must not turn a stale door's denial
+    /// into `access_denied` (reported fix new-ops-denied-during-rebuild).
+    static DENIED_BY_STALE_DOOR: std::cell::RefCell<Option<(String, bool)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// The access checker the binary mounts: [`crate::IdentityAccess`] behind a
 /// lock, so a program swap can install a freshly built one.
 ///
@@ -2409,6 +2446,27 @@ pub struct SwappableAccess {
     /// ([`AccessChecker::behind`]) until a rebuild installs. Emptied by
     /// every rebuild that installs: its build took in every newer read.
     failed: RwLock<std::collections::BTreeSet<String>>,
+    /// Of [`Self::unread`], the spaces whose database could not be read.
+    read_failed: RwLock<std::collections::BTreeSet<String>>,
+    /// Of [`Self::unread`], the spaces closed because their pinned version
+    /// was not loaded when the door was built. A version that loads after
+    /// that serves them at once, and [`AccessChecker::behind`] asks
+    /// [`Self::deployment`] again rather than this list (reported fix
+    /// versions-background-busy-flake: a stranger was answered
+    /// `server_busy` while the tenant's members were served).
+    unserved: RwLock<std::collections::BTreeSet<String>>,
+    /// The deployment, asked whether a closed tenant is served now. Set once.
+    deployment: std::sync::OnceLock<Arc<Deployment>>,
+    /// **The versions the door serving now was built over**, held weakly
+    /// so the door keeps no version loaded. A tenant served a version not
+    /// in it (one loaded, or swapped in, after the door was built) is
+    /// behind: the door has no policy for that version's ops, and its
+    /// verified callers are answered `server_busy` until the rebuild that
+    /// follows the load installs (reported fix
+    /// new-ops-denied-during-rebuild). `None` until the boot wires it.
+    /// Written under [`Self::inner`]'s write lock, so a reader holding its
+    /// read lock sees the pair of one install.
+    built_over: RwLock<Option<BuiltOver>>,
     /// The one recorder, held so a rebuild can reinstall it.
     pub recorder: Arc<ordo_secevent::Recorder>,
     /// The one session deny list, held for the same reason and a sharper
@@ -2426,6 +2484,7 @@ pub struct SwappableAccess {
     console_home: std::sync::OnceLock<String>,
     /// The identity service's keys, given to every door installed.
     identity_keys: std::sync::OnceLock<Arc<crate::identity_keys::IdentityKeys>>,
+    peer: std::sync::OnceLock<Arc<crate::peer_door::PeerDoor>>,
     /// The last read of every tenant database, behind the lock that makes
     /// rebuilds one at a time. See [`crate::directory::Cache`].
     directory: tokio::sync::Mutex<crate::directory::Cache>,
@@ -2437,9 +2496,32 @@ pub struct SwappableAccess {
     /// requires one for ([`crate::contact_email`]). Set once; unset,
     /// nothing is required.
     contact: std::sync::OnceLock<Arc<crate::contact_email::ContactEmails>>,
+    /// Which program version serves each tenant (`plan-versions.md` §1.7),
+    /// given to the engine of every door installed, so a share made in a
+    /// tenant is pinned to, and judged by, that tenant's version.
+    tenant_versions: std::sync::OnceLock<ordo_identity::access::TenantVersions>,
+    /// The grants a move killed (`crate::grant_kills`), given to the engine
+    /// of every door installed.
+    killed_grants: std::sync::OnceLock<ordo_identity::access::KilledGrants>,
 }
 
 impl SwappableAccess {
+    /// Give the door that is serving, and every door installed after it,
+    /// the grants a move killed. Once.
+    pub fn wire_killed_grants(&self, killed: ordo_identity::access::KilledGrants) {
+        if self.killed_grants.set(killed.clone()).is_ok() {
+            self.current().engine.set_killed_grants(killed);
+        }
+    }
+
+    /// Give the door that is serving, and every door installed after it,
+    /// the tenants' versions. Once.
+    pub fn wire_tenant_versions(&self, versions: ordo_identity::access::TenantVersions) {
+        if self.tenant_versions.set(versions.clone()).is_ok() {
+            self.current().engine.set_tenant_versions(versions);
+        }
+    }
+
     /// Give the door the email requirement. Once.
     pub fn wire_contact(&self, contact: Arc<crate::contact_email::ContactEmails>) {
         let _ = self.contact.set(contact);
@@ -2463,6 +2545,14 @@ impl SwappableAccess {
     pub fn wire_identity_keys(&self, keys: Arc<crate::identity_keys::IdentityKeys>) {
         if self.identity_keys.set(keys.clone()).is_ok() {
             self.current().wire_identity_keys(keys);
+        }
+    }
+
+    /// Give the door that is serving, and every door installed after it,
+    /// the door for other deployments (step G3). Once.
+    pub fn wire_peer(&self, peer: Arc<crate::peer_door::PeerDoor>) {
+        if self.peer.set(peer.clone()).is_ok() {
+            self.current().wire_peer(peer);
         }
     }
 
@@ -2493,15 +2583,22 @@ impl SwappableAccess {
             second_step: std::sync::OnceLock::new(),
             console_home: std::sync::OnceLock::new(),
             identity_keys: std::sync::OnceLock::new(),
+            peer: std::sync::OnceLock::new(),
             recorder: door.stream.clone(),
             revocations: door.revocations.clone(),
             inner: RwLock::new(Arc::new(door)),
             unread: RwLock::new(Vec::new()),
             kept_stale: RwLock::new(Vec::new()),
             failed: RwLock::new(Default::default()),
+            read_failed: RwLock::new(Default::default()),
+            unserved: RwLock::new(Default::default()),
+            deployment: std::sync::OnceLock::new(),
+            built_over: RwLock::new(None),
             directory: tokio::sync::Mutex::new(crate::directory::Cache::default()),
             not_ready: std::sync::OnceLock::new(),
             contact: std::sync::OnceLock::new(),
+            tenant_versions: std::sync::OnceLock::new(),
+            killed_grants: std::sync::OnceLock::new(),
         }
     }
 
@@ -2529,6 +2626,12 @@ impl SwappableAccess {
         self.directory.lock().await.force_failure(passing);
     }
 
+    /// Tests only: hold every rebuild of the door until the guard drops,
+    /// as a slow rebuild over many tenants would.
+    pub async fn hold_rebuilds(&self) -> tokio::sync::MutexGuard<'_, crate::directory::Cache> {
+        self.directory.lock().await
+    }
+
     /// Tests only: move the door's cache clock forward.
     pub async fn advance_cache_clock(&self, by: std::time::Duration) {
         self.directory.lock().await.advance(by);
@@ -2541,15 +2644,70 @@ impl SwappableAccess {
     /// from a single pool and have nothing to say here, and a parameter
     /// they all had to pass as empty would be a parameter somebody
     /// eventually passes wrongly.
-    fn note_unread(&self, unread: Vec<(String, String)>) {
-        *self.unread.write().expect("door lock") = unread;
+    fn note_unread(&self, unread: Vec<(String, String)>, unserved: Vec<(String, String)>) {
+        *self.read_failed.write().expect("door lock") =
+            unread.iter().map(|(s, _)| s.clone()).collect();
+        *self.unserved.write().expect("door lock") =
+            unserved.iter().map(|(s, _)| s.clone()).collect();
+        let mut all = unread;
+        all.extend(unserved);
+        *self.unread.write().expect("door lock") = all;
+    }
+
+    /// Give the door the deployment, asked whether a tenant closed when
+    /// the door was built is served now. Once.
+    pub fn wire_deployment(&self, deployment: Arc<Deployment>) {
+        let _ = self.deployment.set(deployment);
+    }
+
+    /// Record the versions the door serving now was built over. The boot
+    /// door is built over the active version alone.
+    pub fn note_built_over(&self, versions: &[Arc<crate::deploy::Loaded>]) {
+        *self.built_over.write().expect("door lock") =
+            Some(versions.iter().map(Arc::downgrade).collect());
+    }
+
+    /// The door serving now and the versions it was built over, as one
+    /// install left them.
+    fn door_and_over(&self) -> (Arc<crate::IdentityAccess>, Option<BuiltOver>) {
+        let inner = self.inner.read().expect("door lock");
+        let over = self.built_over.read().expect("door lock").clone();
+        (inner.clone(), over)
+    }
+
+    /// Whether a door built over `over` was built before the version that
+    /// serves `space` now loaded. False when that is not known.
+    fn predates_version_of(&self, over: Option<&BuiltOver>, space: &str) -> bool {
+        let Some(over) = over else {
+            return false;
+        };
+        let Some(serving) = self.deployment.get().and_then(|d| d.serving(space)) else {
+            return false;
+        };
+        !over
+            .iter()
+            .any(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(&serving)))
     }
 
     pub fn current(&self) -> Arc<crate::IdentityAccess> {
         self.inner.read().expect("door lock").clone()
     }
 
-    fn install(&self, door: crate::IdentityAccess) {
+    /// Whether the door that last denied a call into `space` on this
+    /// thread was built before the version serving it loaded. Asked of the
+    /// door serving now when no such denial is held.
+    fn denied_by_stale_door(&self, space: &str) -> bool {
+        let held = DENIED_BY_STALE_DOOR.with(|d| d.borrow_mut().take());
+        match held {
+            Some((denied_in, stale)) if denied_in == space => stale,
+            _ => {
+                let (_, over) = self.door_and_over();
+                self.predates_version_of(over.as_ref(), space)
+            }
+        }
+    }
+
+    fn install(&self, door: crate::IdentityAccess, over: &[Arc<crate::deploy::Loaded>]) {
         if let Some(levels) = self.second_step.get() {
             door.wire_second_step(levels.clone());
         }
@@ -2559,10 +2717,22 @@ impl SwappableAccess {
         if let Some(keys) = self.identity_keys.get() {
             door.wire_identity_keys(keys.clone());
         }
+        if let Some(peer) = self.peer.get() {
+            door.wire_peer(peer.clone());
+        }
+        if let Some(versions) = self.tenant_versions.get() {
+            door.engine.set_tenant_versions(versions.clone());
+        }
+        if let Some(killed) = self.killed_grants.get() {
+            door.engine.set_killed_grants(killed.clone());
+        }
         if let Some(clones) = self.clones.get() {
             door.wire_clones(clones.clone());
         }
-        *self.inner.write().expect("door lock") = Arc::new(door);
+        // The door and the versions it was built over change together.
+        let mut inner = self.inner.write().expect("door lock");
+        self.note_built_over(over);
+        *inner = Arc::new(door);
     }
 }
 
@@ -2575,7 +2745,13 @@ impl SwappableAccess {
 #[async_trait::async_trait]
 impl AccessChecker for SwappableAccess {
     fn check(&self, token: &str, space: &str, op: &str) -> AccessDecision {
-        self.current().check(token, space, op)
+        let (door, over) = self.door_and_over();
+        let decision = door.check(token, space, op);
+        if matches!(decision, AccessDecision::Deny) {
+            let stale = self.predates_version_of(over.as_ref(), space);
+            DENIED_BY_STALE_DOOR.with(|d| *d.borrow_mut() = Some((space.to_string(), stale)));
+        }
+        decision
     }
 
     async fn token_gate(&self, token: &str) -> ordo_api::TokenGate {
@@ -2608,6 +2784,18 @@ impl AccessChecker for SwappableAccess {
         self.current().presence_required(token, space, op)
     }
 
+    fn versions_disagree(&self, token: &str, space: &str, op: &str) -> Option<String> {
+        self.current().versions_disagree(token, space, op)
+    }
+
+    fn grant_killed(&self, token: &str, space: &str, op: &str) -> Option<String> {
+        self.current().grant_killed(token, space, op)
+    }
+
+    fn peer_refused(&self, token: &str, space: &str, op: &str) -> Option<String> {
+        self.current().peer_refused(token, space, op)
+    }
+
     /// A tenant still being set up answers its own person `tenant_not_ready`
     /// (owner, 2026-10-21). Anyone else, a share grant and a delegation
     /// included, keeps the door's uniform denial.
@@ -2616,13 +2804,15 @@ impl AccessChecker for SwappableAccess {
     /// ([`Self::failed`]). Answered for a verified, live token only, so a
     /// caller with no valid token keeps the uniform denial.
     fn behind(&self, token: &str, space: &str) -> bool {
-        let listed = self
-            .unread
-            .read()
-            .expect("door lock")
-            .iter()
-            .any(|(s, _)| s == space)
-            || self.failed.read().expect("door lock").contains(space);
+        // A tenant closed for a version not loaded then is asked about
+        // again: once its version loads, its members are served, and a
+        // stranger gets the uniform denial too.
+        let closed = self.unserved.read().expect("door lock").contains(space)
+            && !self.deployment.get().is_some_and(|d| d.serves(space));
+        let listed = closed
+            || self.read_failed.read().expect("door lock").contains(space)
+            || self.failed.read().expect("door lock").contains(space)
+            || self.denied_by_stale_door(space);
         if !listed {
             return false;
         }
@@ -2977,13 +3167,14 @@ async fn platform_ops_for(
         Some(stream.clone()),
     );
     ops = ops.with_apply(apply.clone());
-    // Staging clones (`plan-versions.md` §3.4). Always, for `with_apply`'s
-    // reason: the specs are always registered.
-    ops = ops.with_clones(Arc::new(crate::clones::CloneOps {
-        apply,
-        keys: w.keys.clone(),
-        access: w.access.clones().unwrap_or_default(),
-    }));
+    // Step G4 of `plan-federation-grants.md`: the ops between Ordo
+    // deployments. The door for other deployments and the client are given
+    // to them once each is built.
+    ops = ops.with_peer(crate::peer_ops::PeerOps::new(
+        w.pool.clone(),
+        &w.home.0,
+        now.clone(),
+    ));
     // 17aa piece 3. Always, for `with_apply`'s reason and one more: the
     // `KeyProvider` is here already (`ExitOps` took it above), and a
     // deployment that registered `std.space.create` and wired nothing for
@@ -3031,6 +3222,15 @@ async fn platform_ops_for(
         None => crate::tenant_ops::TenantOps::new(w.pool.clone(), w.keys.clone(), &w.home.0),
     };
     ops = ops.with_tenants(tenants.clone());
+    // Staging clones (`plan-versions.md` §3.4). Always, for `with_apply`'s
+    // reason: the specs are always registered. A clone of a tenant with a
+    // database of its own gets one here, as a new tenant does.
+    ops = ops.with_clones(Arc::new(crate::clones::CloneOps {
+        apply,
+        keys: w.keys.clone(),
+        access: w.access.clones().unwrap_or_default(),
+        tenants: Some(tenants.clone()),
+    }));
 
     // E3: the membership commands. Always wired, because they are always
     // registered. The refresh hook rebuilds the door on this replica so a
@@ -3845,6 +4045,13 @@ async fn assemble_program(
         }
     }
 
+    // The Ordo release this deployment runs, for a reader's release check
+    // (`plan-evolution-federation.md` §5, Q16). Before the program loads,
+    // so the reader grants the load makes cover it.
+    ordo_exec::sign_in_contract::record_release(&pool, crate::release_check::release(), now_secs())
+        .await
+        .map_err(|e| BootRefusal::Database(e.to_string()))?;
+
     // A connection keeps its endpoints for life under its name (§3.5): a
     // boot that finds them changed refuses. Recorded before the program
     // loads, with the subject claim, because a `peer` line matches people
@@ -4599,6 +4806,18 @@ async fn assemble_program(
     .await?;
     let access = Arc::new(SwappableAccess::new(door));
     access.wire_second_step(second_levels.clone());
+    {
+        // Shares and grants pin, and are judged by, the tenant's own
+        // version (`plan-versions.md` §1.7).
+        let versions = deployment.clone();
+        access.wire_tenant_versions(Arc::new(move |space| {
+            ordo_api::OpRegistry::version_in(versions.as_ref(), &space.0)
+        }));
+        let kills = deployment.clone();
+        access.wire_killed_grants(Arc::new(move |space, grant| {
+            kills.grant_killed(&space.0, &grant.0)
+        }));
+    }
     access.wire_console_home(&cfg.space.0);
     // Staging clones (`plan-versions.md` §3.4): who opens one. A deployment
     // that never cloned reads an empty register.
@@ -4610,7 +4829,9 @@ async fn assemble_program(
     if let Some(c) = auth.as_ref().and_then(|(a, _)| a.contact().cloned()) {
         access.wire_contact(c);
     }
-    access.note_unread(unread);
+    access.note_unread(unread, Vec::new());
+    access.note_built_over(std::slice::from_ref(&live));
+    access.wire_deployment(deployment.clone());
     let grace = crate::directory::stale_grace_from(
         std::env::var(crate::directory::STALE_GRACE_SETTING)
             .ok()
@@ -4625,6 +4846,8 @@ async fn assemble_program(
     // Step 3 of `plan-identity-service.md`: the identity service's keys,
     // from `$identitykeys` first so a restart with the service down still
     // verifies, then fetched. Unset, the door accepts no deployment token.
+    // The door for other deployments, kept for the ops that answer them.
+    let mut peer_door: Option<Arc<crate::peer_door::PeerDoor>> = None;
     match crate::identity_keys::IdentitySettings::from_env()
         .map_err(|(var, detail)| BootRefusal::Invalid { var, detail })?
     {
@@ -4653,6 +4876,22 @@ async fn assemble_program(
                 ),
             }
             keys.spawn_refresher();
+            // The door for other deployments (step G3): their tokens are
+            // signed with the same keys, and name a person this deployment
+            // knows through its connection to the service.
+            let peer = crate::peer_door::PeerDoor::new(
+                keys.clone(),
+                auth.as_ref().map(|(a, _)| a.clone()),
+                Some(pool.clone()),
+                Arc::new(|k: &str| std::env::var(k).ok()),
+                Arc::new(now_secs),
+            );
+            if let Err(why) = peer.settings() {
+                eprintln!("  {why}");
+            }
+            let peer = Arc::new(peer);
+            peer_door = Some(peer.clone());
+            access.wire_peer(peer);
             access.wire_identity_keys(keys);
             if let Some(note) =
                 crate::provision::ignored_deployment_owners_note(&|k: &str| std::env::var(k).ok())
@@ -5059,6 +5298,53 @@ async fn assemble_program(
     // A stored step's backfill functions run on this node's backend
     // functions (10b, B6), handed over once they are built below.
     let apply_for_backfills = platform_ops.apply.clone();
+    // A stored step that seals a field (increment 13) takes its leases
+    // from the deployment's custody.
+    if let Some(apply) = &apply_for_backfills {
+        let _ = apply.backfill_keys.set(keys.clone());
+    }
+    // Step G4 of `plan-federation-grants.md`: the holder's ops get the door
+    // for other deployments; the apply and the key registration get the
+    // client, signing with a key derived from this deployment's custody.
+    if let Some(peer_ops) = &platform_ops.peer {
+        if let Some(door) = &peer_door {
+            let _ = peer_ops.door.set(door.clone());
+        }
+        let handle = std::env::var(crate::identity_keys::DEPLOYMENT_ENV)
+            .ok()
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| crate::identity_keys::DEFAULT_DEPLOYMENT.to_string());
+        match crate::peer_client::consumer_key_from_custody(keys.as_ref(), &space.0, &handle) {
+            Ok(key) => {
+                let client = Arc::new(crate::peer_client::PeerClient::new(
+                    key,
+                    Arc::new(|k: &str| std::env::var(k).ok()),
+                    Arc::new(now_secs),
+                ));
+                let _ = peer_ops.client.set(client.clone());
+                // Step G5: a peer with `ORDO_PEER_<NAME>_URL` is read
+                // through its door with the same client.
+                // A tenant in a database of its own reads through the
+                // door too; its people's sign-in links are in the
+                // deployment's own database (step G7).
+                deployment.set_peer_reads(Arc::new(
+                    crate::peer_reads::DoorReads::new(
+                        client.clone(),
+                        Arc::new(|k: &str| std::env::var(k).ok()),
+                    )
+                    .with_directory(peer_ops.pool.clone()),
+                ));
+                if let Some(apply) = &apply_for_backfills {
+                    let _ = apply.peer_client.set(client);
+                }
+            }
+            Err(e) => eprintln!(
+                "  the consumer key could not be derived ({e}); this deployment cannot call \
+                 another deployment's door"
+            ),
+        }
+    }
     // Tenant-owned sign-in providers (`plan-tenant-providers.md`): one state
     // for the four ops and the sign-in routes. Wired whenever there is
     // authentication, so the ops answer, off, with the setting to change.
@@ -5165,7 +5451,37 @@ async fn assemble_program(
             }),
         )
     };
-    crate::external_check::spawn_watch(external_gate.clone(), pool.clone(), external_every);
+    // The tenants with a database of their own are read on the same tick,
+    // each in its own database (step F3).
+    let tenants: crate::external_check::Tenants = {
+        let (control, spaces) = (pool.clone(), spaces.clone());
+        Arc::new(move || {
+            let (control, spaces) = (control.clone(), spaces.clone());
+            Box::pin(async move {
+                let all = match ordo_exec::spacedb::all(&control).await {
+                    Ok(a) => a,
+                    Err(e) if e.is_missing_table() => return Ok(Vec::new()),
+                    Err(e) => return Err(e.to_string()),
+                };
+                let mut out = Vec::new();
+                for (space, _) in all {
+                    // A tenant whose database cannot be routed now is the
+                    // resolver's to report; it is read on a later tick.
+                    if let Ok(p) = spaces.pool_of(&space.0).await {
+                        out.push((space.0, p));
+                    }
+                }
+                Ok(out)
+            })
+        })
+    };
+    crate::external_check::spawn_watch(
+        external_gate.clone(),
+        pool.clone(),
+        external_every,
+        Some(tenants),
+    );
+    let external_for_health = external_gate.clone();
     let api = ApiState {
         registry: deployment.handle(),
         // Metered outside, platform ops inside, so a platform op's duration
@@ -5219,6 +5535,8 @@ async fn assemble_program(
     // a space the boot held closed is named in the body rather than left
     // for a customer to report.
     .with_spaces(spaces.clone())
+    // §3.3: the peer columns being renamed, and what is held.
+    .with_external(external_for_health)
     // 7d(b): `/security/events` reads a space's stream from **that space's**
     // database, because S4 routes it there. `spaces.pools()` is the door's
     // own resolver, which is the point: a second resolver here could route a
@@ -5460,6 +5778,9 @@ async fn assemble_program(
     };
 
     let catchup = crate::tenant_forward::CatchUp::new(spaces.clone(), pool.clone());
+    if let Some(apply) = &apply_for_backfills {
+        catchup.steps_with(apply.clone());
+    }
     // What this node serves, in `$nodes`, so `ordo apply` can wait for it.
     let beat_secs: u64 = parsed(
         crate::node_status::BEAT_SETTING,
@@ -5635,12 +5956,13 @@ async fn assemble_program(
                     },
                     crate::functions::FnTable::default(),
                     spaces.clone(),
-                    pool_for_functions,
-                    crate::secrets::fn_fetch(
+                    pool_for_functions.clone(),
+                    crate::secrets::fn_fetch_sinking(
                         secrets_for_functions.clone(),
                         ordo_egress::TlsRoots::webpki(),
                         functions_deny,
                         functions_settings.fetch_limits(),
+                        pool_for_functions,
                     ),
                     secrets_for_functions,
                 )
@@ -5651,6 +5973,7 @@ async fn assemble_program(
             if let Some(apply) = &apply_for_backfills {
                 let runner: Arc<dyn crate::backfill::BackfillFunctions> = functions.clone();
                 let _ = apply.backfill_functions.set(runner);
+                let _ = apply.spaces.set(spaces.clone());
             }
             functions
         },
@@ -6347,17 +6670,23 @@ async fn rebuild_access(
     let reads = crate::directory::prefetch(w.pool, w.credentials.as_ref(), &template, scope).await;
     let mut cache = w.access.directory.lock().await;
     let live = w.deployment.current();
-    let others: Vec<Arc<Fixture>> = w
-        .deployment
-        .others()
-        .iter()
-        .map(|l| l.fixture.clone())
-        .collect();
+    let others = w.deployment.others();
+    // Named, so the engine holds each version's ops as it declares them
+    // (`plan-versions.md` §1.7).
+    let served = crate::Served {
+        active: Some(live.version.clone()),
+        others: others
+            .iter()
+            .map(|l| (l.version.clone(), l.fixture.clone()))
+            .collect(),
+    };
+    let mut over = vec![live.clone()];
+    over.extend(others.iter().cloned());
     let built = cache
         .build_served(
             reads,
             &live.fixture,
-            &others,
+            &served,
             w.pool,
             w.credentials.as_ref(),
             &template,
@@ -6391,15 +6720,15 @@ async fn rebuild_access(
         w.delegations,
         w.access.revocations.clone(),
     );
-    w.access.install(door);
+    w.access.install(door, &over);
     // A tenant pinned to a version this node does not serve (one a release
     // no longer loads, §2.8) is closed: its verified callers are answered
     // `server_busy`, never `access_denied`, and `/health/ready` names it.
-    let mut unread = unread;
-    unread.extend(unserved_spaces(w.deployment));
+    // Until its version loads: the door asks again then
+    // ([`SwappableAccess::unserved`]).
     // Together with the door they describe, so the two can never be one
     // rebuild apart.
-    w.access.note_unread(unread);
+    w.access.note_unread(unread, unserved_spaces(w.deployment));
     *w.access.kept_stale.write().expect("door lock") = kept;
     w.access.failed.write().expect("door lock").clear();
     drop(cache);
@@ -6576,6 +6905,49 @@ pub async fn serve(mut rt: Runtime) -> Result<(), BootRefusal> {
             detail,
         })?;
     let deploys = spawn_deploy_listener(&rt, pin_every).await;
+
+    // **The rollout worker** (`plan-versions.md` §3.7, increment 10). Every
+    // node ticks; the one that takes the rollout lock leads that tick, so a
+    // second node goes on when the leader dies.
+    let rollout_every =
+        crate::rollouts::tick_from_env().map_err(|detail| BootRefusal::Invalid {
+            var: crate::rollouts::TICK_ENV,
+            detail,
+        })?;
+    {
+        let ops = crate::apply_op::ApplyOps::recording(
+            rt.pool.clone(),
+            rt.spaces.pools().clone(),
+            &rt.space.0,
+            Some(rt.access.recorder.clone()),
+        );
+        let node = rt.node_status.node();
+        let metrics = rt.metrics.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(rollout_every);
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                every.tick().await;
+                // Every node adds what it counted for the moved tenants,
+                // so the leader judges a first stage's health over the
+                // whole deployment (increment 10c).
+                let totals = metrics.observed_cost().per_space_totals();
+                if let Err(e) =
+                    crate::rollout_strategies::report(&ops.pool, &node, &totals, now_secs()).await
+                {
+                    eprintln!("rollout: this node's health counts were not added ({e})");
+                }
+                match crate::rollouts::tick(&ops, &node, now_secs()).await {
+                    Ok(t) => {
+                        for line in t.log_lines() {
+                            println!("{line}");
+                        }
+                    }
+                    Err(e) => eprintln!("rollout: this turn did not run ({e}); the next one tries"),
+                }
+            }
+        });
+    }
 
     // This node's row in `$nodes`, from now until shutdown. The access
     // engine was built for the boot's version in `assemble`, so the door
@@ -6851,19 +7223,15 @@ async fn spawn_deploy_listener(
     // **Every tenant's pin, and every version they name** (`plan-versions.md`
     // §1.4, increment 3), before the first request: a tenant pinned beside
     // the active version is served its own from the start.
-    let pins = crate::pin_stream::PinStream::with_loads(
+    // `versions.max_loaded`, `.memory_budget`, `.max_concurrent_loads` and
+    // `.at_capacity` are stored in Ordo (owner, 2026-11-25) and read with
+    // the pins; their former variables were adopted above.
+    let pins = crate::pin_stream::PinStream::with_status(
         deployment.clone(),
         pool.clone(),
         pg.clone(),
         keys.clone(),
         space.clone(),
-        {
-            let (limits, said) = crate::pin_stream::NodeLimits::from_env();
-            for line in said {
-                eprintln!("versions: {line}");
-            }
-            limits
-        },
         node_status.clone(),
     );
     // `versions.new_tenant` is read from the control database with the

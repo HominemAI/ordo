@@ -41,6 +41,7 @@ use ordo_commandlog::{
 };
 use ordo_plan::plan;
 use ordo_schema::{Entity, FieldTy};
+use ordo_sema::ir::{BCond, BExpr, From as QFrom, Query};
 use ordo_sema::{
     bind_as, create_write_query, fold_neg_lit, guard_filter_query, CreateGate, CreateVal,
 };
@@ -113,6 +114,16 @@ pub trait WriteDb {
     /// A connection that cannot tell answers `false`.
     fn refused_by_constraint(&self) -> bool {
         false
+    }
+
+    /// Serve the rows of each peer `q` reads through the peer's door
+    /// (`ordo_exec::peer_reads`, steps G5 and G5b), before it is planned:
+    /// a guard that reads one is decided on the holder's answer. Errors are
+    /// `class: message` (`peer_refused`, `peer_unavailable`). A connection
+    /// with no client to other deployments serves none, and the default
+    /// leaves `q` as it is.
+    fn serve_peers(&self, _q: &mut Query, _space: &ordo_plan::Space) -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -215,6 +226,10 @@ impl WriteDb for SpaceAudit<'_> {
 
     fn refused_by_constraint(&self) -> bool {
         self.inner.refused_by_constraint()
+    }
+
+    fn serve_peers(&self, q: &mut Query, space: &ordo_plan::Space) -> Result<(), String> {
+        self.inner.serve_peers(q, space)
     }
 }
 
@@ -769,6 +784,42 @@ impl Fixture {
             Some(view) => view.run_write_body(db, log, call, caller, true),
             None => self.run_write_body(db, log, call, caller, false),
         }
+    }
+
+    /// **A row of an import, restored as the space's owner.**
+    ///
+    /// An import loads a whole space from its bundle, and the bundle carries
+    /// every acl access row. Run as an ordinary write, it met two walls
+    /// (found by staging clones, 2026-11-24): each root row it created
+    /// minted the caller an access row (the bootstrap), so the bundle's own
+    /// row for the same pair was refused as `expected_absent`; and a caller
+    /// with no access row of its own was refused the bundle's access rows,
+    /// and every ref into an acl root, as `not_found`.
+    ///
+    /// So an import runs as the space's **owner**, under rule 6's view (the
+    /// acl link entities' and roots' guards cleared), flagged as owner
+    /// administration, and with no bootstrap row. It widens nothing: rule 6
+    /// already lets the owner grant themselves any acl level, so every row
+    /// restored here is one the owner could write by hand. Every other
+    /// guard is evaluated as for any caller. `owner` is a member id, and a
+    /// member who is not the space's owner is refused as `access_guard`
+    /// (the import refuses earlier, as `not_owner`, naming the fix).
+    pub fn run_restore_on(
+        &self,
+        db: &dyn WriteDb,
+        log: &mut WriteLog,
+        call: &str,
+        owner: &str,
+    ) -> Result<Value, String> {
+        if !self.is_space_owner(db, owner)? {
+            return Err(format!(
+                "access_guard: an import restores acl rows as the space's owner, and \
+                 `{owner}` is not its owner"
+            ));
+        }
+        let mut view = self.with_acl_guards_cleared();
+        view.restoring = true;
+        view.run_write_body(db, log, call, Some(owner), true)
     }
 
     /// Does rule 6 apply to this call? Answered once, before planning.
@@ -2180,7 +2231,8 @@ impl Fixture {
                     .map_err(|er| format!("bind: {er}"))?
                 {
                     CreateGate::Exempt => {}
-                    CreateGate::Check(q) => {
+                    CreateGate::Check(mut q) => {
+                        db.serve_peers(&mut q, &self.plan_space())?;
                         let sql = plan(&q, &self.plan_space())
                             .map_err(|er| format!("plan: {er}"))?
                             .sql;
@@ -2457,7 +2509,13 @@ impl Fixture {
         // OWNER the repair path for every acl row in their space, checked
         // at the door once per call, so no arrangement of data can leave a
         // row nobody can administer.
-        let acl_root = e.acl_levels.as_ref().filter(|_| converging.is_none());
+        // Nor does an import's create: the bundle carries the access rows
+        // (`run_restore_on`), and minting the caller's too made the
+        // bundle's own row for the same pair a duplicate.
+        let acl_root = e
+            .acl_levels
+            .as_ref()
+            .filter(|_| converging.is_none() && !self.restoring);
         let grants = match acl_root {
             None => false,
             Some(_) => self.caller_is_space_member(db, caller)?,
@@ -2845,7 +2903,7 @@ impl Fixture {
             steps: Vec::new(),
             span,
         };
-        let q = bind_as(
+        let mut q = bind_as(
             &self.schema,
             &self.registry,
             &pl,
@@ -2854,6 +2912,7 @@ impl Fixture {
             ordo_sema::Clock::CORPUS,
         )
         .map_err(|er| format!("bind: {er}"))?;
+        db.serve_peers(&mut q, &self.plan_space())?;
         let sel_sql = plan(&q, &self.plan_space())
             .map_err(|er| format!("plan: {er}"))?
             .sql;
@@ -2866,7 +2925,8 @@ impl Fixture {
                 .map_err(|er| format!("bind: {er}"))?
             {
                 None => selected.clone(),
-                Some(wq) => {
+                Some(mut wq) => {
+                    db.serve_peers(&mut wq, &self.plan_space())?;
                     let wsql = plan(&wq, &self.plan_space())
                         .map_err(|er| format!("plan: {er}"))?
                         .sql;
@@ -3917,9 +3977,20 @@ impl Fixture {
         {
             return Ok(ordo_plan::external_key_of(id, &r).is_some());
         }
-        let sql = match guard_filter_query(&self.schema, entity, write_verb, Some(caller))
+        let guard = guard_filter_query(&self.schema, entity, write_verb, Some(caller))
             .map_err(|er| format!("bind: {er}"))?
-        {
+            .map(|mut q| -> Result<Query, String> {
+                // A guard that reads a peer through its door asks the
+                // holder about this one row's refs only, so the row is
+                // pinned before the holder is asked (step G5b).
+                if reads_a_door_peer(&q) {
+                    pin_row(&mut q, id);
+                    db.serve_peers(&mut q, &self.plan_space())?;
+                }
+                Ok(q)
+            })
+            .transpose()?;
+        let sql = match guard {
             Some(q) => format!(
                 "SELECT 1 FROM ({}) v WHERE v.{} = {}",
                 plan(&q, &self.plan_space())
@@ -5393,6 +5464,39 @@ fn stmt_entity(stmt: &WriteStmt) -> Option<&str> {
     match stmt {
         WriteStmt::Set { entity, .. } | WriteStmt::Del { entity, .. } => Some(&entity.name),
     }
+}
+
+/// Does the program `q` was bound against read a peer through its door
+/// (step G5)? Only then is a guard pinned to one row before the holder is
+/// asked: every other plan stays as it was.
+fn reads_a_door_peer(q: &Query) -> bool {
+    q.externals
+        .as_ref()
+        .is_some_and(|m| m.values().any(|r| r.door.is_some()))
+}
+
+/// Pin a one-entity guard query to the row `id`, so the refs a probe finds
+/// are that row's alone.
+fn pin_row(q: &mut Query, id: &str) {
+    let QFrom::Table { alias, .. } = &q.from else {
+        return;
+    };
+    let span = Span::new(0, 0, 1, 1);
+    q.filters.push(BCond::Cmp {
+        op: ordo_syntax::CmpOp::Eq,
+        lhs: BExpr::Col {
+            alias: alias.clone(),
+            column: "id".into(),
+            ty: ScalarTy::Id,
+        },
+        rhs: BExpr::Lit {
+            value: Expr::StrLit {
+                value: id.to_string(),
+                span,
+            },
+            ty: ScalarTy::Id,
+        },
+    });
 }
 
 #[cfg(test)]

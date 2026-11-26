@@ -1391,6 +1391,54 @@ pub static REGISTRY: &[Setting] = &[
         r#""#,
     ),
     s(
+        "ORDO_PEER_<NAME>_URL",
+        "Databases and pools",
+        r#"none, required per peer block"#,
+        r#""#,
+    ),
+    s(
+        "ORDO_PEER_<NAME>_DEPLOYMENT",
+        "Databases and pools",
+        r#"the nickname"#,
+        r#""#,
+    ),
+    s(
+        "ORDO_PEER_<NAME>_SPACE",
+        "Databases and pools",
+        r#"none, required per peer block"#,
+        r#""#,
+    ),
+    s(
+        "ORDO_PEER_PLAIN_HTTP",
+        "Databases and pools",
+        r#"off"#,
+        r#""#,
+    ),
+    s(
+        "ORDO_PEER_TIMEOUT_SECS",
+        "Databases and pools",
+        r#"10 s"#,
+        r#"1 or more"#,
+    ),
+    s(
+        "ORDO_PEER_READ_MAX_ROWS",
+        "Databases and pools",
+        r#"1000"#,
+        r#""#,
+    ),
+    s(
+        "ORDO_PEER_BATCH_KEYS",
+        "Databases and pools",
+        r#"200"#,
+        r#""#,
+    ),
+    s(
+        "ORDO_CONSUMER_<NAME>_CLIENT",
+        "Databases and pools",
+        r#"none"#,
+        r#""#,
+    ),
+    s(
         "ORDO_EXTERNAL_<NAME>_SCHEMA",
         "Databases and pools",
         r#"as written"#,
@@ -1513,10 +1561,34 @@ pub static REGISTRY: &[Setting] = &[
         r#"1 or more"#,
     ),
     s(
+        "ORDO_ROLLOUT_TICK_SECS",
+        "Databases and pools",
+        r#"5 s"#,
+        r#"1 or more"#,
+    ),
+    s(
+        "ORDO_BRANCH_IDLE_LIST_AFTER",
+        "Databases and pools",
+        r#"30d"#,
+        r#"<n>d, <n>h, <n>m or <n>s, from 1"#,
+    ),
+    s(
         "ORDO_EXTERNAL_WATCH_SECS",
         "Databases and pools",
         r#"300 s"#,
         r#"1 or more"#,
+    ),
+    s(
+        "ORDO_ORPHANS_DROP_AFTER",
+        "Databases and pools",
+        r#"30 days"#,
+        r#"a whole number of days"#,
+    ),
+    s(
+        "ORDO_ORPHANS_PERSONAL_DROP_AFTER",
+        "Databases and pools",
+        r#"30 days"#,
+        r#"a whole number of days"#,
     ),
     s(
         "ORDO_VERSIONS_TENANT_MOVE_ROLES",
@@ -1776,6 +1848,12 @@ pub static REGISTRY: &[Setting] = &[
     ),
     s(
         "ORDO_REFINE_MAX_IN_VALUES",
+        "CORS and the door",
+        r#"200"#,
+        r#""#,
+    ),
+    s(
+        "ORDO_REFINE_MAX_LIMIT",
         "CORS and the door",
         r#"200"#,
         r#""#,

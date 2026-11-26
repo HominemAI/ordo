@@ -226,7 +226,7 @@ What the types refuse:
 
 What runs and throws, naming the parser's class: `.column()` on a field that
 is `sealed` or `indexed` (`external_sealed`), `owned` (`external_owned`),
-`unique`, `tree`, `normalize`, has a `default` or is a `blob`
+`unique`, `tree`, `normalize`, `prev`, has a `default` or is a `blob`
 (`external_unsupported`). `synth` refuses a ref from an external to an
 entity, or to a name no external in the call declares (`external_ref_to_native`).
 
@@ -260,6 +260,16 @@ entity passed to `synth`, or `members`. This prints
 the deployment owner sets `ORDO_READER_NOTE_VIEWER_ROLE`. `synth` refuses a
 table that is not an entity of the file (`reader_unknown_table`) and a reader
 passed twice (`reader_line`).
+
+**Covered: grants** (built at G1, checked on the door since G3).
+`grant('note_viewer', ['std.notes.get', '/add.*/', '!addAdmin'])` prints a
+`grant note_viewer { … }` block, one line each. `{ asItself: true }` adds
+`as itself`, and `grantProvider('hominem', [...])` prints
+`grant provider hominem { … }`. The consumer's id is never in the file: the
+deployment owner sets `ORDO_CONSUMER_NOTE_VIEWER_CLIENT`. What each line
+matches is decided at apply. `grant()` refuses a bad name, an empty list and a
+line that is not an op name, `/regex/` or `*`; `synth` refuses a grant passed
+twice (`grant_block`).
 
 And the routine (12a). Its body is a write op's body, built with the same
 calls. The trigger is `every('15m')`, `daily('09:00Z')` or

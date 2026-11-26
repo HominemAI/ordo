@@ -149,7 +149,7 @@ jobs:
       ORDO_PG_PASSWORD: ordo
       ORDO_PSQL: psql
       # The screenshot projects run in their own step below, never here.
-      PROJECTS: ${{ (github.event_name == 'workflow_dispatch' && !inputs.browser) && '--project=api' || '--project=api --project=browser --project=phone --project=firefox --project=webkit --project=upgrade --project=v2 --project=evolve --project=v3 --project=evolve-checks' }}
+      PROJECTS: ${{ (github.event_name == 'workflow_dispatch' && !inputs.browser) && '--project=api' || '--project=api --project=browser --project=phone --project=firefox --project=webkit --project=upgrade --project=v2 --project=evolve --project=v3 --project=restore --project=evolve-checks --project=orphans --project=clone --project=seal --project=rehearsal --project=moves --project=rollout-moves --project=branch --project=tenant-build' }}
       BROWSERS: ${{ (github.event_name == 'workflow_dispatch' && !inputs.browser) && 'off' || 'on' }}
 
     steps:
@@ -163,6 +163,9 @@ jobs:
         if: env.REACHED != 'true'
         run: echo "Not reached by this change (scripts/ci-affected.mjs). Nothing ran." | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The previous Ordo release is a tag in this history.
+          fetch-depth: 0
         if: env.REACHED == 'true'
 
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -263,6 +266,22 @@ jobs:
           name: lcov-notes
           path: coverage-out/lcov-notes.info
           if-no-files-found: error
+      # The release-to-release case: the stack runs the previous Ordo
+      # release (built from its tag, no secret, no registry), then swaps this
+      # build in under a signed-in person (tests/two-images). Its own
+      # stack and report. Needs a Chromium, so it follows BROWSERS.
+      - name: Build the previous Ordo release
+        if: ${{ env.REACHED == 'true' && env.BROWSERS == 'on' }}
+        env:
+          ORDO_UPGRADE_DIR: ${{ runner.temp }}/ordo-previous
+        run: bash scripts/previous-ordo.sh
+      - name: Ordo upgraded under a signed-in person (2 images)
+        if: ${{ env.REACHED == 'true' && env.BROWSERS == 'on' }}
+        working-directory: examples/notes/e2e
+        env:
+          # Its own folder, so the first run's logs are kept for the report.
+          E2E_STATE: ${{ github.workspace }}/examples/notes/e2e/.stack-ordo-upgrade
+        run: npx playwright test -c playwright.ordo-upgrade.config.ts
 
       # Postgres's view after a failed run, beside the door's log in the
       # report (store-pool-held-blocks-signin). The stack also writes one as
@@ -336,6 +355,9 @@ jobs:
             examples/notes/e2e/test-results/
             examples/notes/e2e/.stack/*.log
             examples/notes/e2e/.stack/stack.json
+            examples/notes/e2e/report-ordo-upgrade/
+            examples/notes/e2e/test-results-ordo-upgrade/
+            examples/notes/e2e/.stack-ordo-upgrade/*.log
 
   # The authorization matrix (`crates/ordo-host/tests/authz_matrix.rs`): every
   # door route times every actor times every object, against the real binary

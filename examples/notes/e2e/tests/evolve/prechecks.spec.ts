@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
 import { door, developer } from '../developer.js';
 import { owner } from '../people.js';
-import { addNote, applyProgram, noteInList, signIn, signedIn, stack, unique } from '../support.js';
+import { addNote, applyProgram, ensureServing, noteInList, servingVersion, signIn, signedIn, stack, unique } from '../support.js';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -50,9 +50,13 @@ test('a duplicate title in a tenant: ordo evolve lists it with its fix and refus
   browser,
 }, testInfo) => {
   testInfo.setTimeout(300_000);
-  // Run alone (`--project=evolve-checks --no-deps`), v3 is not applied yet.
-  applyProgram(stack().programV2);
-  applyProgram(stack().programV3);
+  // v3 serves after the `v3` project. Run alone (`--no-deps`), v2 and v3
+  // are applied here. v2 is never applied over v3's schema: v3 renames a
+  // column v2 requires, so that is refused.
+  if (servingVersion() !== '0.3.0') {
+    ensureServing(stack().programV2, '0.2.0');
+    applyProgram(stack().programV3);
+  }
   const ada = await owner('Ada');
   const dev = await developer(browser);
   try {

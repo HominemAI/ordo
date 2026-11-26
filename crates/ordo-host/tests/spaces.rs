@@ -208,6 +208,7 @@ async fn harness_with(
         console_home: Default::default(),
         deployment: Default::default(),
         clones: Default::default(),
+        peer: Default::default(),
     });
 
     let dir = std::env::temp_dir().join(format!("ordo-host-spaces-{db}-{}", std::process::id()));

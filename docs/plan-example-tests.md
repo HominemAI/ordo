@@ -505,6 +505,7 @@ The owner, 2026-11-23, ask 10: *"No. That's the whole point of testing it."* The
 - The guarantee to test: that tenant's op on a peer table is refused with a named class that says why and what to change. It never returns an empty or wrong answer.
 - Example: `examples/note-viewer` with a second tenant moved to its own database (the per-tenant database path S1 uses). Click the shared-notes view; expect the named refusal on the page, and the shared-database tenant still sees its notes.
 - If closing the gap (reaching the peer from a tenant database) is wanted instead of a refusal, that is a question for the board before building.
+- **2026-11-26, federation G7** (`plan-federation-grants.md` §8): the gap is closed through the holder's door, and the shared path refuses such a tenant `peer_tenant_database`. Both are host tests (`peer_reads.rs`). The note-viewer test waits for G8, which moves the viewer to the door.
 - Size: M, 1 to 2 CI rounds.
 
 **#16, a slow filter on an unindexed open field.** `howto-cost.md` §7: nothing warns today.

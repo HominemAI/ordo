@@ -57,6 +57,35 @@ export default defineConfig({
         launchOptions: { args: [`--ignore-certificate-errors-spki-list=${FIXTURE_LEAF_SPKI}`] },
       },
     },
+    // notes renames a column the viewer reads (plan-versions.md, increment
+    // 7b). It changes notes' program again, so it runs after v3.
+    {
+      name: 'rename',
+      testMatch: /rename\/.*\.spec\.ts/,
+      dependencies: ['v3'],
+      use: {
+        ...devices['Desktop Chrome'],
+        launchOptions: { args: [`--ignore-certificate-errors-spki-list=${FIXTURE_LEAF_SPKI}`] },
+      },
+    },
+    // notes stops writing a column the viewer reads (plan-versions.md,
+    // increment 14). Its fixture keeps the rename, so it runs after it.
+    {
+      name: 'orphans',
+      testMatch: /orphans\/.*\.spec\.ts/,
+      dependencies: ['rename'],
+      use: {
+        ...devices['Desktop Chrome'],
+        launchOptions: { args: [`--ignore-certificate-errors-spki-list=${FIXTURE_LEAF_SPKI}`] },
+      },
+    },
+    // notes takes a table off its `reader` line (plan-evolution-federation.md
+    // §7, test 5). The viewer cannot start after it, so it runs last.
+    {
+      name: 'reader-line',
+      testMatch: /reader-line\/.*\.spec\.ts/,
+      dependencies: ['orphans'],
+    },
   ],
   webServer: {
     command: 'bash stack.sh',

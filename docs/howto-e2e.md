@@ -341,8 +341,26 @@ command after that goes to the door with that session:
   `ordo evolve --from 0.3.0 --to 0.3.1` lists the duplicate with its fix,
   `--run` is refused, the person renames one note, and `--run` passes.
 
+- `orphans` (`tests/orphans/orphans.spec.ts`, after `evolve-checks`):
+  Ada adds a file under v2, so its row holds a size; v3 is applied and
+  names `attachments.size` as an orphan. Her export carries the size under
+  `orphans/`, her erasure (`std.space.delete`) removes it, and `ordo evolve
+  --prune attachments.size` prunes nothing on the first ask, is refused
+  without `--confirm-deployment notes`, and removes the column when asked
+  with both. The stack serves the exit ops (`ORDO_EXIT_BUNDLE_DIR`).
+- `moves` (`tests/evolve/dual-writes.spec.ts`, after `rehearsal`, before `branch`):
+  the version production serves with `notes.title` renamed to `heading`
+  with `prev`, made from notes v3's file at run time (0.3.6 after
+  `rehearsal`, 0.3.2 run alone). `ordo evolve --tenant <Ada> --budget 1
+  --chunk-rows 2` stops the move in `backfilling`; Ada retitles a note and
+  adds one; the move switches into its soak; she retitles another; `--revert`
+  takes her back and, after a reload, every note holds its new title. The
+  move switches again and `--close-soak` orphans `notes.title` (increment
+  11a).
+
 Each prints every command and its answer in the run's log. Run alone with
-`--project=evolve --no-deps` or `--project=evolve-checks --no-deps`.
+`--project=evolve --no-deps`, `--project=evolve-checks --no-deps`,
+`--project=orphans --no-deps` or `--project=moves --no-deps`.
 
 ## The console
 
@@ -450,12 +468,14 @@ The stack is `examples/note-viewer/e2e/stack.sh`. It starts, in order:
 6. **The two pages**: notes v2 on `http://localhost:5290`, built with
    `VITE_ORDO_SPACE=system`, and note_viewer on `http://localhost:5291`.
 
-Two Playwright projects:
+The Playwright projects:
 
 | Project | What it tests |
 |---|---|
 | `api` | As `viewer_app`, Postgres answers `notes.notes` and `notes."notesAccess"` and refuses `attachments`, `reminders`, `$commandlog` and the members columns it was not granted. `notes_app` cannot read the viewer's schema. The viewer's door, with no token, answers only notes tagged `public` and refuses `myNotes` |
 | `browser` | In order: Ada signs up openly from notes v2 and writes a public and a private note. Signed out, note_viewer shows the public one only. She signs in to note_viewer with the same passkey and sees both, and a reload keeps her signed in. Bo signs up from notes v2 and sees his own note and the public one, never Ada's private one. Cy signs up from note_viewer, holds nothing in notes v2, and sees no private note |
+| `v3` | notes v3 applied over v2 with both pages open: the viewer reads every note through the move |
+| `orphans` | notes applies `fixtures/notes-no-tags.ordo.fixture` (0.3.2), which stops declaring `notes.tags`. Postgres then refuses `viewer_app` the `tags` column and serves the rest, and the viewer's page shows `external_changed` naming the column, notes, and `ordo introspect --external`. The stack runs the external check every 2 seconds (`ORDO_EXTERNAL_WATCH_SECS=2`) |
 
 Chromium refuses a passkey on a page with a certificate error. The
 `browser` project tells Chromium to trust the test leaf's key, by its SPKI

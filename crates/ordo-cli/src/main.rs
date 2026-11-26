@@ -98,6 +98,14 @@ fn usage() -> ! {
          time, then pin it (`std.deployment.replay`).\n  \
          ordo evolve --list [--from <version>] [--to <version>]\n      \
          the stored plans (`std.deployment.plans`).\n  \
+         ordo rollout start|status|resume|skip|retry|abort|finish|hold|settings|set ...\n      \
+         rollouts through the door (`std.deployment.rollout.*`): start one of a\n      \
+         stored version, follow it, and control it. `ordo rollout` alone\n      \
+         prints each subcommand.\n  \
+         ordo evolve --orphans\n      \
+         what versions left behind in every database (`std.deployment.orphans`).\n  \
+         ordo evolve --prune <entity.field> [--confirm <entity.field>] [--confirm-deployment <name>]\n      \
+         remove an orphan from every database, asked twice (`std.deployment.prune`).\n  \
          ordo release-check --direct [--db <db>] [--json] [--override --reason <why>]\n      \
          run from the new image before its tag changes: every version a\n      \
          tenant is pinned to or may move to must compile and load under\n      \
@@ -149,7 +157,7 @@ fn usage() -> ! {
          `deploys`, `usage`, `triggers`, `prune`, `revert` and `checkpoint`\n\
          still open the database (`--db <name>`, no `--direct`);\n         they move to the door next.\n  \
          ordo apply     <dir|file.ordo> --host <h> | --direct [--as <actor>] [--no-activate]\n                \
-         [--bump] [--label \"<text>\"]\n      \
+         [--bump] [--remove-landed-prev] [--label \"<text>\"]\n      \
          compile the program, store its artifact under its `@` version,\n      \
          point the deployment at it, and nudge every replica. On an empty\n      \
          database it creates the schema first; on one the load gate would\n      \
@@ -159,10 +167,15 @@ fn usage() -> ! {
          A real change under an `@` version already applied is refused,\n      \
          naming the next number; comments and spacing never count.\n      \
          `--bump` writes that number into the source and applies again.\n      \
+         A clean apply names each `prev` mark whose rename has landed in\n      \
+         every environment; `--remove-landed-prev` cuts them from the source.\n      \
          `--label` stores a label with the version: one line, at most 80\n      \
          characters. The git commit of the source is recorded too, with\n      \
          `-dirty` when the applied files changed since it; outside a git\n      \
          repository nothing is recorded.\n      \
+         `--branch <name> [--seed <file>]` stores the version in dev,\n      \
+         unactivated, and serves it to the branch's own tenant; `ordo\n      \
+         branches list|delete <name> --reason \"...\"` (see `ordo branches`).\n      \
          It then waits until every running node serves the new version and\n      \
          has brought the tenants' databases to it, and names any tenant\n      \
          held closed. `--wait-secs <n>` (or ORDO_APPLY_WAIT_SECS, default\n      \
@@ -285,9 +298,13 @@ fn usage() -> ! {
          and the revoke are one change.\n  \
          ordo versions  unrevoke <version> --reason \"<text>\"\n      \
          lift the mark. Both acts stay on record with who, why and when.\n  \
-         ordo versions  settings | set <served|minimum|new-tenant|min-residency|idle-evict-after> <value> | --clear --reason \"<text>\"\n      \
+         ordo versions  remove <version> --reason \"<text>\" [--move-to <version>]\n      \
+         remove a stored version, moving its tenants first. Refused when it\n      \
+         is active, a build serves it, or a restore may still need it.\n  \
+         ordo versions  settings | set <served|minimum|new-tenant|min-residency|idle-evict-after|restore-window|max-loaded|memory-budget|max-concurrent-loads|at-capacity|wake-wait|windows.<name>|limits.<name>|soak.length> <value> | --clear --reason \"<text>\"\n      \
          read or change which versions are served, the oldest a tenant may\n      \
-         stay on, and the version new tenants start on. Stored in Ordo,\n      \
+         stay on, the version new tenants start on, how many versions a node\n      \
+         keeps loaded, the window caps, the input caps and the soak. Stored in Ordo,\n      \
          through the door only (`--host ...`); a refused value is named.\n  \
          ordo environments list [<name>] | register <name> [--position <n>] --reason \"<text>\"\n      \
          the chain of environments this deployment declares (dev, staging,\n      \
@@ -303,16 +320,37 @@ fn usage() -> ! {
          read a version from it. `--clear` forgets it.\n  \
          ordo environments set skip-staging on|off --reason \"<text>\"\n      \
          promotion.skip_staging: promote past staging from the step before it.\n  \
-         ordo clones key | set-key <env> <key> | list | set mask|readers <value>\n      \
+         ordo environments set release-mismatch refuse|warn | attestation-max-age <n>d --reason \"<text>\"\n      \
+         what production accepts of a signed rehearsal (default refuse, 7d).\n  \
+         ordo clones key | set-key <env> <key> | list | sink [<tenant>] | set mask|readers|sinks|max-size <value>\n      \
          staging clones of named production tenants. `key` prints this\n      \
          deployment's clone key; `set-key` records it on production, which\n      \
          seals each clone to it. clone.mask names the fields that leave\n      \
          production unmasked (deny by default, `off` to opt out);\n      \
-         clone.readers names who besides staging's admins opens a clone.\n  \
+         clone.readers names who besides staging's admins opens a clone.\n      \
+         clone.sinks: `on` (default) sends every staging tenant's mail and\n      \
+         function calls to the sink, `clones` only the clones'; `sink` reads it.\n      \
+         clone.max_size: the most a clone may weigh as it travels, `<n>MiB`\n      \
+         from 1 to 1024 (default 64MiB), read on staging.\n  \
          ordo clones clone <tenant> [--from <env>] [--name <n>] [--from-token <t>] --reason \"<text>\"\n      \
          on staging: production masks the tenant, seals it to staging's key,\n      \
          and staging imports it under its own keys, pinned to its version.\n      \
          Members come without their sign-in; a staging admin opens it.\n  \
+         ordo rehearsals rehearse --from <v> --to <v> --clone <clone>[,<clone>] --reason \"<text>\"\n      \
+         on staging: run the stored plan on clones and sign it when green.\n      \
+         Staging makes its own signing key; nothing to set up.\n  \
+         ordo rehearsals accept --from <v> --to <v> [--from-token <t>] [--trust-key <k>] | list\n      \
+         on production: read staging's signed rehearsal as you, check it,\n      \
+         and render the plan to the same digest. Production runs only an\n      \
+         accepted digest while staging is in its chain.\n  \
+         ordo rehearsals break-glass --from <v> --to <v> --reason \"<text>\"\n      \
+         on production, when staging does not answer: the deployment owner\n      \
+         lets the step's stored plan run for 1 hour without a rehearsal.\n      \
+         Refused while staging answers. The stream marks it; `list` shows it.\n  \
+         ordo tenant-builds list | set <name> <version> --reason \"<text>\" | join <name> <tenant>\n      \
+         | leave <tenant> | remove <name> --reason \"<text>\"\n      \
+         a named build serves one version to the tenants named while the rest\n      \
+         follow the active version. Activations and rollouts leave them there.\n  \
          ordo promote <version> --reason \"<text>\" [--from-token <t>] [--no-activate] --host <h>\n      \
          the promotion gate: the target reads the version from the step before\n      \
          itself, as you (a token for it from your `ordo login` sign-in, or\n      \
@@ -595,8 +633,12 @@ fn main() {
             | "windows"
             | "environments"
             | "clones"
+            | "branches"
+            | "rehearsals"
+            | "tenant-builds"
             | "promote"
             | "evolve"
+            | "rollout"
             | "prune"
             | "restore"
             | "keys"

@@ -116,7 +116,7 @@ fn one(pg: &Pg, sql: &str) -> String {
 }
 
 fn fills(spec: &str, images: &str) -> Choices {
-    evolve::typed_options("", spec, images).expect("options parse")
+    evolve::typed_options("", spec, images, "").expect("options parse")
 }
 
 /// A registry with v1 and `next` stored, the step stored with `choices`,
@@ -158,6 +158,9 @@ fn settings(chunk_rows: u32, budget: Option<u32>) -> StepContext {
             ..BackfillSettings::default()
         },
         functions: None,
+        keys: None,
+        fence: None,
+        fences: Vec::new(),
     }
 }
 
@@ -380,6 +383,82 @@ async fn images_write_a_group_per_space_per_chunk() {
     }
 }
 
+/// **`ordo revert` of a backfill group is refused by name**
+/// (`plan-schema-evolution.md` §7.2, increment 10b). An image group would
+/// write the values from before the migration into one chunk of rows; a
+/// summary holds no images at all. Both answer `unrevertable_backfill`,
+/// naming the step and the field and what undoes a migration, and no row
+/// changes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revert_of_a_backfill_group_is_refused_by_name() {
+    use ordo_exec::undo;
+    for (stem, images) in [
+        ("ordo_backfill_revert_images", "note.heading"),
+        ("ordo_backfill_revert_summary", ""),
+    ] {
+        let choices = fills("note.heading=title", images);
+        let (_rpg, registry, tpg, tenant, plan) = setup(stem, &v2(), &choices).await;
+        let ran =
+            evolve::run_step_with(&registry, &tenant, "db", &plan, OWNER, &settings(100, None))
+                .await
+                .expect("runs");
+        assert!(matches!(ran, StepRun::Ran { .. }), "{ran:?}");
+        let schema = Program::compile(&v2()).expect("compiles").schema;
+        let g = backfill_groups(&tpg, "acme").remove(0);
+        let rec = g.backfill.clone().unwrap();
+        let before = one(&tpg, "SELECT count(*) FROM note WHERE heading = title");
+        for dry in [true, false] {
+            let e = if dry {
+                undo::plan_revert(
+                    &tenant,
+                    &schema,
+                    None,
+                    &rec.space,
+                    &g.correlation,
+                    "dev:ada",
+                    ordo_commandlog::Timestamp(9),
+                )
+                .await
+                .map(|_| ())
+            } else {
+                undo::revert(
+                    &tenant,
+                    &schema,
+                    None,
+                    None,
+                    None,
+                    &rec.space,
+                    &g.correlation,
+                    "dev:ada",
+                    ordo_commandlog::Timestamp(9),
+                )
+                .await
+                .map(|_| ())
+            }
+            .unwrap_err()
+            .to_string();
+            assert!(e.starts_with("unrevertable_backfill: "), "{stem}: {e}");
+            for want in [
+                plan.digest.as_str(),
+                "`note.heading`",
+                "ordo evolve",
+                "--revert",
+            ] {
+                assert!(e.contains(want), "{stem} {want}: {e}");
+            }
+        }
+        assert_eq!(
+            one(&tpg, "SELECT count(*) FROM note WHERE heading = title"),
+            before,
+            "{stem}: no row changed"
+        );
+        assert_eq!(
+            backfill_groups(&tpg, "acme").len(),
+            if images.is_empty() { 1 } else { 2 }
+        );
+    }
+}
+
 /// **Verify catches a value changed after its chunk**, names the space,
 /// and makes nothing required.
 #[tokio::test(flavor = "multi_thread")]
@@ -446,6 +525,9 @@ async fn five_failed_chunks_mark_the_cursor_dead_and_a_run_again_finishes() {
             ..BackfillSettings::default()
         },
         functions: None,
+        keys: None,
+        fence: None,
+        fences: Vec::new(),
     };
     let err = evolve::run_step_with(&registry, &tenant, "db", &plan, OWNER, &quick)
         .await
@@ -627,6 +709,9 @@ async fn a_backfill_function_runs_per_chunk_with_only_what_the_plan_declares() {
             ..BackfillSettings::default()
         },
         functions: Some(upper.clone()),
+        keys: None,
+        fence: None,
+        fences: Vec::new(),
     };
     let ran = evolve::run_step_with(&registry, &tenant, "db", &plan, OWNER, &ctx)
         .await
@@ -705,6 +790,7 @@ async fn a_second_worker_is_busy_and_a_done_backfill_does_nothing() {
         entity: program.schema.native("note").unwrap(),
         settings: &s,
         functions: None,
+        keys: None,
     };
     // Another worker holds the lock.
     let holder = Pool::connect(cfg(&tpg.db)).await.expect("a second pool");
@@ -724,4 +810,53 @@ async fn a_second_worker_is_busy_and_a_done_backfill_does_nothing() {
     let again = w.run().await.expect("runs again");
     assert_eq!((again.state.as_str(), again.rows_this_run), ("done", 0));
     assert!(w.verify_and_close().await.unwrap().already);
+}
+
+/// Increment 11a: **a move with dual writes is refused where it cannot keep
+/// both shapes current**, each refusal naming the fix. A step filled by a
+/// backend function has no per-row mapping for the write path (D16's
+/// one-way step), on a database of its own and on the deployment's own
+/// (where an expression fill moves since 11b part 4: `prev_rename.rs`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_with_dual_writes_is_refused_where_it_cannot_keep_both_shapes() {
+    let choices = fills(
+        "note.heading=fn headline secrets apiKey hosts api.example.com",
+        "",
+    );
+    let (_rpg, registry, _tpg, tenant, plan) =
+        setup("ordo_backfill_move", &v2_fn(), &choices).await;
+    let ctx = settings(50, None);
+
+    // The deployment's own database.
+    let shared = ordo_exec::route::SinglePool::new(registry.clone());
+    let cx = ordo_host::dual_writes::MoveContext {
+        control: &registry,
+        pools: &shared,
+        spaces: None,
+    };
+    let err = ordo_host::dual_writes::run(&cx, "acme", &plan, &ctx, 0, OWNER)
+        .await
+        .expect_err("a function fill on a shared database");
+    let text = err.to_string();
+    assert!(text.starts_with("one_way_step"), "{text}");
+
+    // A database of its own, and a function fill: one way.
+    let own = ordo_exec::route::SinglePool::new(tenant.clone());
+    let cx = ordo_host::dual_writes::MoveContext {
+        control: &registry,
+        pools: &own,
+        spaces: None,
+    };
+    let err = ordo_host::dual_writes::run(&cx, "acme", &plan, &ctx, 0, OWNER)
+        .await
+        .expect_err("a function fill");
+    let text = err.to_string();
+    assert!(text.starts_with("one_way_step"), "{text}");
+    assert!(text.contains("backend function"), "{text}");
+    // Nothing was opened.
+    assert!(Versions::on(&registry)
+        .dual_move("acme")
+        .await
+        .expect("moves")
+        .is_none());
 }

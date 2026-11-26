@@ -14,9 +14,22 @@
 //!   removes a sign-in method some people rely on stops, and goes on only
 //!   with `--approve-sign-in-removal <count>` (ruled 2026-11-23, Q6).
 //! - `ordo evolve --tenant <id> [--to Y]` replays the stored path on the
-//!   tenant's database, then pins it (`std.deployment.replay`).
+//!   tenant's database, then pins it (`std.deployment.replay`). A step that
+//!   rewrites data (a rename, a filled field) moves the tenant with dual
+//!   writes (increment 11a): it keeps writing, the backfill runs (`--budget`
+//!   chunks of `--chunk-rows` at a time; run again to resume), the pin
+//!   switches, and a soak (`--soak`, 7 days by default) keeps the old shape
+//!   current. `--revert` returns it in the soak with every write kept
+//!   (`std.deployment.revertSoak`); `--close-soak` ends the soak now
+//!   (`std.deployment.closeSoak`).
 //! - `ordo evolve --list [--from X] [--to Y]` lists the stored plans
 //!   (`std.deployment.plans`).
+//! - `ordo evolve --orphans` lists what versions left behind in every
+//!   database, with drop dates and tombstones (`std.deployment.orphans`).
+//! - `ordo evolve --prune <entity.field>` shows what pruning would remove,
+//!   and removes it only when asked twice: `--confirm <entity.field>`, and in
+//!   production `--confirm-deployment <name>` (`std.deployment.prune`,
+//!   increment 14). On a terminal it asks for both instead.
 //!
 //! None opens a database connection (owner, 2026-11-05: the CLI goes
 //! through the door).
@@ -26,7 +39,10 @@ use crate::operator::{door_only, Flags, Outcome};
 pub(crate) const USAGE: &str = "\
 ordo evolve [<dir>] --from <version> --to <version> [--places <entity>.<field>=rescale|keep[,...]]
             [--fill <entity>.<field>=<expression>|fn <name> [secrets a,b] [hosts h,i][;...]]
-            [--audit-images <entity>.<field>[,...]] [--digest <sha256:...>] [--run]
+            [--audit-images <entity>.<field>[,...]] [--keep-plaintext <entity>.<field>[,...]]
+            [--reverse <entity>.<old field>=<expression>[;...]] [--one-way]
+            [--correspond '<entity>.<link> [first|latest|all] [by <field>] [where <condition>][;...]']
+            [--digest <sha256:...>] [--run]
             [--approve-sign-in-removal <count>]  --host <h> ...
     render the step, refuse it if it has errors, store it; print the receipt and its digest,
     then the pre-checks on every database, each issue with its fix.
@@ -38,11 +54,42 @@ ordo evolve [<dir>] --from <version> --to <version> [--places <entity>.<field>=r
     an expression over the row's own fields, or a backend function of the new version with
     the secrets and hosts it may use. A backfill runs in chunks and resumes from its cursor.
     Its audit record is one summary per tenant; --audit-images writes every row's images.
-ordo evolve --tenant <id> [--to <version>]  --host <h> ...
+    A step that seals a field drops its plaintext column once every row is sealed;
+    --keep-plaintext keeps it, orphaned, until pruned. Its values stay readable until then,
+    and in WAL and backups for good.
+    A split (two fields each `prev(name)`) or a merge (`prev(first, last)`) takes a --fill
+    for each new field, over the old ones, and a --reverse for each old field, over the new
+    ones, which keeps it current through the soak. With no reverse it is one way, and needs
+    --one-way. The pre-checks list the rows a mapping does not parse, and preview it on 3 rows.
+    A rename that changes the type is converted the same way: --fill with `int(x)`, `text(x)`
+    or `bool(x)`, and --reverse.
+    An entity split (`entity <part> (prev: <entity>)` while <entity> stays declared) takes
+    --correspond <part>.<link>: one part row per row, its owned unique link naming it.
+    A move (`<field>: ... prev(<other>.<field>)`) takes --correspond <other>.<link>: each
+    <other> row gives its values to the row its owned unique link names. With <other>
+    removed and every field moved it is an entity merge; with <other> kept it needs --one-way.
+    Through a link that is not unique, the rule names its pick: `latest by <field>` or
+    `first by <field>`, the row that gives the value; into the many side, `all`, or the first
+    or latest row, takes it. A rule may end `where <condition>`, over the fields of the
+    entity holding the link. Rules separated by `;` are tried in order: a row is in the first
+    it meets. The pre-checks list the rows that meet none, and the step waits for them. Such
+    a move is one way (--one-way).
+ordo evolve --tenant <id> [--to <version>] [--budget <chunks>] [--chunk-rows <n>] [--soak <7d|0>]  --host <h> ...
     replay the stored path on the tenant's database, one step at a time, then pin it
-    (to the active version when --to is absent).
+    (to the active version when --to is absent). A step that rewrites data moves the tenant
+    with dual writes: every write keeps both shapes while the backfill runs and through the
+    soak. --budget stops the backfill after that many chunks; run again to resume.
+ordo evolve --tenant <id> --revert | --close-soak  --host <h> ...
+    in the soak, move the tenant back with every write kept, or close the soak now: the old
+    columns are orphaned and readers lose them.
 ordo evolve --list [--from <version>] [--to <version>]  --host <h> ...
-    the stored plans.";
+    the stored plans.
+ordo evolve --orphans  --host <h> ...
+    what versions left behind in every database: each orphan, its drop date, and the tombstones.
+ordo evolve --prune <entity.field> [--confirm <entity.field>] [--confirm-deployment <name>]  --host <h> ...
+    what pruning would remove, then, asked twice, remove it from every database and keep a
+    tombstone. Production also asks for the deployment's name. Off in production until
+    `ordo environments set prune on --reason \"...\"`.";
 
 /// `ordo evolve`.
 pub(crate) async fn run(flags: Flags) -> Outcome {
@@ -52,11 +99,24 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
         "--places",
         "--fill",
         "--audit-images",
+        "--keep-plaintext",
+        "--reverse",
+        "--one-way",
+        "--correspond",
         "--digest",
         "--run",
         "--list",
         "--tenant",
         "--approve-sign-in-removal",
+        "--orphans",
+        "--prune",
+        "--confirm",
+        "--confirm-deployment",
+        "--budget",
+        "--chunk-rows",
+        "--soak",
+        "--revert",
+        "--close-soak",
     ];
     allowed.extend(crate::operator::DOOR_FLAGS);
     if let Err(e) = flags.only(&allowed) {
@@ -68,6 +128,12 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
     };
     if flags.has("--list") {
         return list(&host, &flags).await;
+    }
+    if flags.has("--orphans") {
+        return orphans(&host, &flags).await;
+    }
+    if let Some(name) = flags.named_value("--prune") {
+        return prune(&host, &flags, name).await;
     }
     if flags.has("--tenant") {
         return replay(&host, &flags).await;
@@ -90,6 +156,10 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
             "places": flags.named_value("--places"),
             "fill": flags.named_value("--fill"),
             "auditImages": flags.named_value("--audit-images"),
+            "keepPlaintext": flags.named_value("--keep-plaintext"),
+            "reverse": flags.named_value("--reverse"),
+            "oneWay": flags.has("--one-way"),
+            "correspond": flags.named_value("--correspond"),
             "expectDigest": flags.named_value("--digest"),
             "run": flags.has("--run"),
             "approveSignInRemoval": flags.named_value("--approve-sign-in-removal"),
@@ -124,6 +194,9 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
             r["line"].as_str().unwrap_or("?")
         ));
     }
+    for w in row["warnings"].as_array().into_iter().flatten() {
+        out.push_str(&format!("WARNING    {}\n", w.as_str().unwrap_or("?")));
+    }
     if let Some(s) = row["signIn"].as_object() {
         out.push_str(&format!(
             "SIGN-IN    removes {}; {} person(s) left with no method{}\n",
@@ -142,6 +215,14 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
                 ""
             }
         ));
+        for n in s
+            .get("peerNotes")
+            .and_then(|n| n.as_array())
+            .into_iter()
+            .flatten()
+        {
+            out.push_str(&format!("PEER       {}\n", n.as_str().unwrap_or("?")));
+        }
     }
     out.push_str(&precheck_lines(&row["prechecks"]));
     if let Some(dir) = flags.positional.first() {
@@ -166,6 +247,14 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
         }
         for b in ran["backfills"].as_array().into_iter().flatten() {
             out.push_str(&format!("{}\n", backfill_line(b)));
+        }
+        // A seal's end moved the deployment's own space to the version the
+        // database now holds (increment 13). "Active" waits for activation.
+        if let Some(v) = ran["ownSpace"]["version"].as_str() {
+            out.push_str(&format!(
+                "own space  `{}` now serves {v}; activate {v} to move the rest\n",
+                ran["ownSpace"]["space"].as_str().unwrap_or("?")
+            ));
         }
     }
     Outcome::ok(out)
@@ -235,6 +324,19 @@ fn precheck_lines(p: &serde_json::Value) -> String {
     }
     for n in p["notRun"].as_array().into_iter().flatten() {
         out.push_str(&format!("not run    {}\n", n.as_str().unwrap_or("?")));
+    }
+    for v in p["preview"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "PREVIEW    database `{}`: {}\n",
+            v["database"].as_str().unwrap_or("?"),
+            v["change"].as_str().unwrap_or("?")
+        ));
+        for r in v["rows"].as_array().into_iter().flatten() {
+            out.push_str(&format!("             {}\n", r.as_str().unwrap_or("?")));
+        }
+        if let Some(h) = v["hidden"].as_str() {
+            out.push_str(&format!("             {h}\n"));
+        }
     }
     out
 }
@@ -317,15 +419,105 @@ async fn list(host: &crate::wire::Host, flags: &Flags) -> Outcome {
     Outcome::ok(out)
 }
 
+/// A move with dual writes, for a person (increment 11a).
+fn move_lines(mv: &serde_json::Value) -> String {
+    let mut out = String::new();
+    let phase = mv["phase"].as_str().unwrap_or("?");
+    out.push_str(&format!(
+        "move       {} to {}: {phase}\n",
+        mv["from"].as_str().unwrap_or("?"),
+        mv["to"].as_str().unwrap_or("?")
+    ));
+    match phase {
+        "backfilling" => out.push_str(
+            "           every write keeps both shapes; run again to resume the backfill\n",
+        ),
+        "gated" => out.push_str(&format!(
+            "           serving {}, both shapes current; `--tenant <id>` switches it again\n",
+            mv["from"].as_str().unwrap_or("?")
+        )),
+        "soaking" => {
+            if let Some(until) = mv["soakUntil"].as_u64() {
+                out.push_str(&format!(
+                    "soak       until {}; every write keeps {}'s shape too. `--revert` goes \
+                     back with every write kept, `--close-soak` ends it now\n",
+                    ordo_host::versions::utc_minute(until),
+                    mv["from"].as_str().unwrap_or("?")
+                ));
+            }
+        }
+        "closed" => {
+            let gone: Vec<&str> = mv["orphaned"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|o| o.as_str())
+                .collect();
+            out.push_str(&format!(
+                "closed     the soak is over{}\n",
+                if gone.is_empty() {
+                    String::new()
+                } else {
+                    format!("; orphaned: {}", gone.join(", "))
+                }
+            ));
+        }
+        _ => {}
+    }
+    out
+}
+
+async fn soak(host: &crate::wire::Host, flags: &Flags, tenant: &str, op: &str) -> Outcome {
+    let row = match crate::wire::door_op(
+        host,
+        flags,
+        op,
+        serde_json::json!({ "tenant": tenant }),
+        true,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let mut out = format!("tenant     {tenant}\n");
+    if let Some(p) = row["pinned"].as_object() {
+        out.push_str(&format!(
+            "pinned     {} (was {})\n",
+            p.get("to").and_then(|v| v.as_str()).unwrap_or("?"),
+            p.get("from").and_then(|v| v.as_str()).unwrap_or("none")
+        ));
+    }
+    out.push_str(&move_lines(&row));
+    Outcome::ok(out)
+}
+
 async fn replay(host: &crate::wire::Host, flags: &Flags) -> Outcome {
     let [tenant] = flags.positional.as_slice() else {
         return Outcome::usage(format!("name one tenant: `--tenant <id>`\n{USAGE}\n"));
     };
+    if flags.has("--revert") && flags.has("--close-soak") {
+        return Outcome::usage(format!(
+            "`--revert` and `--close-soak` are two acts: name one\n{USAGE}\n"
+        ));
+    }
+    if flags.has("--revert") {
+        return soak(host, flags, tenant, ordo_host::deploy_ops::REVERT_SOAK).await;
+    }
+    if flags.has("--close-soak") {
+        return soak(host, flags, tenant, ordo_host::deploy_ops::CLOSE_SOAK).await;
+    }
     let row = match crate::wire::door_op(
         host,
         flags,
         ordo_host::deploy_ops::REPLAY,
-        serde_json::json!({ "tenant": tenant, "to": flags.named_value("--to") }),
+        serde_json::json!({
+            "tenant": tenant,
+            "to": flags.named_value("--to"),
+            "budget": flags.named_value("--budget"),
+            "chunkRows": flags.named_value("--chunk-rows"),
+            "soak": flags.named_value("--soak"),
+        }),
         true,
     )
     .await
@@ -354,7 +546,9 @@ async fn replay(host: &crate::wire::Host, flags: &Flags) -> Outcome {
             out.push_str(&format!("{}\n", backfill_line(b)));
         }
     }
-    if row["pinned"].is_null() {
+    if row["pinned"].is_null() && row["move"].is_object() {
+        // A move in its soak, run again: nothing moved this time.
+    } else if row["pinned"].is_null() {
         out.push_str("pinned     not yet: a backfill is still running; replay again to resume\n");
     } else {
         out.push_str(&format!(
@@ -363,7 +557,164 @@ async fn replay(host: &crate::wire::Host, flags: &Flags) -> Outcome {
             row["pinned"]["from"].as_str().unwrap_or("none")
         ));
     }
+    if row["move"].is_object() {
+        out.push_str(&move_lines(&row["move"]));
+    }
     Outcome::ok(out)
+}
+
+async fn orphans(host: &crate::wire::Host, flags: &Flags) -> Outcome {
+    let row = match crate::wire::door_op(
+        host,
+        flags,
+        ordo_host::deploy_ops::ORPHANS,
+        serde_json::json!({}),
+        false,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let mut out = String::new();
+    for d in row["databases"].as_array().into_iter().flatten() {
+        let db = d["database"].as_str().unwrap_or("?");
+        if let Some(e) = d["error"].as_str() {
+            out.push_str(&format!("database `{db}`: not read: {e}\n"));
+            continue;
+        }
+        for o in d["orphans"].as_array().into_iter().flatten() {
+            let name = o["name"].as_str().unwrap_or("?");
+            let when = |k: &str| {
+                o[k].as_u64()
+                    .map(ordo_host::versions::utc_minute)
+                    .unwrap_or_else(|| "-".into())
+            };
+            if o["prunedAt"].is_null() {
+                out.push_str(&format!(
+                    "ORPHAN     {name}  database `{db}`  left by {}  since {}  drop date {}{}{}\n",
+                    o["to"].as_str().unwrap_or("?"),
+                    when("orphanedAt"),
+                    when("dropAfter"),
+                    if o["due"].as_bool() == Some(true) {
+                        " (due)"
+                    } else {
+                        ""
+                    },
+                    if o["sealed"].as_bool() == Some(true) {
+                        "  sealed"
+                    } else {
+                        ""
+                    },
+                ));
+            } else {
+                out.push_str(&format!(
+                    "PRUNED     {name}  database `{db}`  at {} by {}\n",
+                    when("prunedAt"),
+                    o["prunedBy"].as_str().unwrap_or("?"),
+                ));
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push_str("no orphans: no version left a field or an entity behind\n");
+    }
+    Outcome::ok(out)
+}
+
+/// Ask on the terminal, when there is one. `None` off a terminal.
+fn ask(question: &str) -> Option<String> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return None;
+    }
+    eprint!("{question}");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).ok()?;
+    Some(line.trim().to_string())
+}
+
+async fn prune(host: &crate::wire::Host, flags: &Flags, name: &str) -> Outcome {
+    let call = |confirm: Option<String>, deployment: Option<String>| {
+        crate::wire::door_op(
+            host,
+            flags,
+            ordo_host::deploy_ops::PRUNE,
+            serde_json::json!({
+                "name": name,
+                "confirm": confirm,
+                "confirmDeployment": deployment,
+            }),
+            true,
+        )
+    };
+    let mut confirm = flags.named_value("--confirm").map(str::to_string);
+    let mut deployment = flags
+        .named_value("--confirm-deployment")
+        .map(str::to_string);
+    let first = match call(confirm.clone(), deployment.clone()).await {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let mut out = prune_lines(&first);
+    if first["pruned"].as_bool() == Some(true) {
+        return Outcome::ok(out);
+    }
+    // The second ask, typed at apply time.
+    let production = first["environment"].as_str() == Some("production");
+    if confirm.is_none() {
+        print!("{out}");
+        out.clear();
+        confirm = ask(&format!("Type `{name}` to prune it from every database: "));
+        if confirm.is_some() && production && deployment.is_none() {
+            deployment = ask("This is production. Type the deployment's name: ");
+        }
+    }
+    if confirm.is_none() {
+        out.push_str(&format!(
+            "nothing was pruned. To prune it, ask again: {}\n",
+            first["confirm"].as_str().unwrap_or("?")
+        ));
+        return Outcome::ok(out);
+    }
+    match call(confirm, deployment).await {
+        Ok(r) => Outcome::ok(format!("{out}{}", prune_lines(&r))),
+        Err(o) => o,
+    }
+}
+
+fn prune_lines(row: &serde_json::Value) -> String {
+    let name = row["name"].as_str().unwrap_or("?");
+    let pruned = row["pruned"].as_bool() == Some(true);
+    let mut out = String::new();
+    for d in row["databases"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "{}  {name}  database `{}`  {} row(s) hold a value\n",
+            if pruned { "PRUNED     " } else { "WOULD PRUNE" },
+            d["database"].as_str().unwrap_or("?"),
+            d["rows"].as_i64().unwrap_or(0),
+        ));
+    }
+    for d in row["notRead"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "not read   database `{}`: {}\n",
+            d["database"].as_str().unwrap_or("?"),
+            d["why"].as_str().unwrap_or("?")
+        ));
+    }
+    for r in row["readers"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "READER     {} reads this table; it loses the column\n",
+            r.as_str().unwrap_or("?")
+        ));
+    }
+    if pruned {
+        out.push_str(&format!(
+            "pruned     {name}: removed, with what was written to it; a tombstone is kept\n"
+        ));
+    }
+    out
 }
 
 #[cfg(test)]

@@ -29,6 +29,10 @@
 //! person cloning, with their own token for production. That answer carries
 //! the sealed bundle and is bounded to [`MAX_CLONE_BYTES`].
 //!
+//! Production reads staging's signed rehearsal of a step the same way
+//! (`crate::rehearsals`): one `GET /op/std.deployment.rehearsals`, as the
+//! person accepting, with their own token for staging.
+//!
 //! # One error
 //!
 //! Every failure is a [`StepDoorError`], which keeps its cause and says
@@ -49,8 +53,8 @@ pub const MAX_ANSWER_BYTES: usize = 4 * 1024 * 1024;
 /// How long one read may take, connect to last byte.
 pub const READ_SECS: u64 = 30;
 
-/// The largest clone answer read from production: the sealed bundle,
-/// base64, with its record.
+/// The largest clone answer read from production unless `clone.max_size`
+/// says otherwise: the sealed bundle, base64, with its record.
 pub const MAX_CLONE_BYTES: usize = 64 * 1024 * 1024;
 
 /// How long a clone may take, connect to last byte: production masks and
@@ -81,6 +85,8 @@ pub enum StepDoorError {
     NoVersion { address: String, message: String },
     /// The step before answered something this cannot read.
     Answer { address: String, why: String },
+    /// The answer was longer than the most this reads, `max` bytes.
+    TooLarge { address: String, max: usize },
 }
 
 impl StepDoorError {
@@ -120,6 +126,11 @@ impl fmt::Display for StepDoorError {
             StepDoorError::Answer { address, why } => {
                 write!(f, "the deployment at {address} answered {why}")
             }
+            StepDoorError::TooLarge { address, max } => write!(
+                f,
+                "the deployment at {address} answered more than {} MiB",
+                max / (1024 * 1024)
+            ),
         }
     }
 }
@@ -194,6 +205,7 @@ impl StepDoor {
         bearer: &str,
         tenant: &str,
         env: &str,
+        max: usize,
     ) -> Result<Value, StepDoorError> {
         let body = serde_json::json!({ "$space": space, "tenant": tenant, "env": env });
         let path = format!("/op/{}", crate::clones::CLONE_OUT);
@@ -203,9 +215,59 @@ impl StepDoor {
             space,
             bearer,
             Some(body.to_string().into_bytes()),
-            MAX_CLONE_BYTES,
+            max,
         );
         self.first_row(read, CLONE_SECS).await
+    }
+
+    /// **Read staging's signed rehearsals of one step** as the person
+    /// accepting: `std.deployment.rehearsals` in staging's own `space`,
+    /// with `bearer` (`crate::rehearsals`, §3.2). The answer's first row.
+    pub async fn rehearsals(
+        &self,
+        space: &str,
+        bearer: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<Value, StepDoorError> {
+        let path = format!(
+            "/op/{}?from={}&to={}",
+            crate::rehearsals::REHEARSALS,
+            query_escape(from),
+            query_escape(to)
+        );
+        let read = self.send("GET", &path, space, bearer, None, MAX_ANSWER_BYTES);
+        self.first_row(read, READ_SECS).await
+    }
+
+    /// **Whether the step before answers at all**: `GET /health/live`, no
+    /// sign-in. The status when it answers below 500. `Unreachable` when it
+    /// cannot be reached in [`READ_SECS`], or answers 500 or more. Break-glass
+    /// (`crate::rehearsals`, §3.2 item 6) runs only when staging is down.
+    pub async fn live(&self) -> Result<u16, StepDoorError> {
+        let read = self.send("GET", "/health/live", "", "", None, MAX_ANSWER_BYTES);
+        let (status, _) =
+            match tokio::time::timeout(std::time::Duration::from_secs(READ_SECS), read).await {
+                Ok(r) => r?,
+                Err(_) => {
+                    return Err(StepDoorError::Unreachable {
+                        address: self.address.clone(),
+                        cause: format!("no answer in {READ_SECS} seconds"),
+                    })
+                }
+            };
+        if status >= 500 {
+            return Err(StepDoorError::Unreachable {
+                address: self.address.clone(),
+                cause: format!("it answered {status}"),
+            });
+        }
+        Ok(status)
+    }
+
+    /// The address as recorded.
+    pub fn address(&self) -> &str {
+        &self.address
     }
 
     async fn first_row(
@@ -306,9 +368,9 @@ impl StepDoor {
         while let Some(chunk) = stream.next().await {
             out.extend_from_slice(&chunk.map_err(|e| unreachable(e.to_string()))?);
             if out.len() > max {
-                return Err(StepDoorError::Answer {
+                return Err(StepDoorError::TooLarge {
                     address: self.address.clone(),
-                    why: format!("more than {} MiB", max / (1024 * 1024)),
+                    max,
                 });
             }
         }

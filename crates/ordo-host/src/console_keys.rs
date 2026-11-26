@@ -73,8 +73,10 @@ pub const REVOKE: &str = "std.deployment.revokeConsoleKey";
 /// Every op this module serves.
 pub const OPS: [&str; 3] = [ADD, LIST, REVOKE];
 /// The ops `ORDO_STEP_UP_EXEMPT_OPS` can never exempt: who holds a console
-/// key is decided with the owner's own touch, always.
-pub const NEVER_EXEMPT: [&str; 2] = [ADD, REVOKE];
+/// key is decided with the owner's own touch, always. So is breaking glass
+/// on the rehearsal gate (owner, 2026-11-25), which skips the staging
+/// check and always asks the deployment owner to reauth.
+pub const NEVER_EXEMPT: [&str; 3] = [ADD, REVOKE, crate::rehearsals::BREAK_GLASS];
 
 /// The `/auth/*` routes a console key session may call: the relayed touch
 /// (G15) and its own logout. Every other `/auth/*` route refuses it.

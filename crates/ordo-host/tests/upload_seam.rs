@@ -155,7 +155,16 @@ fn only_the_write_protocol_updates_entity_rows() {
              `--places <entity>.<field>=rescale` (25aa): one statement multiplies or divides \
              every stored amount so each keeps its value in the new unit. Like the re-seal \
              pass, no value changes meaning, so no group is appended; it runs inside the \
-             migration's own transaction and is refused when a division would lose digits",
+             migration's own transaction and is refused when a division would lose digits. \
+             And a field rename declared with `prev` (§5 B4, increment 15): one statement \
+             copies the old column into the new one inside the migration's transaction. The \
+             value keeps its meaning under a new name, so no group is appended",
+        ),
+        (
+            "ordo-host/src/evolve.rs",
+            "the reverse of a declared rename, rendered into a stored plan's receipt as a \
+             record for the deployment owner. It is text in the receipt and is never sent \
+             to a database",
         ),
         (
             "ordo-host/src/evolve.rs",
@@ -171,6 +180,22 @@ fn only_the_write_protocol_updates_entity_rows() {
              set. Every backfill appends to each space's chain: a summarised record by \
              default, or full before and after images per chunk (ruled 2026-09-08 and \
              2026-09-20)",
+        ),
+        (
+            "ordo-exec/src/overlay.rs",
+            "the move overlay and the rename overlays (plan-versions.md increment 11a): \
+             dual writes. It runs inside the write protocol's own transaction, after the \
+             op's statements and before the chain append, on the rows the command group \
+             wrote, and sets the other version's columns from those rows' own columns. \
+             The group's images and its one chain record cover the write; a refused guard \
+             rolls the whole write back",
+        ),
+        (
+            "ordo-exec/src/pick.rs",
+            "a move through a link that is not unique (plan-versions.md increment 15e): the \
+             dual write sets the moved columns of the rows the write's group touched, inside \
+             the write protocol's own transaction, before the chain append, the same as the \
+             move overlay; the backfill worker runs the same statement under its audit record",
         ),
         (
             "ordo-exec/src/reseal.rs",

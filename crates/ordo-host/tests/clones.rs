@@ -18,8 +18,19 @@
 //! - `clone.mask` names safe fields, and turning masking off is an opt-in
 //!   that still never carries a sign-in link;
 //! - each refusal names its fix: no clone key recorded on production, no
-//!   door for production on staging, another person, a version staging does
-//!   not hold, a bundle sealed to another key.
+//!   door for production on staging, another person, a bundle sealed to
+//!   another key;
+//! - a version staging does not hold comes down with the clone through the
+//!   promotion gate, recorded as a clone, and a version edited after it was
+//!   stored is refused on its way;
+//! - nothing a clone does reaches a person or a service: a function's call
+//!   and a routine's mail land in the sink, which the door reads back;
+//!   with `clone.sinks` on (the default) so does every staging tenant's,
+//!   `clones` narrows it, and production sinks nothing;
+//! - a staging database without the clone version's tables is refused,
+//!   naming `ordo promote`;
+//! - a tenant with a database of its own is cloned onto a database of its
+//!   own in staging, made by staging.
 //!
 //! A regression looks like a production value in staging's database, a
 //! cloned member's sign-in opening the clone, or a refusal that does not
@@ -221,17 +232,31 @@ impl Issuer {
 
     /// `who`'s token for the deployment `handle`, touched a moment ago.
     fn token(&self, who: &str, handle: &str) -> String {
+        self.token_of(who, handle, Kind::Person)
+    }
+
+    /// A machine key's token for `handle`, with the `deployment` grant.
+    fn machine(&self, handle: &str) -> String {
+        self.token_of("m_ci", handle, Kind::Machine)
+    }
+
+    fn token_of(&self, who: &str, handle: &str, kind: Kind) -> String {
         let now = ordo_host::runtime::now_secs();
+        let machine = kind == Kind::Machine;
         let c = DeploymentClaims {
             iss: ISS.into(),
             aud: deployment_token::audience(handle),
             sub: who.into(),
-            kind: Kind::Person,
+            kind,
             role: ROLE_ADMIN.into(),
             client: "cli".into(),
             sid: format!("s_{who}"),
-            touched_at: Some(now.saturating_sub(5)),
-            grants: Vec::new(),
+            touched_at: (!machine).then(|| now.saturating_sub(5)),
+            grants: if machine {
+                vec![deployment_token::GRANT_DEPLOYMENT.into()]
+            } else {
+                Vec::new()
+            },
             iat: now,
             exp: now + 600,
             jti: format!("j_{who}_{handle}_{now}"),
@@ -263,9 +288,11 @@ fn app_token(principal: &str) -> String {
 // ── a deployment's door ──────────────────────────────────────────────────
 
 /// The deployment over `pool`, its door on a loopback port, trusting the
-/// issuer's tokens for `handle`, serving the notes program. Answers the
-/// address and its stream.
+/// issuer's tokens for `handle`, serving `source` (the notes program).
+/// Answers the address and its stream.
+#[allow(clippy::too_many_arguments)]
 async fn serve(
+    source: &str,
     db: &Pg,
     pool: &Pool,
     handle: &str,
@@ -275,7 +302,7 @@ async fn serve(
 ) -> (String, Arc<ordo_secevent::Recorder>) {
     // The app's ops read the deployment's own database, under its own keys,
     // so what the door answers in a clone is what staging holds.
-    let mut program = Fixture::from_source(PROGRAM, "").expect("the program");
+    let mut program = Fixture::from_source(source, "").expect("the program");
     keys.create_space(&ordo_conformance::fixture_space())
         .expect("fixture custody");
     program.keys = keys.clone();
@@ -322,6 +349,13 @@ async fn serve(
             apply: apply_ops,
             keys,
             access: clone_access.clone(),
+            tenants: None,
+        }))
+        // The console's tenant list.
+        .with_tenant_list(Arc::new(ordo_host::fleet::TenantListOps {
+            control: pool.clone(),
+            home: HOME.to_string(),
+            spaces: None,
         })),
     );
     let id_keys = Arc::new(IdentityKeys::new(
@@ -479,17 +513,22 @@ struct Pair {
 }
 
 async fn pair(stem: &str, staging_source: &str) -> Pair {
+    pair_with(stem, PROGRAM, staging_source).await
+}
+
+async fn pair_with(stem: &str, prod_source: &str, staging_source: &str) -> Pair {
     let issuer = Issuer::start().await;
     let (prod, prod_pg) = deployment(
         &format!("ordo_clone_{stem}_p"),
         &["staging"],
         "production",
-        PROGRAM,
+        prod_source,
     )
     .await;
     let prod_keys = keys_for(b"production master key");
     let tenant = seed_tenant(&prod, &prod_keys).await;
     let (prod_address, prod_stream) = serve(
+        prod_source,
         &prod_pg,
         &prod,
         "production",
@@ -521,6 +560,10 @@ async fn pair(stem: &str, staging_source: &str) -> Pair {
     let staging_keys = keys_for(b"staging master key");
     let access = CloneAccess::new();
     let (staging_address, staging_stream) = serve(
+        // The program staging's door serves: production's, so a clone of
+        // it is served (a staging that applied another serves that one's
+        // ops only for its own tenants, which these tests do not read).
+        prod_source,
         &staging_pg,
         &staging,
         "staging",
@@ -572,6 +615,7 @@ async fn clone_as(p: &Pair, who: &str, from_token: String) -> Result<clones::Clo
         &SinglePool::new(p.staging.clone()),
         &p.staging_keys,
         HOME,
+        None,
         CloneInRequest {
             from: "production",
             tenant: "acme",
@@ -608,7 +652,11 @@ async fn a_clone_serves_in_staging_on_its_version_with_no_real_personal_data() {
     let row = &body["rows"][0];
     let space = row["clone"]["space"].as_str().expect("a space").to_string();
     assert_ne!(space, p.tenant, "a new tenant, not production's id");
-    assert_eq!(row["clone"]["name"], "acme-clone");
+    // Its name is neutral: production's tenant name is never carried, since
+    // a self-serve tenant is named after its person.
+    assert_eq!(row["clone"]["name"], clones::default_name(&space).as_str());
+    assert!(clones::default_name(&space).starts_with("clone-"));
+    assert!(!row["clone"]["name"].as_str().unwrap().contains("acme"));
     assert_eq!(row["clone"]["fromTenant"], p.tenant.as_str());
     assert_eq!(row["clone"]["version"], "0.1.0");
     assert_eq!(row["clone"]["opensAs"], "mem_ada");
@@ -880,6 +928,7 @@ async fn each_refusal_names_its_fix() {
         &SinglePool::new(p.staging.clone()),
         &p.staging_keys,
         HOME,
+        None,
         CloneInRequest {
             from: "production",
             tenant: "nobody",
@@ -900,6 +949,7 @@ async fn each_refusal_names_its_fix() {
         &SinglePool::new(p.staging.clone()),
         &p.staging_keys,
         HOME,
+        None,
         CloneInRequest {
             from: "staging",
             tenant: "acme",
@@ -964,14 +1014,1514 @@ async fn each_refusal_names_its_fix() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_version_staging_does_not_hold_is_refused_naming_ordo_promote() {
+async fn a_version_staging_does_not_hold_comes_down_with_the_clone_through_the_gate() {
     // Staging holds 0.2.0 alone; the tenant serves 0.1.0 in production.
     let p = pair("c4", &program_at("0.2.0")).await;
+    let active_before = Versions::on(&p.staging).active_version().await.unwrap();
+    let done = clone_as(&p, ADA, p.issuer.token(ADA, "production"))
+        .await
+        .expect("cloned, its version with it");
+    assert_eq!(done.arrived.as_deref(), Some("0.1.0"), "it came down");
+    assert_eq!(done.record.version, "0.1.0");
+    let pin = Versions::on(&p.staging)
+        .pin_of(&done.record.space)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pin.version.as_deref(),
+        Some("0.1.0"),
+        "the clone serves on it"
+    );
+    // Stored, never activated: staging still serves what it served.
+    assert_eq!(
+        Versions::on(&p.staging).active_version().await.unwrap(),
+        active_before
+    );
+    // Recorded through the gate, as a clone, by the person.
+    let promoted = ordo_host::promotion::promotions(&p.staging, 10)
+        .await
+        .unwrap();
+    let arrival = promoted
+        .iter()
+        .find(|r| r.version == "0.1.0")
+        .expect("recorded in $promotions");
+    assert_eq!(arrival.via, "clone");
+    assert_eq!(arrival.from_env, "production");
+    assert_eq!(arrival.to_env, "staging");
+    assert_eq!(arrival.actor, ADA);
+    // A second clone finds it here and brings nothing down.
+    let again = clone_as(&p, ADA, p.issuer.token(ADA, "production"))
+        .await
+        .expect("cloned again");
+    assert_eq!(again.arrived, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_version_edited_after_it_was_stored_is_refused_on_its_way_down() {
+    let p = pair("c5", &program_at("0.2.0")).await;
+    // Production's stored copy of 0.1.0 is changed by hand: its identity
+    // no longer matches what production recorded.
+    p.prod
+        .rows(
+            "UPDATE \"$artifacts\" SET \"source\" = \"source\" || E'\\n# edited by hand\\n' \
+             WHERE \"version\" = '0.1.0'",
+        )
+        .await
+        .unwrap();
     let e = clone_as(&p, ADA, p.issuer.token(ADA, "production"))
         .await
         .unwrap_err();
-    assert!(matches!(e, CloneRefusal::VersionNotHere { .. }), "{e}");
-    assert!(e.to_string().contains("ordo promote 0.1.0"), "{e}");
+    assert!(matches!(e, CloneRefusal::Version { .. }), "{e}");
+    assert!(e.to_string().contains("definition file"), "{e}");
+    assert!(e.to_string().contains("Apply the version again"), "{e}");
+    // Nothing stored, nothing cloned.
     assert!(clones::clones(&p.staging).await.unwrap().is_empty());
-    assert!(tenants::all(&p.staging).await.unwrap().is_empty());
+    assert!(Versions::on(&p.staging)
+        .get("0.1.0")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shared_database_without_the_versions_tables_is_refused_naming_promote() {
+    // Staging serves a program with no `notes`. The first clone brings
+    // 0.1.0 down through the gate, which gives the shared database its
+    // tables. Then the table is gone (restored from an older backup, say):
+    // a clone never changes the shared database, so the next is refused,
+    // naming the commands that apply the version.
+    let p = pair(
+        "c8",
+        "domain notes @ 0.2.0\n\nentity pages {\n  title: text\n}\n\n\
+         op allPages unbounded =\n  pages[title]\n",
+    )
+    .await;
+    clone_as(&p, ADA, p.issuer.token(ADA, "production"))
+        .await
+        .expect("the first clone");
+    p.staging
+        .rows("DROP TABLE \"notes\"")
+        .await
+        .expect("dropped");
+    let e = clone_as(&p, ADA, p.issuer.token(ADA, "production"))
+        .await
+        .unwrap_err();
+    let text = e.to_string();
+    assert!(text.contains("does not hold the tables of 0.1.0"), "{text}");
+    assert!(text.contains("ordo promote 0.1.0"), "{text}");
+    assert!(text.contains("ordo evolve --to 0.1.0 --run"), "{text}");
+    // Only the first clone is recorded.
+    assert_eq!(clones::clones(&p.staging).await.unwrap().len(), 1);
+}
+
+/// [`PROGRAM`] with `acl` on notes: each note carries access rows.
+fn acl_program() -> String {
+    PROGRAM.replace(
+        "  author -> members\n}",
+        "  author -> members\n  acl (read, write, admin)\n}",
+    )
+}
+
+/// **A tenant whose notes carry acl rows clones whole** (Reported fix,
+/// 2026-11-24). Before the fix the import minted its caller an access row
+/// on each note, then refused the bundle's own row for the same note as
+/// `expected_absent`, and nothing was cloned. Now staging holds exactly
+/// production's access rows, and the staging admin, opening the clone as
+/// its founding owner, reads what that owner may read.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tenant_whose_notes_carry_acl_rows_clones_every_row() {
+    let program = acl_program();
+    assert!(program.contains("acl ("), "the program has acl");
+    let p = pair_with("c9", &program, &program).await;
+    // Ada administers her note, Charles his, and Ada shared hers with
+    // Charles to read.
+    p.prod
+        .rows(&format!(
+            "INSERT INTO \"notesAccess\" (\"$space\", \"id\", \"rev\", \"note\", \"member\", \
+             \"level\") VALUES \
+             ('{t}', 'nac_1', 1, 'not_1', 'mem_ada', 'admin'), \
+             ('{t}', 'nac_2', 1, 'not_2', 'mem_charles', 'admin'), \
+             ('{t}', 'nac_3', 1, 'not_1', 'mem_charles', 'read')",
+            t = p.tenant
+        ))
+        .await
+        .expect("access rows");
+    let done = clone_as(&p, ADA, p.issuer.token(ADA, "production"))
+        .await
+        .expect("an acl tenant clones");
+    let space = done.record.space.clone();
+    let access = |pool: Pool, space: String| async move {
+        let mut rows: Vec<String> = pool
+            .rows(&format!(
+                "SELECT n.\"author\", a.\"member\", a.\"level\" FROM \"notesAccess\" a \
+                 JOIN \"notes\" n ON n.\"$space\" = a.\"$space\" AND n.\"id\" = a.\"note\" \
+                 WHERE a.\"$space\" = '{space}'"
+            ))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| format!("{:?}", r))
+            .collect();
+        rows.sort();
+        rows
+    };
+    let before = access(p.prod.clone(), p.tenant.clone()).await;
+    assert_eq!(before.len(), 3);
+    assert_eq!(
+        access(p.staging.clone(), space.clone()).await,
+        before,
+        "exactly production's access rows, none minted for the importer"
+    );
+    // The staging admin opens it as Ada, and reads what Ada may read: her
+    // own note, not Charles's.
+    // Cloned here without the door, so the door's view is refreshed as the
+    // op does after a clone.
+    p.access.refresh(&p.staging).await.expect("refreshed");
+    let (status, body) = call(
+        &p.staging_address,
+        "GET",
+        "allNotes",
+        &space,
+        None,
+        &p.issuer.token(BOB, "staging"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"].as_array().unwrap().len(), 1, "{body}");
+}
+
+/// A name the person gives wins over the neutral default.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_given_name_wins_over_the_neutral_default() {
+    let p = pair("c10", PROGRAM).await;
+    let done = clones::clone_in(
+        &p.staging,
+        &SinglePool::new(p.staging.clone()),
+        &p.staging_keys,
+        HOME,
+        None,
+        CloneInRequest {
+            from: "production",
+            tenant: "acme",
+            token: &p.issuer.token(ADA, "production"),
+            name: Some("qa-copy"),
+            reason: "rehearse on a named copy",
+        },
+        ADA,
+        2_000,
+    )
+    .await
+    .expect("cloned");
+    assert_eq!(done.record.name, "qa-copy");
+}
+
+// ── production's tenant name ─────────────────────────────────────────────
+
+/// Every text cell of `table` in staging, as one string.
+async fn table_text(pool: &Pool, table: &str) -> String {
+    pool.rows(&format!(
+        "SELECT coalesce(string_agg(t::text, ' '), '') FROM \"{table}\" t"
+    ))
+    .await
+    .map(|r| r[0][0].clone().unwrap_or_default())
+    .unwrap_or_default()
+}
+
+/// **Production's tenant name never reaches staging** (2026-11-24). A
+/// self-serve tenant is named after its person. Staging records the
+/// tenant's id and version; the clone's answer, the clone list, the
+/// console's tenant list, the security stream, the registry and an export
+/// of the clone carry no trace of `acme`.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_clone_record_export_or_console_answer_in_staging_carries_productions_name() {
+    let p = pair("c11", PROGRAM).await;
+    let here = p.issuer.token(ADA, "staging");
+    let (status, body) = post(
+        &p.staging_address,
+        clones::CLONE_IN,
+        json!({
+            "tenant": "acme", "fromToken": p.issuer.token(ADA, "production"),
+            "reason": "rehearse on real shapes",
+        }),
+        &here,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let space = body["rows"][0]["clone"]["space"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(body["rows"][0]["clone"]["fromTenant"], p.tenant.as_str());
+    assert!(body["rows"][0]["clone"].get("fromName").is_none(), "{body}");
+    assert!(
+        !body.to_string().contains("acme"),
+        "the clone's answer: {body}"
+    );
+
+    // The tables a real deployment boots with, which the list reads.
+    ordo_exec::spacedb::ensure_table(&p.staging).await.unwrap();
+    ordo_host::fleet::ensure_tables(&p.staging).await.unwrap();
+    for op in [clones::CLONES, ordo_host::fleet::TENANTS] {
+        let (status, body) = call(&p.staging_address, "GET", op, HOME, None, &here).await;
+        assert_eq!(status, 200, "{op}: {body}");
+        assert!(
+            body.to_string().contains(&space),
+            "{op} lists the clone: {body}"
+        );
+        assert!(!body.to_string().contains("acme"), "{op}: {body}");
+    }
+    for t in ["$clones", "$spaces", "$promotions"] {
+        assert!(!table_text(&p.staging, t).await.contains("acme"), "{t}");
+    }
+    let events = p
+        .staging_stream
+        .drain_all(ordo_commandlog::Timestamp(u64::MAX / 2));
+    assert!(!events.is_empty());
+    assert!(!format!("{events:?}").contains("acme"), "the stream");
+
+    // An export of the clone, as staging's owner would take one.
+    let f = Fixture::from_source(PROGRAM, "").unwrap();
+    let artifact = ordo_exec::registry::Artifact {
+        version: "0.1.0".into(),
+        artifact: "{}\n".into(),
+        source: PROGRAM.into(),
+        ddl: f.ddl.clone(),
+        applied_at: ordo_commandlog::Timestamp(0),
+        actor: "test".into(),
+    };
+    let dir = std::env::temp_dir().join(format!("ordo-clone-export-{}", std::process::id()));
+    let mut sink = ordo_exec::export::DirectoryBundle::new(&dir);
+    ordo_exec::export::export_space(
+        &p.staging,
+        &ordo_exec::export::ExportRequest {
+            space: &SpaceId(space.clone()),
+            schema: &f.schema,
+            artifact: &artifact,
+            keys: p.staging_keys.as_ref(),
+            blobs: None,
+            sealed: ordo_exec::export::SealedMode::Open,
+            correlation: "exp_clone",
+        },
+        &mut sink,
+    )
+    .await
+    .expect("the clone exports");
+    let mut all = String::new();
+    for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+        if let Ok(text) = std::fs::read_to_string(entry.path()) {
+            all.push_str(&text);
+        }
+    }
+    let data = dir.join("data");
+    if let Ok(files) = std::fs::read_dir(&data) {
+        for entry in files.flatten() {
+            all.push_str(&std::fs::read_to_string(entry.path()).unwrap_or_default());
+        }
+    }
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(all.contains("masked-"), "the export holds the clone's rows");
+    assert!(!all.contains("acme"), "the export: {all}");
+}
+
+/// **A record written before carries no name after the upgrade.** The old
+/// table held `from_name`, and the old default named a clone after it, in
+/// `$clones` and `$spaces`. The first read renames each such clone to the
+/// neutral name, keeps a name the person gave, and drops the column.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_old_clone_record_loses_productions_name_on_upgrade() {
+    let (pool, _pg) = fresh("ordo_clone_c12").await;
+    tenants::ensure_table(&pool).await.unwrap();
+    pool.rows(
+        "CREATE TABLE \"$clones\" (\"space\" text PRIMARY KEY, \"name\" text NOT NULL, \
+         \"from_env\" text NOT NULL, \"from_tenant\" text NOT NULL, \"from_name\" text NOT NULL, \
+         \"version\" text NOT NULL, \"source_id\" text NOT NULL, \"opens_as\" text NOT NULL, \
+         \"rows\" bigint NOT NULL, \"actor\" text NOT NULL, \"reason\" text NOT NULL, \
+         \"at\" bigint NOT NULL)",
+    )
+    .await
+    .unwrap();
+    for (space, name) in [
+        ("spc_old_aaaa11112222", "Ada Lovelace-clone"),
+        ("spc_old_bbbb33334444", "qa-copy"),
+    ] {
+        tenants::reserve(&pool, space, name, ADA, 100, None)
+            .await
+            .unwrap();
+        pool.rows(&format!(
+            "INSERT INTO \"$clones\" VALUES ('{space}', '{name}', 'production', 'spc_prod', \
+             'Ada Lovelace', '0.1.0', 'sid', 'mem_ada', 3, '{ADA}', 'QA', 100)"
+        ))
+        .await
+        .unwrap();
+    }
+    let list = clones::clones(&pool).await.expect("read");
+    let mut names: Vec<_> = list.iter().map(|c| c.name.clone()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["clone-11112222".to_string(), "qa-copy".to_string()]
+    );
+    assert_eq!(
+        tenants::lookup(&pool, "spc_old_aaaa11112222")
+            .await
+            .unwrap()
+            .unwrap()
+            .name,
+        "clone-11112222"
+    );
+    let column = pool
+        .rows(
+            "SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() \
+             AND table_name = '$clones' AND column_name = 'from_name'",
+        )
+        .await
+        .unwrap();
+    assert!(column.is_empty(), "the column is dropped");
+    for t in ["$clones", "$spaces"] {
+        assert!(!table_text(&pool, t).await.contains("Lovelace"), "{t}");
+    }
+    // A second read finds nothing to do.
+    assert_eq!(clones::clones(&pool).await.unwrap().len(), 2);
+}
+
+// ── sinks ────────────────────────────────────────────────────────────────
+
+/// The secret store a function's egress reads. Opening a value fails, so a
+/// call that reached the real kernel says so.
+struct NoValues;
+
+#[async_trait::async_trait]
+impl ordo_egress::SecretSource for NoValues {
+    fn bound_hosts(&self, name: &str) -> Option<Vec<String>> {
+        (name == "llmKey").then(|| vec!["api.example.com".to_string()])
+    }
+    async fn open(
+        &self,
+        _space: &str,
+        name: &str,
+    ) -> Result<Option<ordo_egress::SecretBytes>, ordo_egress::FetchError> {
+        Err(ordo_egress::FetchError::Store {
+            detail: format!("`{name}` was opened"),
+        })
+    }
+}
+
+fn llm_call(url: &str) -> ordo_egress::FnFetchRequest {
+    ordo_egress::FnFetchRequest {
+        method: "POST".into(),
+        url: url.into(),
+        headers: vec![
+            (
+                "x-api-key".into(),
+                ordo_egress::HeaderValue::Secret {
+                    name: "llmKey".into(),
+                    template: "{}".into(),
+                },
+            ),
+            (
+                "content-type".into(),
+                ordo_egress::HeaderValue::Plain("application/json".into()),
+            ),
+        ],
+        body: br#"{"text":"masked-1a2b"}"#.to_vec(),
+        egress: vec!["api.example.com".into(), "other.example.com".into()],
+        secrets: vec!["llmKey".into()],
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nothing_a_clone_sends_leaves_staging_and_the_sink_shows_it() {
+    use ordo_egress::FnFetch;
+    let p = pair("c6", PROGRAM).await;
+    let done = clone_as(&p, ADA, p.issuer.token(ADA, "production"))
+        .await
+        .expect("cloned");
+    let space = done.record.space.clone();
+    let fetch = ordo_host::sinks::SinkFetch::new(
+        ordo_egress::FnEgress::new(
+            Arc::new(NoValues),
+            ordo_egress::TlsRoots::webpki(),
+            ordo_egress::DenyList::default(),
+        ),
+        p.staging.clone(),
+    );
+
+    // ── egress ──
+    // A clone's call is recorded and answered; no secret is opened and
+    // nothing is dialled.
+    let answer = fetch
+        .fetch(&space, llm_call("https://api.example.com/v1/messages"))
+        .await
+        .expect("the sink answers");
+    assert_eq!(answer.status, 200);
+    assert_eq!(answer.body, b"{}");
+    assert!(answer
+        .headers
+        .iter()
+        .any(|(k, v)| k == ordo_host::sinks::SINK_HEADER && v == "recorded"));
+    // A call the real kernel refuses is refused here too: a host off the
+    // function's list, a secret not bound to the host.
+    let mut off = llm_call("https://evil.example.net/x");
+    off.headers.truncate(1);
+    let e = fetch.fetch(&space, off).await.unwrap_err();
+    assert_eq!(e.kind(), "host_not_allowed", "{e}");
+    let e = fetch
+        .fetch(&space, llm_call("https://other.example.com/x"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind(), "secret_host_mismatch", "{e}");
+    // `clone.sinks` is `on` by default: every tenant of a staging
+    // deployment is sunk, a clone or not (D17, "in staging").
+    let answer = fetch
+        .fetch(
+            "spc_not_a_clone",
+            llm_call("https://api.example.com/v1/messages"),
+        )
+        .await
+        .expect("staging's own tenant is sunk too");
+    assert_eq!(answer.status, 200);
+    // On production a tenant's call goes out through the kernel: it opens
+    // the secret, which this store refuses.
+    let prod_fetch = ordo_host::sinks::SinkFetch::new(
+        ordo_egress::FnEgress::new(
+            Arc::new(NoValues),
+            ordo_egress::TlsRoots::webpki(),
+            ordo_egress::DenyList::default(),
+        ),
+        p.prod.clone(),
+    );
+    let e = prod_fetch
+        .fetch(&p.tenant, llm_call("https://api.example.com/v1/messages"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind(), "secret_store_unavailable", "{e}");
+    // `off` is no value: a clone's sends always go to the sink. The
+    // refusal names the values it takes.
+    let staging_admin = p.issuer.token(ADA, "staging");
+    let (status, body) = post(
+        &p.staging_address,
+        clones::SET_CLONE_SETTING,
+        json!({"setting": "clone.sinks", "value": "off", "reason": "try"}),
+        &staging_admin,
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.to_string().contains("`clones`"), "{body}");
+    // `clones` narrows it to the clones: staging's own tenant goes out
+    // through the kernel, and the clone is still sunk.
+    let (status, body) = post(
+        &p.staging_address,
+        clones::SET_CLONE_SETTING,
+        json!({"setting": "clone.sinks", "value": "clones", "reason": "QA calls a sandbox"}),
+        &staging_admin,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0]["sinks"], "clones");
+    let e = fetch
+        .fetch(
+            "spc_not_a_clone",
+            llm_call("https://api.example.com/v1/messages"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind(), "secret_store_unavailable", "{e}");
+
+    // ── mail ──
+    // A routine's notice in a clone is recorded, and nothing is queued,
+    // even with the deployment's mail on.
+    let now = ordo_host::runtime::now_secs();
+    let told = ordo_host::routines::tell(
+        &p.staging,
+        true,
+        "fireReminders",
+        &space,
+        &["$clone:mem_ada".to_string()],
+        "A reminder on one of your notes is due",
+        now,
+    )
+    .await;
+    assert_eq!(told, 1);
+    let queued = p
+        .staging
+        .rows("SELECT count(*) FROM \"$mailoutbox\"")
+        .await
+        .map(|r| r[0][0].clone().unwrap_or_default())
+        .unwrap_or_else(|_| "0".into());
+    assert_eq!(queued, "0", "no mail was queued");
+    // With `clones`, staging's own tenant is not sunk: with mail off,
+    // nothing is told.
+    let told = ordo_host::routines::tell(
+        &p.staging,
+        false,
+        "fireReminders",
+        "spc_not_a_clone",
+        &["p_someone".to_string()],
+        "x",
+        now,
+    )
+    .await;
+    assert_eq!(told, 0);
+    // Back to `on`: staging's own tenant's notice goes to the sink.
+    let (status, body) = post(
+        &p.staging_address,
+        clones::SET_CLONE_SETTING,
+        json!({"setting": "sinks", "value": "on", "reason": "all of staging"}),
+        &staging_admin,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let told = ordo_host::routines::tell(
+        &p.staging,
+        false,
+        "fireReminders",
+        "spc_not_a_clone",
+        &["p_someone".to_string()],
+        "x",
+        now,
+    )
+    .await;
+    assert_eq!(told, 1);
+    // On production, nothing goes to the sink.
+    let told = ordo_host::routines::tell(
+        &p.prod,
+        false,
+        "fireReminders",
+        &p.tenant,
+        &["p_someone".to_string()],
+        "x",
+        now,
+    )
+    .await;
+    assert_eq!(told, 0);
+
+    // ── the door reads it back, to a deployment admin alone ──
+    let (status, body) = call(
+        &p.staging_address,
+        "GET",
+        &format!("{}?tenant={space}", clones::SINKS),
+        HOME,
+        None,
+        &p.issuer.token(ADA, "staging"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let entries = body["rows"][0]["entries"].as_array().expect("entries");
+    assert_eq!(entries.len(), 2, "{body}");
+    let mail = &entries[0];
+    assert_eq!(mail["kind"], "mail");
+    assert_eq!(mail["target"], "$clone:mem_ada");
+    assert_eq!(mail["summary"], "A reminder on one of your notes is due");
+    let call_entry = &entries[1];
+    assert_eq!(call_entry["kind"], "egress");
+    assert_eq!(
+        call_entry["target"],
+        "POST https://api.example.com/v1/messages"
+    );
+    assert_eq!(call_entry["summary"], "headers: x-api-key, content-type");
+    assert!(call_entry["body"].as_str().unwrap().contains("masked-1a2b"));
+    // By the clone's name too.
+    let (status, body) = call(
+        &p.staging_address,
+        "GET",
+        &format!("{}?tenant={}", clones::SINKS, clones::default_name(&space)),
+        HOME,
+        None,
+        &p.issuer.token(ADA, "staging"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0]["entries"].as_array().unwrap().len(), 2);
+    // A person who is no deployment admin reads nothing.
+    let (status, _) = call(
+        &p.staging_address,
+        "GET",
+        clones::SINKS,
+        HOME,
+        None,
+        &app_token("p_tester"),
+    )
+    .await;
+    assert_ne!(status, 200);
+}
+
+// ── storage of its own ───────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tenant_with_its_own_database_is_cloned_onto_one_staging_makes() {
+    let p = pair("c7", PROGRAM).await;
+    // Production's tenant sits on a database of its own.
+    tenants::at_phase(
+        &p.prod,
+        &p.tenant,
+        tenants::Phase::Founded,
+        "production-tenants/acme",
+        100,
+    )
+    .await
+    .unwrap();
+
+    // Without tenant databases to give, the clone shares staging's and
+    // the answer says so.
+    let shared = clone_as(&p, ADA, p.issuer.token(ADA, "production"))
+        .await
+        .expect("cloned");
+    assert_eq!(shared.database, clones::Storage::NotGiven);
+
+    // Staging as the runtime assembles it: every tenant a database of its
+    // own, on its own cluster, with its own credential.
+    let f = Arc::new({
+        let mut f = Fixture::from_source(PROGRAM, "").unwrap();
+        f.keys = p.staging_keys.clone();
+        f
+    });
+    let serving = ordo_host::deploy::Deployment::pinned_with_platform_ops(
+        "0.1.0",
+        f.clone(),
+        ordo_exec::Executor {
+            pool: p.staging.clone(),
+            schema: f.schema.clone(),
+            registry: f.registry.clone(),
+            keys: f.keys.clone(),
+            space: ordo_conformance::fixture_space(),
+        },
+        platform_ops::specs(),
+    )
+    .unwrap();
+    let own = ordo_exec::PoolConfig::from_env().password.clone();
+    let creds = ordo_host::runtime::tenant_credentials(None, own);
+    let template = ordo_exec::PoolConfig {
+        size: 2,
+        ..ordo_exec::PoolConfig::from_env()
+    };
+    // The deployment's own space, which provisioning asks the keys about.
+    let _ = p
+        .staging_keys
+        .create_space(&SpaceId(ordo_host::provision::SYSTEM_SPACE.to_string()));
+    let routing = ordo_host::tenant_ops::TenantOps::with_routing(
+        p.staging.clone(),
+        p.staging_keys.clone(),
+        HOME,
+        ordo_host::tenant_ops::Routing {
+            serving,
+            credentials: creds.clone(),
+            template: template.clone(),
+            hosts: ordo_host::provision::HostAllowlist::of(&ordo_exec::PoolConfig::from_env().host),
+            default_cluster: ordo_host::tenant_ops::TenantCluster::from_env(
+                &ordo_exec::PoolConfig::from_env(),
+            ),
+            stream: None,
+        },
+    );
+    let resolver =
+        ordo_exec::route::AttachedPools::new(p.staging.clone(), p.staging.clone(), template, creds);
+    let token = p.issuer.token(ADA, "production");
+    let done = clones::clone_in(
+        &p.staging,
+        &resolver,
+        &p.staging_keys,
+        HOME,
+        Some(routing.as_ref()),
+        CloneInRequest {
+            from: "production",
+            tenant: "acme",
+            token: &token,
+            name: Some("acme-own"),
+            reason: "rehearse on its own database",
+        },
+        ADA,
+        3_000,
+    )
+    .await
+    .expect("cloned onto its own database");
+    let space = done.record.space.clone();
+    assert!(
+        matches!(done.database, clones::Storage::Own(_)),
+        "{:?}",
+        done.database
+    );
+
+    // Staging attached a database named for the clone, on its own cluster.
+    let attached = ordo_exec::spacedb::lookup(&p.staging, &SpaceId(space.clone()))
+        .await
+        .unwrap()
+        .expect("an attachment");
+    assert_eq!(attached.db, space, "the database is the clone's own");
+    // The rows are there, and not in staging's shared database.
+    let own_pool = Pool::connect(PoolConfig {
+        db: space.clone(),
+        size: 1,
+        ..PoolConfig::from_env()
+    })
+    .await
+    .unwrap();
+    let n = own_pool
+        .rows(&format!(
+            "SELECT count(*) FROM \"notes\" WHERE \"$space\" = '{space}'"
+        ))
+        .await
+        .unwrap();
+    assert_eq!(n[0][0].as_deref(), Some("2"));
+    let all = everything_in(&own_pool, &space).await;
+    for real in REAL {
+        assert!(!all.contains(real), "`{real}` reached the clone's database");
+    }
+    assert_eq!(everything_in(&p.staging, &space).await, "");
+    drop(own_pool);
+    let _ = p
+        .staging_pg
+        .exec(&format!("DROP DATABASE IF EXISTS \"{space}\" WITH (FORCE)"));
+}
+
+// ── the signed rehearsal (increment 12b) ─────────────────────────────────
+
+/// The program at 0.2.0, with a new required field filled from the title:
+/// a step only a stored plan makes (B2), so the rehearsal runs it.
+fn program_v2() -> String {
+    PROGRAM
+        .replace("@ 0.1.0", "@ 0.2.0")
+        .replace("  tags: json = []\n", "  tags: json = []\n  mood: text\n")
+}
+
+/// The plan's options: `notes.mood` filled from each note's title.
+fn fill() -> ordo_host::schema_apply::Choices {
+    ordo_host::evolve::typed_options("", "notes.mood=title", "", "").expect("options")
+}
+
+/// Store 0.2.0 on `pool`, not activated.
+async fn store_v2(pool: &Pool) {
+    apply_op::run(
+        pool,
+        &SinglePool::new(pool.clone()),
+        &program_v2(),
+        &apply_op::CodeFiles::new(),
+        ADA,
+        "t",
+        false,
+    )
+    .await
+    .expect("0.2.0 stored");
+}
+
+/// A pair where both hold 0.2.0, production knows where staging answers,
+/// staging holds a clone of `acme` and the stored plan 0.1.0 to 0.2.0.
+/// Answers the pair, the clone's space and the plan staging stored.
+async fn rehearsal_pair(stem: &str) -> (Pair, String, ordo_host::evolve::StoredPlan) {
+    let p = pair(stem, PROGRAM).await;
+    store_v2(&p.staging).await;
+    store_v2(&p.prod).await;
+    Environments::on(&p.prod)
+        .set_door(
+            "staging",
+            Some(Door {
+                address: p.staging_address.clone(),
+                space: HOME.to_string(),
+                handle: Some("staging".to_string()),
+            }),
+            "where staging answers",
+        )
+        .await
+        .expect("door");
+    let done = clone_as(&p, ADA, p.issuer.token(ADA, "production"))
+        .await
+        .expect("cloned");
+    let staged = ordo_host::evolve::evolve(&p.staging, "0.1.0", "0.2.0", &fill(), None, ADA, 3_000)
+        .await
+        .expect("staging stores the plan");
+    (p, done.record.space, staged.plan)
+}
+
+/// Production's own plan for the step, stored, and its run on
+/// production's database.
+#[allow(clippy::result_large_err)]
+async fn run_on_production(
+    p: &Pair,
+) -> Result<ordo_host::evolve::StepRun, ordo_host::evolve::EvolveRefusal> {
+    let stored = ordo_host::evolve::evolve(&p.prod, "0.1.0", "0.2.0", &fill(), None, ADA, 3_000)
+        .await
+        .expect("production stores the plan");
+    ordo_host::evolve::run_step(&p.prod, &p.prod, "default", &stored.plan, ADA).await
+}
+
+fn rehearse_body(clone: &str) -> Value {
+    json!({
+        "from": "0.1.0", "to": "0.2.0", "tenants": clone,
+        "reason": "the mood field on real shapes",
+    })
+}
+
+fn accept_body(p: &Pair, who: &str) -> Value {
+    json!({"from": "0.1.0", "to": "0.2.0", "fromToken": p.issuer.token(who, "staging")})
+}
+
+/// Whether the database lacks `notes.mood`.
+async fn lacks_mood(pool: &Pool) -> bool {
+    pool.rows(
+        "SELECT 1 FROM information_schema.columns WHERE table_name = 'notes' \
+         AND column_name = 'mood'",
+    )
+    .await
+    .unwrap()
+    .is_empty()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn production_runs_only_a_plan_digest_staging_signed() {
+    use ordo_host::rehearsals;
+    let (p, clone, staged) = rehearsal_pair("r1").await;
+    let prod = || p.issuer.token(ADA, "production");
+
+    // Production refuses the step: staging signed nothing.
+    let e = run_on_production(&p).await.unwrap_err();
+    assert_eq!(e.class(), "plan_not_rehearsed", "{e}");
+    assert!(e.to_string().contains("ordo rehearsals rehearse"), "{e}");
+    assert!(e.to_string().contains("ordo rehearsals accept"), "{e}");
+    assert!(e.to_string().contains("skip-staging"), "{e}");
+    assert!(lacks_mood(&p.prod).await, "nothing ran on production");
+
+    // Accepting before staging rehearsed names the command.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::ACCEPT,
+        accept_body(&p, ADA),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(body.to_string().contains("rehearsal_not_signed"), "{body}");
+    assert!(
+        body.to_string().contains("ordo rehearsals rehearse"),
+        "{body}"
+    );
+
+    // Staging rehearses on the clone, through its door, and signs.
+    let (status, body) = post(
+        &p.staging_address,
+        rehearsals::REHEARSE,
+        rehearse_body(&clone),
+        &p.issuer.token(ADA, "staging"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let a = &body["rows"][0]["rehearsal"]["attestation"];
+    assert_eq!(a["digest"], staged.digest.as_str());
+    assert_eq!(a["env"], "staging");
+    assert_eq!(a["result"], "green");
+    assert_eq!(a["clones"], json!([clone]));
+    assert_eq!(a["release"], ordo_host::release_check::release());
+    assert_eq!(a["notReproducible"], json!([]));
+    assert!(a["build"].as_str().unwrap().len() > 10);
+    // The clone moved to 0.2.0, and its database holds the new field.
+    let pin = Versions::on(&p.staging)
+        .pin_of(&clone)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pin.version.as_deref(), Some("0.2.0"));
+    assert!(!lacks_mood(&p.staging).await);
+    assert!(acts(&p.staging_stream).contains(&"rehearsed".to_string()));
+
+    // Production accepts it: read from staging as the person, the
+    // signature checked, the plan rendered here to the same digest.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::ACCEPT,
+        accept_body(&p, ADA),
+        &prod(),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let row = &body["rows"][0];
+    assert_eq!(row["digest"], staged.digest.as_str());
+    assert_eq!(
+        row["keyRecorded"], true,
+        "the key is recorded the first time"
+    );
+    assert!(acts(&p.prod_stream).contains(&"rehearsal-accepted".to_string()));
+
+    // Now the signed digest runs on production.
+    let ran = run_on_production(&p).await.expect("the signed step runs");
+    assert!(
+        matches!(ran, ordo_host::evolve::StepRun::Ran { .. }),
+        "{ran:?}"
+    );
+    assert!(!lacks_mood(&p.prod).await);
+
+    // A digest staging did not sign is still refused, naming the one that
+    // was accepted.
+    let other = ordo_host::evolve::StoredPlan {
+        digest: "sha256:0000".into(),
+        ..staged.clone()
+    };
+    let e = rehearsals::require_rehearsed(&p.prod, &other)
+        .await
+        .unwrap_err();
+    assert_eq!(e.class(), "plan_not_rehearsed");
+    assert!(e.to_string().contains(&staged.digest), "{e}");
+
+    // An edited attestation does not verify: staging's stored text is
+    // changed, and accepting it again is refused.
+    p.staging
+        .rows("UPDATE \"$rehearsals\" SET \"body\" = replace(\"body\", 'green', 'GREEN')")
+        .await
+        .unwrap();
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::ACCEPT,
+        accept_body(&p, ADA),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(
+        body.to_string().contains("rehearsal_bad_signature"),
+        "{body}"
+    );
+
+    // Staging needs no key set up (Q11): it made its own, and answers its
+    // public half.
+    let (status, body) = call(
+        &p.staging_address,
+        "GET",
+        rehearsals::REHEARSALS,
+        HOME,
+        None,
+        &p.issuer.token(ADA, "staging"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0]["key"].as_str().unwrap().len(), 64);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_rehearsal_refusal_names_its_fix() {
+    use ordo_host::rehearsals;
+    let (p, clone, _) = rehearsal_pair("r2").await;
+    let prod = || p.issuer.token(ADA, "production");
+    let rehearse_as = |token: String, body: Value| {
+        let address = p.staging_address.clone();
+        async move { post(&address, rehearsals::REHEARSE, body, &token).await }
+    };
+
+    // Production does not rehearse: it is not staging.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::REHEARSE,
+        rehearse_body("anything"),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200);
+    assert!(body.to_string().contains("set-own staging"), "{body}");
+
+    // A tenant that is not a clone.
+    let (status, body) = rehearse_as(
+        p.issuer.token(ADA, "staging"),
+        rehearse_body("spc_live_tenant"),
+    )
+    .await;
+    assert_ne!(status, 200);
+    assert!(body.to_string().contains("ordo clones clone"), "{body}");
+
+    // A step staging stored no plan for.
+    let (status, body) = rehearse_as(
+        p.issuer.token(ADA, "staging"),
+        json!({"from": "0.2.0", "to": "0.1.0", "tenants": clone, "reason": "back"}),
+    )
+    .await;
+    assert_ne!(status, 200);
+    assert!(body.to_string().contains("no_stored_path"), "{body}");
+
+    // Q12: a person staging allows may rehearse; anyone else may not.
+    let (status, _) = rehearse_as(app_token("p_tester"), rehearse_body(&clone)).await;
+    assert_eq!(status, 403, "not allowed yet");
+    let (status, body) = post(
+        &p.staging_address,
+        clones::SET_CLONE_SETTING,
+        json!({"setting": "clone.readers", "value": "p_tester", "reason": "QA rehearses"}),
+        &p.issuer.token(ADA, "staging"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, _) = rehearse_as(app_token("p_other"), rehearse_body(&clone)).await;
+    assert_eq!(status, 403, "a person staging does not allow");
+    // Allowed to rehearse, and nothing else in the deployment's space.
+    let (status, _) = call(
+        &p.staging_address,
+        "GET",
+        rehearsals::REHEARSALS,
+        HOME,
+        None,
+        &app_token("p_tester"),
+    )
+    .await;
+    assert_eq!(status, 403, "a clone reader reads no rehearsal list");
+    let (status, body) = rehearse_as(app_token("p_tester"), rehearse_body(&clone)).await;
+    assert_eq!(status, 200, "an allowed person rehearses: {body}");
+    assert_eq!(
+        body["rows"][0]["rehearsal"]["attestation"]["actor"],
+        "p_tester"
+    );
+
+    // The clone is on 0.2.0 now: rehearsing again names a fresh clone.
+    let (status, body) = rehearse_as(p.issuer.token(ADA, "staging"), rehearse_body(&clone)).await;
+    assert_ne!(status, 200);
+    assert!(
+        body.to_string().contains("rehearsal_clone_version"),
+        "{body}"
+    );
+
+    // Production: another person read staging.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::ACCEPT,
+        accept_body(&p, BOB),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200);
+    assert!(body.to_string().contains("ordo login"), "{body}");
+
+    // Too old for `promotion.attestation_max_age`: the refusal names it.
+    Environments::on(&p.prod)
+        .set_promotion_setting("attestation-max-age", "1s", ADA, "short", 1)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::ACCEPT,
+        accept_body(&p, ADA),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200);
+    assert!(body.to_string().contains("attestation_max_age"), "{body}");
+    Environments::on(&p.prod)
+        .set_promotion_setting("attestation-max-age", "7d", ADA, "back", 1)
+        .await
+        .unwrap();
+
+    // Production recorded another key for staging (staging lost its key
+    // row since): the new key is refused until the person names it.
+    p.prod
+        .rows(
+            "CREATE TABLE IF NOT EXISTS \"$rehearsal_keys\" (\"env\" text PRIMARY KEY, \
+             \"public\" text NOT NULL, \"actor\" text NOT NULL, \"at\" bigint NOT NULL)",
+        )
+        .await
+        .unwrap();
+    p.prod
+        .rows(&format!(
+            "INSERT INTO \"$rehearsal_keys\" VALUES ('staging', '{}', 'p_ada', 1)",
+            "ab".repeat(32)
+        ))
+        .await
+        .unwrap();
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::ACCEPT,
+        accept_body(&p, ADA),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200);
+    assert!(body.to_string().contains("rehearsal_key_changed"), "{body}");
+    let (_, listed) = call(
+        &p.staging_address,
+        "GET",
+        rehearsals::REHEARSALS,
+        HOME,
+        None,
+        &p.issuer.token(ADA, "staging"),
+    )
+    .await;
+    let new_key = listed["rows"][0]["key"].as_str().unwrap().to_string();
+    assert!(
+        body.to_string().contains(&format!("--trust-key {new_key}")),
+        "{body}"
+    );
+    let mut named = accept_body(&p, ADA);
+    named["trustKey"] = json!(new_key);
+    let (status, body) = post(&p.prod_address, rehearsals::ACCEPT, named, &prod()).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0]["keyRecorded"], true);
+    // Accepted again under the recorded key: nothing new to record.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::ACCEPT,
+        accept_body(&p, ADA),
+        &prod(),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0]["keyRecorded"], false);
+
+    // No staging before it: nothing to accept, and the refusal says how to
+    // require one.
+    Environments::on(&p.prod)
+        .set_promotion_setting("skip-staging", "on", ADA, "no staging", 1)
+        .await
+        .unwrap();
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::ACCEPT,
+        accept_body(&p, ADA),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200);
+    assert!(body.to_string().contains("rehearsal_no_staging"), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn past_staging_an_apply_makes_no_rename_without_a_rehearsal() {
+    let p = pair("r3", PROGRAM).await;
+    let renamed = PROGRAM
+        .replace("@ 0.1.0", "@ 0.2.0")
+        .replace("  title: text\n", "  heading: text = \"\" prev(title)\n")
+        .replace("notes[title, body", "notes[heading, body");
+    let apply = |activate: bool| {
+        let body = json!({"program": renamed, "activate": activate});
+        let (address, token) = (p.prod_address.clone(), p.issuer.token(ADA, "production"));
+        async move { post(&address, apply_op::APPLY, body, &token).await }
+    };
+    let has_heading = || async {
+        !p.prod
+            .rows(
+                "SELECT 1 FROM information_schema.columns WHERE table_name = 'notes' \
+                 AND column_name = 'heading'",
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    };
+
+    // Stored without activating (the way round 3 of the e2e found an
+    // apply moving production's database): kept, and the rename not made.
+    let (status, body) = apply(false).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(!has_heading().await, "the rename ran");
+
+    // Arrived through the gate (as a promotion records it) and activated:
+    // refused, naming the rehearsal; still nothing renamed.
+    ordo_host::promotion::promotions(&p.prod, 1).await.unwrap();
+    p.prod
+        .rows(
+            "INSERT INTO \"$promotions\" (\"version\", \"from_env\", \"to_env\", \
+             \"source_id\", \"actor\", \"reason\", \"at\") \
+             VALUES ('0.2.0', 'staging', 'production', 'x', 'p_ada', 'test', 1)",
+        )
+        .await
+        .unwrap();
+    let (status, body) = apply(true).await;
+    assert_ne!(status, 200, "{body}");
+    assert!(body.to_string().contains("plan_not_rehearsed"), "{body}");
+    assert!(
+        body.to_string().contains("ordo rehearsals rehearse"),
+        "{body}"
+    );
+    assert!(!has_heading().await, "the rename ran");
+
+    // Without staging before it, the same apply makes the rename itself.
+    Environments::on(&p.prod)
+        .set_promotion_setting("skip-staging", "on", ADA, "no staging", 1)
+        .await
+        .unwrap();
+    let (status, body) = apply(true).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(has_heading().await, "the rename was made");
+}
+
+/// **Break-glass** (§3.2 item 6): when staging does not answer, the
+/// deployment owner lets the stored plan of one step run without a
+/// rehearsal, with a recorded reason, for 1 hour. Each way past without it
+/// is refused: no reason, no stored plan, staging answering, a machine key,
+/// another digest, and an ended break-glass.
+#[tokio::test(flavor = "multi_thread")]
+async fn break_glass_runs_one_step_when_staging_is_down_and_nothing_else() {
+    use ordo_host::rehearsals;
+    let (p, _clone, _) = rehearsal_pair("r4").await;
+    let prod = || p.issuer.token(ADA, "production");
+    let glass = |reason: &str| json!({"from": "0.1.0", "to": "0.2.0", "reason": reason});
+
+    // No reason: refused, naming the flag.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::BREAK_GLASS,
+        glass("  "),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(body.to_string().contains("--reason"), "{body}");
+
+    // No plan stored here for the step: refused, naming `ordo evolve`.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::BREAK_GLASS,
+        glass("staging is down"),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(body.to_string().contains("break_glass_no_plan"), "{body}");
+    assert!(
+        body.to_string()
+            .contains("ordo evolve --from 0.1.0 --to 0.2.0"),
+        "{body}"
+    );
+
+    // The step is refused, and the refusal names break-glass too.
+    let e = run_on_production(&p).await.unwrap_err();
+    assert_eq!(e.class(), "plan_not_rehearsed", "{e}");
+    assert!(e.to_string().contains("ordo rehearsals break-glass"), "{e}");
+
+    // Staging answers: break-glass is refused, naming the rehearsal and
+    // skip-staging. The try is on the stream.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::BREAK_GLASS,
+        glass("staging is slow"),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(
+        body.to_string().contains("break_glass_staging_answers"),
+        "{body}"
+    );
+    assert!(
+        body.to_string().contains("ordo rehearsals accept"),
+        "{body}"
+    );
+    assert!(body.to_string().contains("skip-staging"), "{body}");
+    let seen = acts(&p.prod_stream);
+    assert!(
+        seen.contains(&"break-glass-refused".to_string()),
+        "{seen:?}"
+    );
+
+    // Staging goes down: its recorded door answers nothing.
+    let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_address = format!("http://{}", dead.local_addr().unwrap());
+    drop(dead);
+    Environments::on(&p.prod)
+        .set_door(
+            "staging",
+            Some(Door {
+                address: dead_address,
+                space: HOME.to_string(),
+                handle: Some("staging".to_string()),
+            }),
+            "staging is down",
+        )
+        .await
+        .expect("door");
+
+    // A machine key never breaks glass, even with the `deployment` grant.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::BREAK_GLASS,
+        glass("a system tries"),
+        &p.issuer.machine("production"),
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+
+    // The deployment owner breaks glass: recorded with the reason, what
+    // staging said and when it ends; the stream marks it.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::BREAK_GLASS,
+        glass("staging's cluster is down; hotfix 0.2.0"),
+        &prod(),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let row = &body["rows"][0];
+    assert_eq!(row["env"], "staging");
+    assert_eq!(row["reason"], "staging's cluster is down; hotfix 0.2.0");
+    assert!(
+        row["stagingSaid"]
+            .as_str()
+            .unwrap()
+            .contains("could not be reached"),
+        "{row}"
+    );
+    assert_eq!(
+        row["until"].as_u64().unwrap() - row["at"].as_u64().unwrap(),
+        rehearsals::BREAK_GLASS_SECS
+    );
+    let digest = row["digest"].as_str().unwrap().to_string();
+    let seen = acts(&p.prod_stream);
+    assert!(seen.contains(&"break-glass".to_string()), "{seen:?}");
+
+    // The list shows it, active, with the reason and the person.
+    let (status, listed) = call(
+        &p.prod_address,
+        "GET",
+        rehearsals::REHEARSALS,
+        HOME,
+        None,
+        &prod(),
+    )
+    .await;
+    assert_eq!(status, 200, "{listed}");
+    let g = &listed["rows"][0]["brokenGlass"][0];
+    assert_eq!(g["digest"], digest.as_str());
+    assert_eq!(g["actor"], ADA);
+    assert_eq!(g["active"], true);
+    assert_eq!(g["reason"], "staging's cluster is down; hotfix 0.2.0");
+
+    // The step's stored plan runs now.
+    let ran = run_on_production(&p)
+        .await
+        .expect("the step runs under break-glass");
+    assert!(
+        matches!(ran, ordo_host::evolve::StepRun::Ran { .. }),
+        "{ran:?}"
+    );
+    assert!(!lacks_mood(&p.prod).await);
+
+    // Another digest for the same step is still refused.
+    let plan = ordo_host::evolve::Plans::on(&p.prod)
+        .latest("0.1.0", "0.2.0")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(plan.digest, digest);
+    let other = ordo_host::evolve::StoredPlan {
+        digest: "sha256:0000".into(),
+        ..plan.clone()
+    };
+    let e = rehearsals::require_rehearsed(&p.prod, &other)
+        .await
+        .unwrap_err();
+    assert_eq!(e.class(), "plan_not_rehearsed");
+
+    // Once it ends, the same digest is refused again, and the list says
+    // it ended.
+    p.prod
+        .rows("UPDATE \"$rehearsal_break_glass\" SET \"until\" = 1")
+        .await
+        .unwrap();
+    let e = rehearsals::require_rehearsed(&p.prod, &plan)
+        .await
+        .unwrap_err();
+    assert_eq!(e.class(), "plan_not_rehearsed");
+    let (_, listed) = call(
+        &p.prod_address,
+        "GET",
+        rehearsals::REHEARSALS,
+        HOME,
+        None,
+        &prod(),
+    )
+    .await;
+    assert_eq!(listed["rows"][0]["brokenGlass"][0]["active"], false);
+}
+
+// ── the size cap ─────────────────────────────────────────────────────────
+
+/// **A clone over `clone.max_size` is refused by name, and nothing is
+/// made.** Production holds a note whose title, a safe field, weighs about 2 MiB.
+/// Staging's cap is set to 1 MiB through its door: the clone is refused
+/// naming the setting and the command that raises it, and staging holds no
+/// clone. A value that is no size is refused naming the forms. Raised to
+/// 8 MiB through the door, the same clone arrives.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clone_over_the_cap_is_refused_naming_the_setting_that_raises_it() {
+    let p = pair("cap", PROGRAM).await;
+    let prod_token = || p.issuer.token(ADA, "production");
+    let staging_token = || p.issuer.token(ADA, "staging");
+
+    // The field is carried (safe), and weighs about 2 MiB.
+    let (status, body) = post(
+        &p.prod_address,
+        clones::SET_CLONE_SETTING,
+        json!({"setting": "clone.mask", "value": "notes.title", "reason": "titles are safe here"}),
+        &prod_token(),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    p.prod
+        .rows(
+            "UPDATE \"notes\" SET \"title\" = \
+             (SELECT string_agg(md5(g::text), '') FROM generate_series(1, 60000) g) \
+             WHERE \"id\" = 'not_1'",
+        )
+        .await
+        .expect("a heavy field");
+
+    // The default cap is 64 MiB.
+    let (status, body) = call(
+        &p.staging_address,
+        "GET",
+        clones::CLONES,
+        HOME,
+        None,
+        &staging_token(),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0]["maxSize"], "64MiB", "{body}");
+
+    // A cap that is no size is refused naming the forms it takes.
+    for bad in ["0", "big", "2048MiB", "-1", ""] {
+        let (status, body) = post(
+            &p.staging_address,
+            clones::SET_CLONE_SETTING,
+            json!({"setting": "clone.max_size", "value": bad, "reason": "x"}),
+            &staging_token(),
+        )
+        .await;
+        assert_eq!(status, 400, "{bad}: {body}");
+        assert!(body.to_string().contains("<n>MiB"), "{bad}: {body}");
+    }
+
+    // Capped at 1 MiB, the clone is refused, naming the setting and the fix.
+    let (status, body) = post(
+        &p.staging_address,
+        clones::SET_CLONE_SETTING,
+        json!({"setting": "max-size", "value": "1MiB", "reason": "a small staging"}),
+        &staging_token(),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0]["maxSize"], "1MiB", "{body}");
+    let e = clone_as(&p, ADA, prod_token()).await.unwrap_err();
+    assert!(
+        matches!(e, CloneRefusal::TooLarge { max_mib: 1, .. }),
+        "{e}"
+    );
+    let said = e.to_string();
+    assert!(said.contains("clone.max_size"), "{said}");
+    assert!(said.contains("ordo clones set max-size"), "{said}");
+    assert!(
+        clones::clones(&p.staging).await.unwrap().is_empty(),
+        "nothing is made for a clone that was refused"
+    );
+
+    // Raised through the door, the same clone arrives with its field whole.
+    let (status, body) = post(
+        &p.staging_address,
+        clones::SET_CLONE_SETTING,
+        json!({"setting": "clone.max_size", "value": "8MiB", "reason": "this one is big"}),
+        &staging_token(),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let done = clone_as(&p, ADA, prod_token()).await.expect("cloned");
+    let weight = p
+        .staging
+        .rows(&format!(
+            "SELECT max(length(\"title\")) FROM \"notes\" WHERE \"$space\" = '{}'",
+            done.record.space
+        ))
+        .await
+        .unwrap();
+    let weight: u64 = weight[0][0].clone().unwrap().parse().unwrap();
+    assert!(weight > 1_500_000, "the field arrived whole: {weight}");
 }

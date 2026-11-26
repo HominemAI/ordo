@@ -181,17 +181,40 @@ const READS: &[&str] = &[
     // A stored version as a promotion's source, with whether it was
     // activated: what `ordo promote` reads as the person promoting.
     "std.deployment.versionSource",
+    // A holder's grant for the calling consumer and each granted op's
+    // shape: another deployment's apply reads it as itself, through the
+    // door for other deployments (`plan-federation-grants.md` §4, G4).
+    "std.peer.grant",
     // The stored plans and their receipts; deployment owner only, home
     // space (versions increment 8).
     "std.deployment.plans",
     // Whether a rollback's version still reads its externals and peers.
     "std.deployment.rollbackCheck",
+    // Where the open or newest rollout stands, and its tenants; deployment
+    // owner only, home space (versions increment 10).
+    "std.deployment.rollout.status",
+    // What versions left behind in every database, and the tombstones;
+    // deployment owner only, home space (versions increment 14).
+    "std.deployment.orphans",
     // Staging's public clone key, which production seals a clone to. Public
     // by design; made on first read (versions increment 12).
     "std.deployment.cloneKey",
     // The clones this deployment holds and the clone settings; deployment
     // owner only, home space.
     "std.deployment.clones",
+    // The dev branches and which are idle; deployment owner only, home
+    // space (increment 5).
+    "std.deployment.branches",
+    // What the staging clones would have sent (mail, push, egress), held
+    // in the sink; deployment owner only, home space (increment 12).
+    "std.deployment.sinks",
+    // Staging's signed rehearsals, its public signing key and the
+    // rehearsals accepted here; deployment owner only, home space. Read by
+    // production as the person accepting (versions increment 12b).
+    "std.deployment.rehearsals",
+    // Every tenant build, its version and the tenants it holds;
+    // deployment owner only, home space (versions increment 16).
+    "std.deployment.tenantBuilds",
     // The open recoveries and successions, with objections: the deployment
     // owner's to read, home space (owner succession, 2026-10-24).
     "std.identity.openCases",
@@ -588,4 +611,32 @@ fn the_per_action_lists_override_the_level() {
     let line = low.describe();
     assert!(line.contains("ORDO_SECURITY_LEVEL=low"), "{line}");
     assert!(line.contains("ORDO_STEP_UP_REQUIRED_OPS"), "{line}");
+}
+
+/// **Breaking glass always asks the deployment owner to reauth** (owner,
+/// 2026-11-25, `signed-rehearsals-three-defaults-to-confirm`): at every
+/// level, with or without `ORDO_STEP_UP_EXEMPT_OPS`. A regression looks
+/// like `ordo rehearsals break-glass` running on a bare session at the
+/// standard level.
+#[test]
+fn breaking_glass_asks_for_reauth_at_every_level() {
+    let glass = ordo_host::rehearsals::BREAK_GLASS;
+    for level in [
+        SecurityLevel::Low,
+        SecurityLevel::Standard,
+        SecurityLevel::High,
+    ] {
+        let d = door(&PresencePolicy::standard().with_level(level));
+        assert!(
+            !allowed(&d, "usr_owner", false, glass),
+            "{level:?}: break-glass ran with no reauth"
+        );
+        assert!(allowed(&d, "usr_owner", true, glass), "{level:?}");
+    }
+    // The exemption list cannot name it, by name or by prefix.
+    let by_prefix = PresencePolicy::parse("std.deployment.*", &names()).expect("prefix");
+    assert!(by_prefix.requires(glass, OpKind::Write));
+    assert!(PresencePolicy::parse(glass, &names())
+        .expect_err("named")
+        .contains(glass));
 }

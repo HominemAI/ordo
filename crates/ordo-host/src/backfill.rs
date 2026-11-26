@@ -67,11 +67,16 @@
 //! declares, and the plan shows both ([`BackfillFunctions`] is handed the
 //! declared lists and nothing else).
 //!
-//! # Live writes
+//! # Live writes (increment 11a)
 //!
-//! Not here. This increment runs with no live writes to the filled entity
-//! in mind; the dual writes that keep a running tenant's writes in the new
-//! shape are increment 11a (B2, B4).
+//! A tenant that moves keeps writing while the worker runs. The move
+//! overlay (`ordo_exec::overlay`) sets each written row's new column by the
+//! same mapping in the write's own transaction, so the worker and a write
+//! agree whichever runs second. A rename (B4) copies every row, since its
+//! new column may hold its default. Verify under live writes
+//! ([`Backfill::verify_live_and_close`]) checks the mapping on every row and
+//! records the count and hash it reads, rather than comparing them with the
+//! chunks', which live writes change by design.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -121,11 +126,101 @@ pub const BACKFILL_LOCK_NS: i32 = 0x424B_464C;
 
 // ── settings ─────────────────────────────────────────────────────────────
 
-/// The worker's settings (`plan-versions.md` §7). Increment 10 stores the
-/// rollout and backfill settings in Ordo (ruled 2026-11-23, Q15); until
-/// then the caller passes these, and [`BackfillSettings::default`] holds the
-/// plan's defaults.
-#[derive(Debug, Clone)]
+/// The backfill settings (`plan-versions.md` §7), stored in
+/// `$version_settings` beside the version and rollout settings (ruled
+/// 2026-11-23, Q15) and set with `ordo versions set backfill.<name> <value>
+/// --reason "..."` (`std.deployment.setVersionSetting`).
+pub const CHUNK_ROWS_SETTING: &str = "backfill.chunk_rows";
+pub const CHUNK_TIMEOUT_SETTING: &str = "backfill.chunk_timeout";
+pub const MAX_ATTEMPTS_SETTING: &str = "backfill.max_attempts";
+pub const BUDGET_SETTING: &str = "backfill.budget";
+/// How many tenants' moves a rollout's turn runs at once (increment 11b
+/// part 2; `plan-versions.md` §7, default 8).
+pub const CONCURRENCY_SETTING: &str = "backfill.concurrency";
+/// How many of those share one database at most (proposed in
+/// `plan-backfill-dual-writes.md` §2, default 2), so the tenants of one
+/// database do not take its whole pool.
+pub const PER_DATABASE_SETTING: &str = "backfill.per_database";
+
+pub const SETTINGS: [&str; 6] = [
+    CHUNK_ROWS_SETTING,
+    CHUNK_TIMEOUT_SETTING,
+    MAX_ATTEMPTS_SETTING,
+    BUDGET_SETTING,
+    CONCURRENCY_SETTING,
+    PER_DATABASE_SETTING,
+];
+
+/// The most moves a turn runs at once, and the most in one database.
+pub const MAX_CONCURRENCY: u32 = 64;
+
+/// The most rows one chunk may take. A chunk is one transaction.
+pub const MAX_CHUNK_ROWS: u32 = 100_000;
+
+/// The full name of a backfill setting from what a person typed:
+/// `backfill.chunk_rows`, `chunk_rows` or `chunk-rows`.
+pub fn setting_name(text: &str) -> Option<&'static str> {
+    let t = text.trim();
+    let t = t.strip_prefix("backfill.").unwrap_or(t).replace('-', "_");
+    SETTINGS
+        .into_iter()
+        .find(|s| s.strip_prefix("backfill.") == Some(t.as_str()))
+}
+
+/// Check a value for `setting` and answer it as stored. `None` clears it.
+pub fn check_setting(
+    setting: &str,
+    value: Option<&str>,
+) -> Result<Option<String>, BackfillRefusal> {
+    let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let bad = |why: &str| BackfillRefusal::Setting {
+        setting: setting.to_string(),
+        value: v.chars().take(40).collect(),
+        why: why.to_string(),
+    };
+    let count = |lo: u32, hi: u32| match v.parse::<u32>() {
+        Ok(n) if (lo..=hi).contains(&n) => Some(n.to_string()),
+        _ => None,
+    };
+    match setting {
+        CHUNK_ROWS_SETTING => count(1, MAX_CHUNK_ROWS).map(Some).ok_or_else(|| {
+            bad(&format!(
+                "it is a whole number of rows, 1 to {MAX_CHUNK_ROWS}"
+            ))
+        }),
+        MAX_ATTEMPTS_SETTING => count(1, 100)
+            .map(Some)
+            .ok_or_else(|| bad("it is a whole number of chunks, 1 to 100")),
+        CONCURRENCY_SETTING | PER_DATABASE_SETTING => {
+            count(1, MAX_CONCURRENCY).map(Some).ok_or_else(|| {
+                bad(&format!(
+                    "it is a whole number of moves at once, 1 to {MAX_CONCURRENCY}"
+                ))
+            })
+        }
+        BUDGET_SETTING if v == "none" => Ok(None),
+        BUDGET_SETTING => count(1, u32::MAX)
+            .map(Some)
+            .ok_or_else(|| bad("it is a whole number of chunks, 1 or more, or `none`")),
+        CHUNK_TIMEOUT_SETTING => match crate::windows::parse_length(v) {
+            Ok(n) if (1..=3_600).contains(&n) => Ok(Some(n.to_string())),
+            _ => Err(bad(
+                "it is a length from 1 second to 1 hour, like `20s` or `2m`",
+            )),
+        },
+        _ => Err(bad(&format!(
+            "there is no such backfill setting; there are {}",
+            SETTINGS.join(", ")
+        ))),
+    }
+}
+
+/// The worker's settings (`plan-versions.md` §7). A stored step reads them
+/// from `$version_settings` ([`stored_settings`]); unset ones are
+/// [`BackfillSettings::default`], the plan's defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackfillSettings {
     /// `backfill.chunk_rows`: rows per chunk.
     pub chunk_rows: u32,
@@ -136,17 +231,154 @@ pub struct BackfillSettings {
     /// `backfill.budget`: chunks one run may take before it pauses. `None`
     /// runs to the end. A paused backfill resumes from its cursor.
     pub budget: Option<u32>,
+    /// `backfill.concurrency`: tenants a rollout's turn moves at once.
+    pub concurrency: u32,
+    /// `backfill.per_database`: of those, the most in one database.
+    pub per_database: u32,
 }
 
 impl Default for BackfillSettings {
     fn default() -> Self {
         BackfillSettings {
             chunk_rows: 1000,
-            chunk_timeout: Duration::from_secs(30),
+            chunk_timeout: Duration::from_secs(20),
             max_attempts: 5,
             budget: None,
+            concurrency: 8,
+            per_database: 2,
         }
     }
+}
+
+impl BackfillSettings {
+    /// As the settings op answers them.
+    pub fn to_json(&self) -> Value {
+        json!({
+            "chunkRows": self.chunk_rows,
+            "chunkTimeout": self.chunk_timeout.as_secs(),
+            "maxAttempts": self.max_attempts,
+            "budget": self.budget,
+            "concurrency": self.concurrency,
+            "perDatabase": self.per_database,
+        })
+    }
+
+    /// One stored value over the default. A value the checks would refuse
+    /// (written by hand) reads as the default.
+    fn with(&mut self, setting: &str, value: Option<&str>) {
+        let d = BackfillSettings::default();
+        let n = |v: Option<&str>| {
+            v.and_then(|v| v.trim().parse::<u32>().ok())
+                .filter(|n| *n >= 1)
+        };
+        match setting {
+            CHUNK_ROWS_SETTING => {
+                self.chunk_rows = n(value)
+                    .map(|n| n.min(MAX_CHUNK_ROWS))
+                    .unwrap_or(d.chunk_rows)
+            }
+            CHUNK_TIMEOUT_SETTING => {
+                self.chunk_timeout = n(value)
+                    .map(|s| Duration::from_secs(u64::from(s)))
+                    .unwrap_or(d.chunk_timeout)
+            }
+            MAX_ATTEMPTS_SETTING => self.max_attempts = n(value).unwrap_or(d.max_attempts),
+            BUDGET_SETTING => self.budget = n(value),
+            CONCURRENCY_SETTING => {
+                self.concurrency = n(value)
+                    .map(|n| n.min(MAX_CONCURRENCY))
+                    .unwrap_or(d.concurrency)
+            }
+            PER_DATABASE_SETTING => {
+                self.per_database = n(value)
+                    .map(|n| n.min(MAX_CONCURRENCY))
+                    .unwrap_or(d.per_database)
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The backfill settings as stored in `$version_settings`. Unset ones read
+/// as their defaults; so does a database with no settings table yet.
+pub async fn stored_settings(pool: &Pool) -> Result<BackfillSettings, BackfillRefusal> {
+    let rows = match pool
+        .rows(
+            "SELECT DISTINCT ON (\"setting\") \"setting\", \"value\" \
+             FROM \"$version_settings\" WHERE \"setting\" LIKE 'backfill.%' \
+             ORDER BY \"setting\", \"seq\" DESC",
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(e) if e.is_missing_table() => return Ok(BackfillSettings::default()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut out = BackfillSettings::default();
+    for r in rows {
+        let (Some(Some(name)), value) = (r.first().cloned(), r.get(1).cloned().flatten()) else {
+            continue;
+        };
+        out.with(&name, value.as_deref());
+    }
+    Ok(out)
+}
+
+/// **Change one backfill setting**, or clear it with `None`, with who and
+/// why (Q15). Checked first ([`check_setting`]); written beside the version
+/// settings under the pin lock. `true` when it changed.
+pub async fn set_setting(
+    pool: &Pool,
+    setting: &str,
+    value: Option<&str>,
+    actor: &str,
+    reason: &str,
+    at: u64,
+) -> Result<(bool, BackfillSettings), BackfillRefusal> {
+    let reason = crate::versions::check_reason(reason)
+        .map_err(|e| BackfillRefusal::Reason(e.to_string()))?;
+    let Some(name) = setting_name(setting) else {
+        return Err(BackfillRefusal::Setting {
+            setting: setting.chars().take(60).collect(),
+            value: value.unwrap_or_default().chars().take(40).collect(),
+            why: format!(
+                "there is no such backfill setting; there are {}",
+                SETTINGS.join(", ")
+            ),
+        });
+    };
+    let value = check_setting(name, value)?;
+    pool.rows(crate::versions::SETTINGS_DDL).await?;
+    let tx = pool.begin().await?;
+    tx.rows(&format!(
+        "SELECT pg_advisory_xact_lock({}, 0)",
+        crate::versions::PIN_LOCK_NS
+    ))
+    .await?;
+    let now = tx
+        .rows(&format!(
+            "SELECT \"value\" FROM \"$version_settings\" WHERE \"setting\" = {} \
+             ORDER BY \"seq\" DESC LIMIT 1",
+            sql_lit(name)
+        ))
+        .await?;
+    let current = now.first().and_then(|r| r.first().cloned().flatten());
+    // Unchanged: the same value, or clearing what was never set.
+    if current == value {
+        tx.rollback().await?;
+        return Ok((false, stored_settings(pool).await?));
+    }
+    tx.rows(&format!(
+        "INSERT INTO \"$version_settings\" (\"setting\", \"value\", \"actor\", \"reason\", \"at\") \
+         VALUES ({}, {}, {}, {}, {at})",
+        sql_lit(name),
+        value.as_deref().map(sql_lit).unwrap_or_else(|| "NULL".into()),
+        sql_lit(actor),
+        sql_lit(&reason),
+    ))
+    .await?;
+    tx.commit().await?;
+    Ok((true, stored_settings(pool).await?))
 }
 
 // ── the typed error ──────────────────────────────────────────────────────
@@ -175,8 +407,19 @@ pub enum BackfillRefusal {
     },
     /// The backfill function refused or failed.
     Function { name: String, why: String },
+    /// A sealed backfill (increment 13) could not take a key lease, seal
+    /// or open a value. Names the space, never a value.
+    Seal { space: String, why: String },
     /// A database fault outside a chunk.
     Store(String),
+    /// A backfill setting's value is not one it takes.
+    Setting {
+        setting: String,
+        value: String,
+        why: String,
+    },
+    /// A setting change without a usable reason.
+    Reason(String),
 }
 
 impl BackfillRefusal {
@@ -186,7 +429,21 @@ impl BackfillRefusal {
             BackfillRefusal::Dead { .. } => "backfill_dead",
             BackfillRefusal::Verify { .. } => "backfill_verify_failed",
             BackfillRefusal::Function { .. } => "backfill_function_failed",
+            BackfillRefusal::Seal { .. } => "backfill_seal_failed",
             BackfillRefusal::Store(_) => "store_failed",
+            BackfillRefusal::Setting { .. } | BackfillRefusal::Reason(_) => "invalid_param",
+        }
+    }
+
+    /// As the door answers it, `what` saying what did not happen.
+    pub fn to_exec_error(&self, what: &str) -> ordo_api::ExecError {
+        use ordo_api::ErrorCode;
+        let message = format!("{what}: {self}");
+        match self {
+            BackfillRefusal::Setting { .. } | BackfillRefusal::Reason(_) => {
+                ordo_api::ExecError::new(ErrorCode::InvalidParam, message)
+            }
+            _ => ordo_api::ExecError::new(ErrorCode::SpaceUnavailable, message),
         }
     }
 
@@ -240,7 +497,23 @@ impl std::fmt::Display for BackfillRefusal {
                 f,
                 "backfill_function_failed: backfill function `{name}`: {why}"
             ),
+            BackfillRefusal::Seal { space, why } => write!(
+                f,
+                "backfill_seal_failed: space `{space}`: {why}. Nothing in the chunk was \
+                 sealed, and the plaintext column is kept. Run the step again on a node with \
+                 the deployment's key custody; it resumes from its cursor"
+            ),
             BackfillRefusal::Store(e) => write!(f, "store_failed: {e}"),
+            BackfillRefusal::Setting {
+                setting,
+                value,
+                why,
+            } => write!(
+                f,
+                "{setting} `{value}` is not one: {why}. `ordo versions set {setting} <value> \
+                 --reason \"...\"` sets it"
+            ),
+            BackfillRefusal::Reason(why) => write!(f, "{why}"),
         }
     }
 }
@@ -287,6 +560,9 @@ pub struct Backfill<'a> {
     pub entity: &'a ordo_schema::Entity,
     pub settings: &'a BackfillSettings,
     pub functions: Option<Arc<dyn BackfillFunctions>>,
+    /// Key custody, for a sealed backfill (increment 13): one lease per
+    /// space, `Purpose::Migration`. `None` refuses a seal.
+    pub keys: Option<Arc<dyn ordo_crypto::KeyProvider>>,
 }
 
 /// Where a backfill stands.
@@ -337,6 +613,13 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .filter_map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
 fn unhex32(s: &str) -> Option<[u8; 32]> {
     if s.len() != 64 {
         return None;
@@ -368,6 +651,57 @@ impl<'a> Backfill<'a> {
         q(&self.fill.column)
     }
 
+    /// The table the cursor walks: the old table of an entity rename's
+    /// copy, or the table filled.
+    fn source(&self) -> String {
+        // A move through a link that is not unique walks the one side: each
+        // chunk is a set of groups.
+        if let Some(p) = self.fill.pick() {
+            return q(&p.one);
+        }
+        if let Some((from, ..)) = self.fill.merge_from() {
+            return q(from);
+        }
+        match (self.fill.copy_from(), self.fill.part_of()) {
+            (Some(from), _) | (None, Some((from, _, _))) => q(from),
+            (None, None) => self.table(),
+        }
+    }
+
+    /// An entity split's moved columns: the part's physical columns but
+    /// its key, its revision and its link.
+    fn moved_columns(&self, link: &str) -> Vec<String> {
+        ordo_schema::ddl::physical_columns(self.entity)
+            .into_iter()
+            .map(|c| c.name)
+            .filter(|c| c != SPACE && c != "id" && c != "rev" && c != link)
+            .collect()
+    }
+
+    /// What one row's content hash reads: the column filled, or a copied
+    /// row whole.
+    fn value(&self) -> String {
+        if let Some((_, _, columns, _)) = self.fill.merge_from() {
+            return format!(
+                "json_build_array({})::text",
+                columns.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ")
+            );
+        }
+        match (self.fill.copy_from(), self.fill.part_of()) {
+            (Some(_), _) | (None, Some(_)) => format!("row_to_json({})::text", self.table()),
+            (None, None) => format!("{}::text", self.col()),
+        }
+    }
+
+    /// The copied columns of an entity rename: every physical column.
+    fn copied_columns(&self) -> String {
+        ordo_schema::ddl::physical_columns(self.entity)
+            .iter()
+            .map(|c| q(&c.name))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// `("$space", "id") > (cursor)`, or true with no cursor.
     fn after(cursor: &Option<(String, String)>) -> String {
         match cursor {
@@ -386,7 +720,7 @@ impl<'a> Backfill<'a> {
             .await?;
         let total = self
             .pool
-            .rows(&format!("SELECT count(*) FROM {}", self.table()))
+            .rows(&format!("SELECT count(*) FROM {}", self.source()))
             .await?
             .first()
             .and_then(|r| r.first().cloned().flatten())
@@ -559,7 +893,7 @@ impl<'a> Backfill<'a> {
                 "SELECT {sp}, \"id\" FROM (SELECT {sp}, \"id\" FROM {t} WHERE {after} \
                  ORDER BY {sp}, \"id\" LIMIT {n}) c ORDER BY {sp} DESC, \"id\" DESC LIMIT 1",
                 sp = q(SPACE),
-                t = self.table(),
+                t = self.source(),
             ))
             .await?;
         let Some((us, ui)) = last
@@ -585,8 +919,16 @@ impl<'a> Backfill<'a> {
         };
         match (&self.fill.mapping, &self.fill.sql) {
             (FillMapping::Expr(_), Some(sql)) => {
+                // A rename (B4) copies every row: its new column may hold
+                // the default it was added with. A new or newly required
+                // field fills only what is empty.
+                let only_empty = if matches!(self.fill.code, "B4" | "B12") {
+                    String::new()
+                } else {
+                    format!(" AND {} IS NULL", self.col())
+                };
                 tx.rows(&format!(
-                    "UPDATE {t} SET {c} = ({sql}) WHERE {range} AND {c} IS NULL",
+                    "UPDATE {t} SET {c} = ({sql}) WHERE {range}{only_empty}",
                     t = self.table(),
                     c = self.col(),
                 ))
@@ -603,18 +945,140 @@ impl<'a> Backfill<'a> {
                 self.function_chunk(&tx, &range, name, secrets, hosts)
                     .await?;
             }
+            (FillMapping::Seal, _) => {
+                self.seal_chunk(&tx, &range).await?;
+            }
+            (FillMapping::BlindIndex, _) => {
+                self.index_chunk(&tx, &range).await?;
+            }
+            // An entity rename: the chunk's rows of the old table, copied
+            // whole, each locked while it is read so a write to it waits
+            // and its dual write lands after. A row a write already put in
+            // the new table is newer, and kept.
+            (FillMapping::Copy(from), _) => {
+                let cols = self.copied_columns();
+                tx.rows(&format!(
+                    "INSERT INTO {t} ({cols}) SELECT {cols} FROM {o} WHERE {range} \
+                     ORDER BY {sp}, \"id\" FOR SHARE ON CONFLICT ({sp}, \"id\") DO NOTHING",
+                    t = self.table(),
+                    o = q(from),
+                    sp = q(SPACE),
+                ))
+                .await?;
+            }
+            // An entity split: one part row per whole row in the chunk, each
+            // whole row locked while it is read, so a write to it waits and
+            // its dual write lands after. A part row a write already made
+            // for it is newer, and kept.
+            (FillMapping::Part { whole, link, key }, _) => {
+                let cols = self
+                    .moved_columns(link)
+                    .iter()
+                    .map(|c| q(c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                tx.rows(&format!(
+                    "INSERT INTO {t} ({sp}, \"id\", \"rev\", {cols}, {l}) \
+                     SELECT {sp}, {pid}, 1, {cols}, \"id\" FROM {w} WHERE {range} \
+                     ORDER BY {sp}, \"id\" FOR SHARE ON CONFLICT ({sp}, {l}) DO NOTHING",
+                    t = self.table(),
+                    w = q(whole),
+                    l = q(link),
+                    sp = q(SPACE),
+                    pid = ordo_exec::overlay::part_id_sql(key, "\"id\""),
+                ))
+                .await?;
+            }
+            // A move through a link that is not unique: the chunk's rows of
+            // the one side are locked, then each group's receiving rows take
+            // what the rule gives them, in a new statement, so a write that
+            // waited on a lock is seen. The dual writes run the same
+            // statement.
+            (FillMapping::Merge { pick: Some(_), .. }, _) => {
+                let p = self.fill.pick().ok_or_else(|| {
+                    BackfillRefusal::Store("the move's rule does not read back".into())
+                })?;
+                let groups = format!(
+                    "(g.{sp}, g.\"id\") IN (SELECT {sp}, \"id\" FROM {one} WHERE {range})",
+                    sp = q(SPACE),
+                    one = q(&p.one),
+                );
+                tx.rows(&p.lock_sql(&groups)).await?;
+                tx.rows(&p.update_sql(&groups, false)).await?;
+            }
+            // A move or a merge: the row each row of the chunk names takes
+            // its moved columns. The chunk's rows are locked while they are
+            // read, so a write to one waits and its dual write lands after.
+            (
+                FillMapping::Merge {
+                    from,
+                    link,
+                    columns,
+                    ..
+                },
+                _,
+            ) => {
+                let cols = |prefix: &str| {
+                    columns
+                        .iter()
+                        .map(|c| format!("{prefix}{}", q(c)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                tx.rows(&format!(
+                    "UPDATE {t} t SET ({c}) = ROW({sc}) FROM (SELECT {sp}, {l}, {c} FROM {s} \
+                     WHERE {range} ORDER BY {sp}, \"id\" FOR SHARE) s \
+                     WHERE t.{sp} = s.{sp} AND t.\"id\" = s.{l}",
+                    t = self.table(),
+                    c = cols(""),
+                    sc = cols("s."),
+                    s = q(from),
+                    l = q(link),
+                    sp = q(SPACE),
+                ))
+                .await?;
+            }
             (FillMapping::Expr(src), None) => {
                 return Err(BackfillRefusal::Store(format!(
                     "the mapping `{src}` was stored without its SQL; render the plan again"
                 )))
             }
         }
-        // Each row's new value, folded into its space's content hash.
+        // Each row's new value, folded into its space's content hash. A
+        // split's part rows are the chunk's by their link.
+        let at = match (self.fill.part_of(), self.fill.merge_from()) {
+            // A move through a link that is not unique: the receiving rows
+            // of the chunk's groups.
+            (None, Some(_)) if self.fill.pick().is_some_and(|p| p.into_many) => {
+                let p = self.fill.pick().expect("matched just above");
+                format!(
+                    "({sp}, {l}) IN (SELECT {sp}, \"id\" FROM {one} WHERE {range})",
+                    sp = q(SPACE),
+                    l = q(&p.link),
+                    one = q(&p.one)
+                )
+            }
+            (None, Some(_)) if self.fill.pick().is_some() => range.clone(),
+            (Some((whole, link, _)), _) => format!(
+                "({sp}, {l}) IN (SELECT {sp}, \"id\" FROM {w} WHERE {range})",
+                sp = q(SPACE),
+                l = q(link),
+                w = q(whole)
+            ),
+            // A move's rows are the ones the chunk's rows name.
+            (None, Some((from, link, _, _))) => format!(
+                "({sp}, \"id\") IN (SELECT {sp}, {l} FROM {f} WHERE {range})",
+                sp = q(SPACE),
+                l = q(link),
+                f = q(from)
+            ),
+            (None, None) => range.clone(),
+        };
         let filled = tx
             .rows(&format!(
-                "SELECT {sp}, \"id\", {c}::text FROM {t} WHERE {range} ORDER BY {sp}, \"id\"",
+                "SELECT {sp}, \"id\", {v} FROM {t} WHERE {at} ORDER BY {sp}, \"id\"",
                 sp = q(SPACE),
-                c = self.col(),
+                v = self.value(),
                 t = self.table(),
             ))
             .await?;
@@ -792,6 +1256,197 @@ impl<'a> Backfill<'a> {
         Ok(())
     }
 
+    /// The plaintext column a sealed backfill reads.
+    fn plain_col(&self) -> Option<String> {
+        self.fill.sealing_from.as_deref().map(q)
+    }
+
+    /// One key lease for `space`, for this step (increment 13).
+    fn lease(&self, space: &str) -> Result<ordo_crypto::KeyLease, BackfillRefusal> {
+        let Some(keys) = &self.keys else {
+            return Err(BackfillRefusal::Seal {
+                space: space.to_string(),
+                why: "this node holds no key custody".into(),
+            });
+        };
+        keys.release(
+            &ordo_crypto::SpaceId(space.to_string()),
+            ordo_crypto::Purpose::Migration,
+            &format!("seal:{}", self.step),
+        )
+        .map_err(|e| BackfillRefusal::Seal {
+            space: space.to_string(),
+            why: format!("key release: {e}"),
+        })
+    }
+
+    /// Increment 13: each row's plaintext sealed under its space's key, at
+    /// its row, into the column beside it. One lease per space per chunk.
+    /// The plaintext column is never written: no plaintext dual write (D9).
+    async fn seal_chunk(&self, tx: &ordo_exec::TxConn, range: &str) -> Result<(), BackfillRefusal> {
+        let Some(plain) = self.plain_col() else {
+            return Err(BackfillRefusal::Store(
+                "a sealed backfill was stored without its plaintext column; render the plan again"
+                    .into(),
+            ));
+        };
+        let rows = tx
+            .rows(&format!(
+                "SELECT {sp}, \"id\", {plain} FROM {t} WHERE {range} AND {c} IS NULL \
+                 AND {plain} IS NOT NULL ORDER BY {sp}, \"id\" FOR UPDATE",
+                sp = q(SPACE),
+                t = self.table(),
+                c = self.col(),
+            ))
+            .await?;
+        let mut lease: Option<(String, ordo_crypto::KeyLease)> = None;
+        for r in rows {
+            let (Some(space), Some(id), Some(text)) = (
+                r.first().cloned().flatten(),
+                r.get(1).cloned().flatten(),
+                r.get(2).cloned().flatten(),
+            ) else {
+                continue;
+            };
+            if lease.as_ref().is_none_or(|(s, _)| *s != space) {
+                lease = Some((space.clone(), self.lease(&space)?));
+            }
+            let (_, l) = lease.as_ref().expect("taken just above");
+            let keys = self.keys.as_ref().expect("a lease was taken");
+            let sealed = keys
+                .seal_at(
+                    l,
+                    &self.fill.entity,
+                    &self.fill.field,
+                    ordo_crypto::Anchor::Row(&id),
+                    text.as_bytes(),
+                )
+                .map_err(|e| BackfillRefusal::Seal {
+                    space: space.clone(),
+                    why: format!("seal: {e}"),
+                })?;
+            tx.rows(&format!(
+                "UPDATE {t} SET {c} = '\\x{}'::bytea WHERE {sp} = {} AND \"id\" = {} AND {c} IS NULL",
+                hex(&sealed),
+                sql_lit(&space),
+                sql_lit(&id),
+                t = self.table(),
+                c = self.col(),
+                sp = q(SPACE),
+            ))
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// The sealed column a blind-index backfill (B8) reads.
+    fn sealed_col(&self) -> Option<String> {
+        self.fill.indexing_from.as_deref().map(q)
+    }
+
+    /// B8: one row's blind index, from its sealed value as stored, under
+    /// `lease` for its space. A null value indexes the null sentinel, as
+    /// the write path does.
+    fn index_of(
+        &self,
+        lease: &ordo_crypto::KeyLease,
+        space: &str,
+        id: &str,
+        sealed: Option<&str>,
+    ) -> Result<[u8; 32], BackfillRefusal> {
+        let keys = self.keys.as_ref().ok_or_else(|| BackfillRefusal::Seal {
+            space: space.to_string(),
+            why: "this node holds no key custody".into(),
+        })?;
+        let plain = match sealed {
+            None => None,
+            Some(hexed) => {
+                let bytes = unhex(hexed.strip_prefix("\\x").unwrap_or(hexed));
+                let open = keys
+                    .open_at(
+                        lease,
+                        &self.fill.entity,
+                        &self.fill.field,
+                        ordo_crypto::Anchor::Row(id),
+                        &bytes,
+                    )
+                    .map_err(|e| BackfillRefusal::Seal {
+                        space: space.to_string(),
+                        why: format!("row `{id}` does not open: {e}"),
+                    })?;
+                Some(String::from_utf8_lossy(&open).into_owned())
+            }
+        };
+        let normalize = self
+            .entity
+            .field(&self.fill.field)
+            .and_then(|f| f.normalize.clone());
+        let normalized = plain.map(|v| match normalize.as_deref() {
+            Some("lower") => v.to_lowercase(),
+            _ => v,
+        });
+        keys.blind_index(
+            &ordo_crypto::SpaceId(space.to_string()),
+            &self.fill.entity,
+            &self.fill.field,
+            normalized.as_deref().into(),
+        )
+        .map_err(|e| BackfillRefusal::Seal {
+            space: space.to_string(),
+            why: format!("blind index: {e}"),
+        })
+    }
+
+    /// Increment 13, B8: each row's sealed value opened under its space's
+    /// key and its blind index written. One lease per space per chunk.
+    async fn index_chunk(
+        &self,
+        tx: &ordo_exec::TxConn,
+        range: &str,
+    ) -> Result<(), BackfillRefusal> {
+        let Some(sealed) = self.sealed_col() else {
+            return Err(BackfillRefusal::Store(
+                "a blind-index backfill was stored without its sealed column; render the plan \
+                 again"
+                    .into(),
+            ));
+        };
+        let rows = tx
+            .rows(&format!(
+                "SELECT {sp}, \"id\", {sealed}::text FROM {t} WHERE {range} AND {c} IS NULL \
+                 ORDER BY {sp}, \"id\" FOR UPDATE",
+                sp = q(SPACE),
+                t = self.table(),
+                c = self.col(),
+            ))
+            .await?;
+        let mut lease: Option<(String, ordo_crypto::KeyLease)> = None;
+        for r in rows {
+            let (Some(space), Some(id)) =
+                (r.first().cloned().flatten(), r.get(1).cloned().flatten())
+            else {
+                continue;
+            };
+            let value = r.get(2).cloned().flatten();
+            if lease.as_ref().is_none_or(|(s, _)| *s != space) {
+                lease = Some((space.clone(), self.lease(&space)?));
+            }
+            let (_, l) = lease.as_ref().expect("taken just above");
+            let digest = self.index_of(l, &space, &id, value.as_deref())?;
+            tx.rows(&format!(
+                "UPDATE {t} SET {c} = '\\x{}'::bytea WHERE {sp} = {} AND \"id\" = {} AND {c} IS NULL",
+                hex(&digest),
+                sql_lit(&space),
+                sql_lit(&id),
+                t = self.table(),
+                c = self.col(),
+                sp = q(SPACE),
+            ))
+            .await?;
+        }
+        Ok(())
+    }
+
     /// B6: the function computes the chunk's values, one call per space.
     async fn function_chunk(
         &self,
@@ -879,7 +1534,54 @@ impl<'a> Backfill<'a> {
 
     /// **Verify** (B3): the whole table, read once. Then the summarised
     /// record, and `done`, in one transaction.
+    ///
+    /// A sealed backfill that fails verify starts over: every sealed value
+    /// beside the plaintext is cleared with the cursor and the space
+    /// hashes, so a run again seals each row's plaintext as it is then.
     pub async fn verify_and_close(&self) -> Result<Verified, BackfillRefusal> {
+        self.verify(false).await
+    }
+
+    /// **Verify under live writes** (increment 11a): the tenant kept
+    /// writing while the worker ran, and the move overlay kept each row's
+    /// new column at the mapping. So a row added, or a value changed behind
+    /// the cursor, is expected, and the per-chunk counts and hashes are not
+    /// compared. What must hold is the plan's verify (§5): no row left null,
+    /// and every row's new column equal to the mapping over its own
+    /// columns. The record then carries the count and hash read now.
+    pub async fn verify_live_and_close(&self) -> Result<Verified, BackfillRefusal> {
+        self.verify(true).await
+    }
+
+    async fn verify(&self, live: bool) -> Result<Verified, BackfillRefusal> {
+        let out = self.verify_inner(live).await;
+        let sealed_kind = self.fill.sealing_from.is_some() || self.fill.indexing_from.is_some();
+        if let (Err(BackfillRefusal::Verify { .. }), true) = (&out, sealed_kind) {
+            let tx = self.pool.begin_for(OpClass::AddressedWrite).await?;
+            tx.rows(&format!(
+                "UPDATE {t} SET {c} = NULL WHERE {c} IS NOT NULL",
+                t = self.table(),
+                c = self.col()
+            ))
+            .await?;
+            tx.rows(&format!(
+                "DELETE FROM \"$backfill_spaces\" WHERE {}",
+                self.key()
+            ))
+            .await?;
+            tx.rows(&format!(
+                "UPDATE \"$backfills\" SET \"cursor_space\" = NULL, \"cursor_id\" = NULL, \
+                 \"rows_done\" = 0, \"state\" = 'running', \"updated_at\" = {} WHERE {}",
+                now(),
+                self.key()
+            ))
+            .await?;
+            tx.commit().await?;
+        }
+        out
+    }
+
+    async fn verify_inner(&self, live: bool) -> Result<Verified, BackfillRefusal> {
         let p = self.progress().await?;
         if p.finished() {
             return Ok(Verified {
@@ -903,22 +1605,134 @@ impl<'a> Backfill<'a> {
                 )
             })
         };
-        // No row left null.
-        let nulls = self
-            .pool
-            .rows(&format!(
-                "SELECT {sp}, \"id\" FROM {t} WHERE {c} IS NULL ORDER BY {sp}, \"id\" LIMIT 1",
-                sp = q(SPACE),
-                t = self.table(),
-                c = self.col()
-            ))
-            .await?;
+        // An entity rename's copy: both tables hold the same rows, each
+        // with the same columns. Writes during the copy kept both current.
+        if let Some(from) = self.fill.copy_from() {
+            let on = ordo_schema::ddl::physical_columns(self.entity)
+                .iter()
+                .map(|c| format!("o.{c} IS NOT DISTINCT FROM n.{c}", c = q(&c.name)))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            let off = self
+                .pool
+                .rows(&format!(
+                    "SELECT coalesce(o.{sp}, n.{sp}), coalesce(o.\"id\", n.\"id\") \
+                     FROM {o} o FULL JOIN {t} n ON o.{sp} = n.{sp} AND o.\"id\" = n.\"id\" \
+                     WHERE o.\"id\" IS NULL OR n.\"id\" IS NULL OR NOT ({on}) LIMIT 1",
+                    sp = q(SPACE),
+                    o = q(from),
+                    t = self.table(),
+                ))
+                .await?;
+            if let Some(row) = first(off) {
+                return Err(fail(
+                    Some(row),
+                    format!("is not the same in `{from}` and `{}`", self.fill.entity),
+                ));
+            }
+        }
+        // An entity split's copy: one part row per whole row, holding the
+        // whole row's moved columns. Writes during the copy kept both
+        // shapes current.
+        if let Some((whole, link, _)) = self.fill.part_of() {
+            let on = self
+                .moved_columns(link)
+                .iter()
+                .map(|c| format!("w.{c} IS NOT DISTINCT FROM p.{c}", c = q(c)))
+                .chain(std::iter::once("TRUE".to_string()))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            let off = self
+                .pool
+                .rows(&format!(
+                    "SELECT w.{sp}, w.\"id\" FROM {w} w LEFT JOIN {t} p \
+                     ON p.{sp} = w.{sp} AND p.{l} = w.\"id\" \
+                     WHERE p.\"id\" IS NULL OR NOT ({on}) LIMIT 1",
+                    sp = q(SPACE),
+                    w = q(whole),
+                    l = q(link),
+                    t = self.table(),
+                ))
+                .await?;
+            if let Some(row) = first(off) {
+                return Err(fail(
+                    Some(row),
+                    format!("has no row in `{}` that holds its values", self.fill.entity),
+                ));
+            }
+        }
+        // A move's or a merge's copy: each row of the entity the fields come
+        // from, and the row its link names, hold the same values. Writes
+        // during the copy kept both current.
+        // A move through a link that is not unique: each receiving row
+        // holds what the rule gives it now.
+        if let Some(p) = self.fill.pick() {
+            let off = self.pool.rows(&p.mismatch_sql()).await?;
+            if let Some(row) = first(off) {
+                return Err(fail(
+                    Some(row),
+                    "holds other values than its rule gives it".to_string(),
+                ));
+            }
+        }
+        if let (Some((from, link, columns, _)), None) = (self.fill.merge_from(), self.fill.pick()) {
+            let on = columns
+                .iter()
+                .map(|c| format!("t.{c} IS NOT DISTINCT FROM s.{c}", c = q(c)))
+                .chain(std::iter::once("TRUE".to_string()))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            let off = self
+                .pool
+                .rows(&format!(
+                    "SELECT s.{sp}, s.\"id\" FROM {f} s LEFT JOIN {t} t \
+                     ON t.{sp} = s.{sp} AND t.\"id\" = s.{l} \
+                     WHERE t.\"id\" IS NULL OR NOT ({on}) LIMIT 1",
+                    sp = q(SPACE),
+                    f = q(from),
+                    l = q(link),
+                    t = self.table(),
+                ))
+                .await?;
+            if let Some(row) = first(off) {
+                return Err(fail(
+                    Some(row),
+                    format!("has values its `{}` row does not hold", self.fill.entity),
+                ));
+            }
+        }
+        // No row left null. A sealed backfill leaves a null plaintext null.
+        let plain = self.plain_col();
+        let sealed_src = self.sealed_col();
+        let unfilled = match (&plain, self.fill.code, &self.fill.sql) {
+            (Some(p), _, _) => format!("{} IS NULL AND {p} IS NOT NULL", self.col()),
+            // A split's or a merge's new field (B12) may be optional, and a
+            // row its mapping does not parse stays null: only a row the
+            // mapping gives a value to must hold one. A required one's
+            // unparsed rows are refused before the step (the pre-check).
+            (None, "B12", Some(sql)) => format!("{} IS NULL AND ({sql}) IS NOT NULL", self.col()),
+            (None, _, _) => format!("{} IS NULL", self.col()),
+        };
+        let nulls = if self.fill.copy_from().is_some()
+            || self.fill.part_of().is_some()
+            || self.fill.merge_from().is_some()
+        {
+            Vec::new()
+        } else {
+            self.pool
+                .rows(&format!(
+                    "SELECT {sp}, \"id\" FROM {t} WHERE {unfilled} ORDER BY {sp}, \"id\" LIMIT 1",
+                    sp = q(SPACE),
+                    t = self.table(),
+                ))
+                .await?
+        };
         if let Some(row) = first(nulls) {
             return Err(fail(Some(row), "has a row the backfill left null".into()));
         }
         // A new column (B2) filled by an expression holds the mapping on
         // every row. A B5 field kept what its rows already held.
-        if let (FillMapping::Expr(_), Some(sql), "B2") =
+        if let (FillMapping::Expr(_), Some(sql), "B2" | "B4" | "B12") =
             (&self.fill.mapping, &self.fill.sql, self.fill.code)
         {
             let off = self
@@ -943,20 +1757,96 @@ impl<'a> Backfill<'a> {
         }
         // Each space's count and content hash, recomputed over the table
         // in `($space, id)` pages.
+        // A sealed backfill also opens every value, in memory, and compares
+        // it with the row's plaintext: a value written after its chunk, or a
+        // seal at the wrong row, fails here.
         let mut got: BTreeMap<String, (i64, [u8; 32])> = BTreeMap::new();
         let mut cursor: Option<(String, String)> = None;
+        let mut lease: Option<(String, ordo_crypto::KeyLease)> = None;
         loop {
             let page = self
                 .pool
                 .rows(&format!(
-                    "SELECT {sp}, \"id\", {c}::text FROM {t} WHERE {a} ORDER BY {sp}, \"id\" \
+                    "SELECT {sp}, \"id\", {v}{p} FROM {t} WHERE {a} ORDER BY {sp}, \"id\" \
                      LIMIT 5000",
                     sp = q(SPACE),
-                    c = self.col(),
+                    v = self.value(),
+                    p = plain
+                        .as_deref()
+                        .map(|p| format!(", {p}"))
+                        .or_else(|| sealed_src.as_deref().map(|p| format!(", {p}::text")))
+                        .unwrap_or_default(),
                     t = self.table(),
                     a = Self::after(&cursor),
                 ))
                 .await?;
+            if plain.is_some() {
+                for r in &page {
+                    let (Some(s), Some(id)) =
+                        (r.first().cloned().flatten(), r.get(1).cloned().flatten())
+                    else {
+                        continue;
+                    };
+                    let sealed = r.get(2).cloned().flatten();
+                    let text = r.get(3).cloned().flatten();
+                    let opened = match &sealed {
+                        None => None,
+                        Some(hexed) => {
+                            if lease.as_ref().is_none_or(|(x, _)| *x != s) {
+                                lease = Some((s.clone(), self.lease(&s)?));
+                            }
+                            let (_, l) = lease.as_ref().expect("taken just above");
+                            let bytes = unhex(hexed.strip_prefix("\\x").unwrap_or(hexed));
+                            let keys = self.keys.as_ref().expect("a lease was taken");
+                            let open = keys
+                                .open_at(
+                                    l,
+                                    &self.fill.entity,
+                                    &self.fill.field,
+                                    ordo_crypto::Anchor::Row(&id),
+                                    &bytes,
+                                )
+                                .map_err(|e| {
+                                    fail(Some(format!("{s}/{id}")), format!("does not open: {e}"))
+                                })?;
+                            Some(String::from_utf8_lossy(&open).into_owned())
+                        }
+                    };
+                    if opened != text {
+                        return Err(fail(
+                            Some(format!("{s}/{id}")),
+                            "holds a sealed value other than the row's plaintext: it changed \
+                             after its chunk"
+                                .into(),
+                        ));
+                    }
+                }
+            }
+            // A blind-index backfill (B8) computes every row's index again
+            // from its sealed value and compares.
+            if sealed_src.is_some() {
+                for r in &page {
+                    let (Some(s), Some(id)) =
+                        (r.first().cloned().flatten(), r.get(1).cloned().flatten())
+                    else {
+                        continue;
+                    };
+                    if lease.as_ref().is_none_or(|(x, _)| *x != s) {
+                        lease = Some((s.clone(), self.lease(&s)?));
+                    }
+                    let (_, l) = lease.as_ref().expect("taken just above");
+                    let want = self.index_of(l, &s, &id, r.get(3).cloned().flatten().as_deref())?;
+                    let held = r.get(2).cloned().flatten().unwrap_or_default();
+                    if held.strip_prefix("\\x").unwrap_or(&held) != hex(&want) {
+                        return Err(fail(
+                            Some(format!("{s}/{id}")),
+                            "holds a blind index other than its sealed value's: the value \
+                             changed after its chunk"
+                                .into(),
+                        ));
+                    }
+                }
+            }
             if page.is_empty() {
                 break;
             }
@@ -991,7 +1881,7 @@ impl<'a> Backfill<'a> {
                 recorded.insert(s, (n, h));
             }
         }
-        for (s, (n, h)) in &got {
+        for (s, (n, h)) in got.iter().filter(|_| !live) {
             match recorded.get(s) {
                 Some((rn, rh)) if rn == n && rh == h => {}
                 Some((rn, _)) if rn != n => {
@@ -1020,7 +1910,7 @@ impl<'a> Backfill<'a> {
                 }
             }
         }
-        if let Some(s) = recorded.keys().find(|s| !got.contains_key(*s)) {
+        if let Some(s) = recorded.keys().find(|s| !live && !got.contains_key(*s)) {
             return Err(fail(
                 None,
                 format!("in space `{s}` lost every row the backfill filled"),

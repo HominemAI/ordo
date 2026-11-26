@@ -69,6 +69,10 @@ Promoting a branch to serve chosen production tenants depends on serving
 more than one version (`plan-evolution-plans.md` §3.5) and is filed for after
 first deployment (`tenant-builds`).
 
+**Built 2026-11-24** (`plan-versions.md` increment 5, §3.3): `ordo apply
+--branch`, `ordo branches list|delete`. Each branch tenant has a database
+of its own, so main's database never holds a branch's tables.
+
 ### 2.3 Staging clones named tenants (g37)
 
 The deployment owner names which production tenants staging copies. Each is
@@ -101,9 +105,22 @@ sign-ins are never carried.
 - A staging admin opens it as its founding owner. `ordo clones set readers
   <person>` lets others in. A cloned member cannot sign in.
 
-Not built yet: sinks for mail, push and egress; a version staging does not
-hold arriving with the clone; a tenant's own database or bucket recreated.
-Details in `plan-versions.md` §3.4.
+**Built, session 2 (2026-11-24).**
+
+- In staging, a routine's mail and a function's calls go to a sink, read
+  with `ordo clones sink`. `clone.sinks` is `on` by default: every staging
+  tenant and every clone. `clones` narrows it to the clones. D17's
+  "in staging" means all of staging (owner, 2026-11-25).
+- A version staging does not hold comes down with the clone through the
+  promotion gate, stored and not activated, recorded as a clone.
+- A tenant with a database of its own gets one on staging, made by
+  staging and brought to the clone's version.
+- The notes e2e clones a tenant into a second deployment through the doors.
+
+Fixed after it: a tenant with `acl` rows clones whole, its access rows
+restored as the owner; a clone's default name is neutral (`clone-...`).
+
+Not built yet: a tenant's own bucket; push. Details in `plan-versions.md` §3.4.
 
 ### 2.4 Blue/green per tenant (g33)
 

@@ -65,6 +65,19 @@ pub async fn serve(target_db: &str) -> std::net::SocketAddr {
     })
     .await
     .expect("target pool");
+    // With `rollout.strategy` unset, a deployment that is not dev rolls an
+    // apply out a batch at a time (ruled 2026-11-25). These tests apply and
+    // expect every tenant on the new version at once.
+    ordo_host::rollouts::Rollouts::on(&target)
+        .set_setting(
+            "rollout.strategy",
+            Some("all"),
+            "test",
+            "every tenant at once",
+            0,
+        )
+        .await
+        .expect("rollout.strategy all");
 
     let grants = Arc::new(PgGrantRegistry::new(dir_pool.clone()));
     grants.ensure_table().await.expect("platform table");
@@ -112,6 +125,7 @@ pub async fn serve(target_db: &str) -> std::net::SocketAddr {
             .with_clones(Arc::new(ordo_host::clones::CloneOps {
                 apply,
                 keys: clone_keys,
+                tenants: None,
                 access: ordo_host::clones::CloneAccess::new(),
             }))
             .with_tenant_list(Arc::new(ordo_host::fleet::TenantListOps {

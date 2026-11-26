@@ -20,6 +20,10 @@
 #      auto-onboard; a tenant of one's own on sign-up; CORS for the page.
 #      It verifies the identity service's tokens (ORDO_IDENTITY_URL).
 #   5. `ordo apply` of the program ($E2E_PROGRAM, examples/notes by default).
+#   5b. A second `ordo-host`, staging: its own database and keys, the
+#      identity service's handle `staging`, no program. tests/clone
+#      registers it with the identity service and clones a tenant into it
+#      (plan-versions.md increment 12). It serves nothing until then.
 #   6. The notes page, built with Vite and served by `vite preview`. The
 #      notes v2 page (examples/notes-v2/web) has its own build step and is
 #      served by the same server under /v2/, so it is the same origin and a
@@ -29,6 +33,15 @@
 # When the page answers, everything behind it is up. Playwright starts this
 # script itself (playwright.config.ts, `webServer`) and stops it at the end.
 # It writes what tests need to know to $E2E_STATE/stack.json.
+#
+# Two images (E2E_PREVIOUS_HOST and E2E_PREVIOUS_ORDO name the previous Ordo
+# release's `ordo-host` and `ordo`, built by scripts/previous-ordo.sh): step
+# 4 starts the previous door and step 5 applies the program with the previous
+# `ordo`. The door is then swapped on demand: when a test creates
+# $E2E_STATE/swap, the previous door is stopped and this build's `ordo-host`
+# starts on the same database with the same keys and settings. The stack
+# creates $E2E_STATE/swapped when the new door answers. Only
+# playwright.ordo-upgrade.config.ts sets them; the other projects run one Ordo.
 #
 # Needs: `cargo build -p ordo-cli -p ordo-host -p ordo-identity-service`
 # done (or ORDO, ORDO_HOST_BIN and E2E_IDENTITY_BIN naming the binaries), `npm ci` in examples/notes/web, Node 20
@@ -53,8 +66,10 @@ provider_port=${E2E_PROVIDER_PORT:-4643}
 smtp_port=${E2E_MAIL_SMTP_PORT:-4625}
 mail_http_port=${E2E_MAIL_HTTP_PORT:-4626}
 id_port=${E2E_ID_PORT:-4644}
+staging_port=${E2E_STAGING_PORT:-4645}
 
 door="http://127.0.0.1:$door_port"
+staging="http://127.0.0.1:$staging_port"
 # The page reaches the door by `localhost`, the page's own site, so the
 # renewal cookie (SameSite=Strict) is sent and a reload stays signed in.
 # `localhost` and `127.0.0.1` are two sites to a browser.
@@ -73,7 +88,7 @@ done
 # A stack still stopping (or another one) would answer the health checks
 # below in this one's place and then vanish. Wait up to 20 seconds for each
 # port to be free, then refuse by name.
-for port in "$door_port" "$page_port" "$provider_port" "$smtp_port" "$mail_http_port" "$id_port"; do
+for port in "$door_port" "$page_port" "$provider_port" "$smtp_port" "$mail_http_port" "$id_port" "$staging_port"; do
   tries=0
   while (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; do
     tries=$((tries + 1))
@@ -144,6 +159,8 @@ psql_bin=${ORDO_PSQL:-$( [ -n "${ORDO_PGBIN:-}" ] && echo "$ORDO_PGBIN/psql" || 
 "$psql_bin" -h "$pg_host" -p "$pg_port" -U "$pg_user" -d postgres -qc "create database \"$db\""
 "$psql_bin" -h "$pg_host" -p "$pg_port" -U "$pg_user" -d postgres -qc "drop database if exists \"${db}_identity\" with (force)"
 "$psql_bin" -h "$pg_host" -p "$pg_port" -U "$pg_user" -d postgres -qc "create database \"${db}_identity\""
+"$psql_bin" -h "$pg_host" -p "$pg_port" -U "$pg_user" -d postgres -qc "drop database if exists \"${db}_staging\" with (force)"
+"$psql_bin" -h "$pg_host" -p "$pg_port" -U "$pg_user" -d postgres -qc "create database \"${db}_staging\""
 # Notes v2 names a reader, note_viewer (examples/note-viewer), and grants its
 # role two tables. No note_viewer runs here, so the role logs in nowhere; it
 # only has to exist. The federation stack (examples/note-viewer/e2e) runs both.
@@ -175,6 +192,9 @@ mkdir -p "$state/id-data"
   export ORDO_IDENTITY_LISTEN="127.0.0.1:$id_port"
   export ORDO_IDENTITY_DATA_DIR="$state/id-data"
   export ORDO_IDENTITY_DEPLOYMENT=main
+  # Staging (step 5b) signs in here as a deployment of its own (Q12). Made
+  # before the service starts, which reads its registry each minute.
+  "$idsvc" deployment add staging --origin "http://localhost:$staging_port" >"$state/identity-staging.log" 2>&1
   exec "$idsvc"
 ) >"$state/identity.log" 2>&1 &
 last=$!
@@ -217,6 +237,11 @@ export ORDO_TEST_EDITION_2_SINCE=2026-11-01
 # Enable the real tenant export path for the isolation test.
 export ORDO_EXIT_BUNDLE_DIR="$state/exports"
 export ORDO_BLOB_STORE="fs:$state/blobs" ORDO_DEV_UNSAFE_BLOB_STORE=1
+# A person may export and erase their own tenant (`std.space.export` and
+# `std.space.delete`, tests/orphans). Bundles are written under the stack's
+# own folder.
+mkdir -p "$state/bundles"
+export ORDO_EXIT_BUNDLE_DIR="$state/bundles"
 # Emailed codes go to the mail catcher, in the clear, on loopback.
 export ORDO_MAIL_KIND=smtp ORDO_MAIL_FROM=notes@example.com ORDO_MAIL_HOST=localhost
 export ORDO_MAIL_PORT="$smtp_port" ORDO_MAIL_TLS=none ORDO_MAIL_SEND_SECS=1
@@ -238,6 +263,12 @@ if [ "${E2E_HUMAN_CHECK:-0}" = 1 ]; then
   export ORDO_AUTH_HUMAN_CHECK=turnstile ORDO_AUTH_HUMAN_CHECK_SECRET_FILE="$state/turnstile-secret"
   export ORDO_AUTH_HUMAN_CHECK_SITE_KEY=1x00000000000000000000AA
 fi
+# One stack runs every project in turn, and each leaves tenants pinned to
+# the versions it made (0.1.0 to 0.6.1). Past `moves` that is 9 versions
+# pinned at once, over versions.max_loaded's default of 8, and the next
+# version a project pins is refused its load. A deployment holds few; the
+# stack holds them all.
+export ORDO_VERSIONS_MAX_LOADED=${ORDO_VERSIONS_MAX_LOADED:-16}
 for v in ORDO_PG_ROUTING ORDO_TENANT_CREDENTIALS ORDO_TENANT_CREDENTIALS_DIR ORDO_DEPLOYMENT_OWNERS; do unset "$v"; done
 # The deployment's people are the identity service's. A person who signed
 # in there with `ordo login` acts on the deployment's own space through
@@ -245,15 +276,88 @@ for v in ORDO_PG_ROUTING ORDO_TENANT_CREDENTIALS ORDO_TENANT_CREDENTIALS_DIR ORD
 export ORDO_IDENTITY_URL="http://127.0.0.1:$id_port" ORDO_IDENTITY_ORIGIN="$id_origin"
 export ORDO_IDENTITY_DEPLOYMENT=main
 
-RUST_LOG=${RUST_LOG:-info} "$host" >"$state/door.log" 2>&1 &
+# Two images: the previous release's door first, and a swap to this build's
+# when a test asks (see the header). Otherwise this build's door, for good.
+prev_host=${E2E_PREVIOUS_HOST:-}
+prev_ordo=${E2E_PREVIOUS_ORDO:-}
+if [ -n "$prev_host" ]; then
+  [ -x "$prev_host" ] && [ -x "$prev_ordo" ] ||
+    { echo "stack: E2E_PREVIOUS_HOST and E2E_PREVIOUS_ORDO must name the previous release's binaries (bash scripts/previous-ordo.sh)" >&2; exit 1; }
+  (
+    door_pid=''
+    trap '[ -n "$door_pid" ] && kill "$door_pid" 2>/dev/null; exit 0' TERM INT EXIT
+    RUST_LOG=${RUST_LOG:-info} "$prev_host" >"$state/door.log" 2>&1 &
+    door_pid=$!
+    until [ -e "$state/swap" ]; do
+      kill -0 "$door_pid" 2>/dev/null || { echo "stack: the previous door stopped" >&2; exit 1; }
+      sleep 0.2
+    done
+    kill "$door_pid" 2>/dev/null || true
+    wait "$door_pid" 2>/dev/null || true
+    echo "--- stack: swapped to this build's ordo-host ---" >>"$state/door.log"
+    RUST_LOG=${RUST_LOG:-info} "$host" >>"$state/door.log" 2>&1 &
+    door_pid=$!
+    tries=0
+    until curl -fsS "$door/health/live" >/dev/null 2>&1; do
+      kill -0 "$door_pid" 2>/dev/null || { echo "stack: this build's door stopped after the swap" >&2; exit 1; }
+      tries=$((tries + 1))
+      [ "$tries" -lt 600 ] || exit 1
+      sleep 0.2
+    done
+    touch "$state/swapped"
+    wait "$door_pid"
+  ) &
+else
+  RUST_LOG=${RUST_LOG:-info} "$host" >"$state/door.log" 2>&1 &
+fi
 last=$!
 pids="$pids $last"
 printf '%s\n' "$last" >> "$state/host-pids"
 wait_for "ordo-host" "$door/health/live" "$last"
 
 # ── 5. The program ─────────────────────────────────────────────────────────
-"$ordo" apply "$program" --as notes-e2e --direct >"$state/apply.log" 2>&1 ||
+"${prev_ordo:-$ordo}" apply "$program" --as notes-e2e --direct >"$state/apply.log" 2>&1 ||
   { cat "$state/apply.log" >&2; echo "stack: ordo apply failed" >&2; exit 1; }
+
+# ── 5a. Every tenant at once ───────────────────────────────────────────────
+# With `rollout.strategy` unset, a deployment that is not dev rolls each
+# apply out a batch at a time (owner, 2026-11-25). This stack is production,
+# and its flows apply a version and expect every tenant on it at once, so
+# the strategy is set to `all`, as `ordo rollout set rollout.strategy all`
+# does. The flows that test a rollout start one by name.
+all_at_once() {
+  "$psql_bin" -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$1" -qc \
+    "CREATE TABLE IF NOT EXISTS \"\$version_settings\" (\"seq\" bigserial PRIMARY KEY, \
+       \"setting\" text NOT NULL, \"value\" text NULL, \"actor\" text NOT NULL, \
+       \"reason\" text NOT NULL, \"at\" bigint NOT NULL); \
+     INSERT INTO \"\$version_settings\" (\"setting\", \"value\", \"actor\", \"reason\", \"at\") \
+       VALUES ('rollout.strategy', 'all', 'notes-e2e', 'the flows apply every tenant at once', \
+       extract(epoch from now())::bigint)"
+}
+all_at_once "$db"
+
+# ── 5b. Staging ────────────────────────────────────────────────────────────
+# The door's settings, with its own database, keys, port and identity
+# handle. Sign-in is passkey alone and makes no tenant: the people who open
+# staging are the deployment's, through the identity service. It reads
+# production's door over plain http on loopback, which only a test allows.
+(
+  export ORDO_PG_DB="${db}_staging" ORDO_HOST_ADDR="127.0.0.1:$staging_port"
+  export ORDO_MASTER_KEY=notes-e2e-staging-master
+  export ORDO_TOKEN_KEY=3333333333333333333333333333333333333333333333333333333333333333
+  export ORDO_PAGE_KEY=4444444444444444444444444444444444444444444444444444444444444444
+  export ORDO_AUTH_METHODS=passkey ORDO_IDENTITY_DEPLOYMENT=staging
+  export ORDO_BLOB_STORE="fs:$state/staging-blobs"
+  export ORDO_PROMOTION_PLAIN_HTTP=on
+  for v in ORDO_AUTH_PROVISIONING ORDO_PROVISION_SELF_SERVE ORDO_AUTH_GUEST ORDO_PUBLIC_URL \
+    $(compgen -e | grep '^ORDO_AUTH_DISCORD_' || true); do unset "$v"; done
+  RUST_LOG=${RUST_LOG:-info} exec "$host"
+) >"$state/staging.log" 2>&1 &
+last=$!
+pids="$pids $last"
+wait_for "staging's ordo-host" "$staging/health/live" "$last"
+# Staging takes a promotion every tenant at once too (5a).
+all_at_once "${db}_staging"
 
 # ── 6. The page ────────────────────────────────────────────────────────────
 (cd "$web" && VITE_ORDO_URL="$page_door" node_modules/.bin/vite build --outDir "$state/page" --emptyOutDir) >"$state/page-build.log" 2>&1 ||
@@ -272,6 +376,7 @@ pids="$pids $last"
 cat >"$state/stack.json" <<EOF
 {
   "door": "$door",
+  "staging": "$staging",
   "page": "$page",
   "pageV2": "$page/v2/",
   "programV2": "$repo/examples/notes-v2",
@@ -280,9 +385,12 @@ cat >"$state/stack.json" <<EOF
   "mail": "http://localhost:$mail_http_port",
   "identity": "$id_origin",
   "identityData": "$state/id-data",
+  "identityBin": "$idsvc",
+  "identityDb": "$id_url",
   "program": "$program",
   "pg": { "host": "$pg_host", "port": "$pg_port", "user": "$pg_user", "db": "$db" },
   "ordo": "$ordo",
+  "previousRelease": "${E2E_PREVIOUS_RELEASE:-}",
   "logs": "$state"
 }
 EOF

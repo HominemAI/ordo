@@ -396,6 +396,25 @@ pub enum RecordedDecision {
     /// signs people in there, so a console key reaches nothing
     /// (`plan-identity-service.md` 6, G14).
     ConsoleKeyClosed,
+    /// A grant pinned under one program version was called in a tenant
+    /// now on another, and the two disagree on what a listed op reads or on
+    /// its guards (`plan-versions.md` §1.7). Its holder is told
+    /// `versions_disagree`; this record keeps it apart from a redeploy that
+    /// widened an op (`ManifestChanged`).
+    VersionsDisagree,
+    /// A grant a move with dual writes killed, called after the tenant was
+    /// moved back (`plan-versions.md` §2.5): dead until consented again.
+    GrantKilledByMove,
+    /// A token another deployment presented (`plan-federation-grants.md`
+    /// 5, step G3) did not verify, or named another issuer or audience, or
+    /// had expired. Unverified when its signature failed.
+    PeerTokenRefused,
+    /// A verified consumer reached for an op its grant does not open: an
+    /// unknown consumer, an op outside the grant, a call as itself under a
+    /// grant on behalf of a person only, or a person the holder refused.
+    ConsumerNotGranted,
+    /// A call whose chain already passed through this deployment.
+    PeerLoop,
 }
 
 impl RecordedDecision {
@@ -435,6 +454,11 @@ impl RecordedDecision {
             RecordedDecision::DeploymentTokenExpired => "DeploymentTokenExpired",
             RecordedDecision::OutsideDeploymentRealm => "OutsideDeploymentRealm",
             RecordedDecision::ConsoleKeyClosed => "ConsoleKeyClosed",
+            RecordedDecision::VersionsDisagree => "VersionsDisagree",
+            RecordedDecision::GrantKilledByMove => "GrantKilledByMove",
+            RecordedDecision::PeerTokenRefused => "PeerTokenRefused",
+            RecordedDecision::ConsumerNotGranted => "ConsumerNotGranted",
+            RecordedDecision::PeerLoop => "PeerLoop",
         }
     }
 
@@ -481,6 +505,13 @@ impl RecordedDecision {
             RecordedDecision::DeploymentTokenExpired => 53,
             RecordedDecision::OutsideDeploymentRealm => 54,
             RecordedDecision::ConsoleKeyClosed => 55,
+            // Program versions at the door, clear of 55.
+            RecordedDecision::VersionsDisagree => 60,
+            RecordedDecision::GrantKilledByMove => 61,
+            // Federation through the door, clear of 61.
+            RecordedDecision::PeerTokenRefused => 70,
+            RecordedDecision::ConsumerNotGranted => 71,
+            RecordedDecision::PeerLoop => 72,
         }
     }
 
@@ -520,6 +551,11 @@ impl RecordedDecision {
             53 => RecordedDecision::DeploymentTokenExpired,
             54 => RecordedDecision::OutsideDeploymentRealm,
             55 => RecordedDecision::ConsoleKeyClosed,
+            60 => RecordedDecision::VersionsDisagree,
+            61 => RecordedDecision::GrantKilledByMove,
+            70 => RecordedDecision::PeerTokenRefused,
+            71 => RecordedDecision::ConsumerNotGranted,
+            72 => RecordedDecision::PeerLoop,
             _ => return None,
         })
     }
@@ -547,6 +583,8 @@ impl From<&DenyReason> for RecordedDecision {
             DenyReason::DelegationBeyondDelegator => RecordedDecision::DelegationBeyondDelegator,
             DenyReason::DelegationNotLive => RecordedDecision::DelegationNotLive,
             DenyReason::OpNotDelegable => RecordedDecision::OpNotDelegable,
+            DenyReason::VersionsDisagree { .. } => RecordedDecision::VersionsDisagree,
+            DenyReason::GrantKilledByMove { .. } => RecordedDecision::GrantKilledByMove,
         }
     }
 }

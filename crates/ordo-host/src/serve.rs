@@ -150,6 +150,11 @@ pub struct PlatformState {
     /// passing failure, named beside `access_unread` on `/health/ready`.
     #[allow(clippy::type_complexity)]
     pub access_kept_stale: Option<Arc<dyn Fn() -> Vec<(String, String)> + Send + Sync>>,
+    /// The external watcher (`crate::external_check::ExternalGate`), so
+    /// `/health/ready` names the peer columns being renamed and the
+    /// entities held (`plan-evolution-federation.md` §3.3). Neither gates
+    /// readiness: a held entity refuses only the ops that read it.
+    pub external: Option<Arc<crate::external_check::ExternalGate>>,
     /// The security-event drain's own health, when one is running.
     ///
     /// `None` means **no drainer is wired**, and `/health/deep` says so in
@@ -245,6 +250,7 @@ impl PlatformState {
             spaces: None,
             access_unread: None,
             access_kept_stale: None,
+            external: None,
             credential_labels: None,
             pools: None,
             warnings: Vec::new(),
@@ -262,6 +268,17 @@ impl PlatformState {
         let again = access.clone();
         self.access_kept_stale = Some(Arc::new(move || again.kept_stale()));
         self.access_unread = Some(Arc::new(move || access.unread()));
+        self
+    }
+
+    /// Let `/health/ready` say what the external watcher found
+    /// (`plan-evolution-federation.md` §3.3): the **same** gate the door
+    /// refuses through.
+    pub fn with_external(
+        mut self,
+        gate: Arc<crate::external_check::ExternalGate>,
+    ) -> PlatformState {
+        self.external = Some(gate);
         self
     }
 
@@ -861,6 +878,15 @@ async fn health_ready(State(state): State<PlatformState>, headers: HeaderMap) ->
                 .iter()
                 .map(|(space, note)| json!({ "space": space, "note": note }))
                 .collect::<Vec<_>>(),
+            // What the external watcher found on its last pass. `changing`:
+            // a peer column its read app renamed, still written, with the
+            // new name and the fix; nothing is held for it yet. `held`: each
+            // external entity whose ops answer `external_changed` now. Not
+            // checks: a held entity refuses its own ops and nothing else.
+            "external": state.external.as_ref().map(|g| json!({
+                "changing": g.changing(),
+                "held": g.down(),
+            })),
         }),
     )
 }
@@ -1339,18 +1365,13 @@ async fn catalog_route(
     // as a consequence of where the field lives — and the platform half
     // does not move, which is what it means for it not to be part of a
     // version.
-    let allowed: Vec<Value> = state
-        .deployment
-        .manifests()
-        .iter()
-        .filter(|(name, _)| {
-            live && matches!(
-                state.access.check(&token, &space, name),
-                AccessDecision::Allow { .. }
-            )
-        })
-        .map(|(_, m)| m.clone())
-        .collect();
+    //
+    // **Per tenant** (`plan-versions.md` §1.4): the version is the one
+    // serving the space named, so a client on 0.1.0 sees 0.1.0's ops.
+    let (loaded, allowed) = match tenant_ops(&state, &token, &space, live) {
+        Ok(found) => found,
+        Err(refused) => return *refused,
+    };
     let catalog = Value::Array(allowed);
 
     let wants_prose = query.get("format").is_some_and(|f| f == "prose")
@@ -1358,7 +1379,7 @@ async fn catalog_route(
             .get("accept")
             .and_then(|v| v.to_str().ok())
             .is_some_and(|a| a.contains("text/plain") && !a.contains("application/json"));
-    if wants_prose {
+    let response = if wants_prose {
         (
             StatusCode::OK,
             [("content-type", "text/plain; charset=utf-8")],
@@ -1367,7 +1388,73 @@ async fn catalog_route(
             .into_response()
     } else {
         (StatusCode::OK, Json(catalog)).into_response()
+    };
+    with_tenant_version(response, &loaded)
+}
+
+/// The ops `token` may call in `space`, as manifests of **the version
+/// serving that space**, and that version. The catalog's and the
+/// descriptor's one filter.
+///
+/// A tenant pinned to a version this node has not loaded is answered
+/// `space_unavailable`, retryable, naming no version, as its ops are. Only
+/// a live token is told: no token and a dead one get the empty answer they
+/// get everywhere else, so the refusal is no answer about the space.
+type TenantOps = (Arc<crate::deploy::Loaded>, Vec<Value>);
+
+fn tenant_ops(
+    state: &PlatformState,
+    token: &str,
+    space: &str,
+    live: bool,
+) -> Result<TenantOps, Box<Response>> {
+    let (loaded, manifests) = match state.deployment.manifests_in(space) {
+        Ok(found) => found,
+        Err(_) if token.is_empty() || !live => {
+            return Ok((state.deployment.current(), Vec::new()));
+        }
+        Err(u) => {
+            eprintln!(
+                "catalog: `{}` is pinned to `{}`, which this node has not loaded",
+                u.space, u.version
+            );
+            return Err(Box::new(
+                ApiError::new(
+                    ErrorCode::SpaceUnavailable,
+                    format!(
+                        "space `{space}` is closed for a moment while this server gets its \
+                         version of the app ready. Ask again shortly"
+                    ),
+                )
+                .into_response(),
+            ));
+        }
+    };
+    let allowed = manifests
+        .into_iter()
+        .filter(|(name, _)| {
+            live && matches!(
+                state.access.check(token, space, name),
+                AccessDecision::Allow { .. }
+            )
+        })
+        .map(|(_, m)| m)
+        .collect();
+    Ok((loaded, allowed))
+}
+
+/// The version a catalog or descriptor was read from, as every op answer
+/// carries it (`plan-versions.md` §1.9).
+fn with_tenant_version(mut response: Response, loaded: &crate::deploy::Loaded) -> Response {
+    if loaded.version.is_empty() {
+        return response;
     }
+    if let Ok(v) = axum::http::HeaderValue::from_str(&loaded.version) {
+        response
+            .headers_mut()
+            .insert(ordo_api::router::TENANT_VERSION_HEADER, v);
+    }
+    response
 }
 
 // ── interface descriptor ─────────────────────────────────────────────────
@@ -1400,19 +1487,12 @@ async fn interface_route(
     let space = space_of(&state, &headers, &query);
     // The catalog's rule: a dead token describes nothing.
     let live = token.is_empty() || token_live(&state, &token).await;
-    let loaded = state.deployment.current();
-    let allowed: Vec<Value> = state
-        .deployment
-        .manifests()
-        .into_iter()
-        .filter(|(name, _)| {
-            live && matches!(
-                state.access.check(&token, &space, name),
-                AccessDecision::Allow { .. }
-            )
-        })
-        .map(|(_, m)| m)
-        .collect();
+    // The tenant's own version, its entities as well as its ops: a
+    // generator run for a tenant on 0.1.0 writes 0.1.0's client.
+    let (loaded, allowed) = match tenant_ops(&state, &token, &space, live) {
+        Ok(found) => found,
+        Err(refused) => return *refused,
+    };
     // The program's sign-in facts ride along, the same for every asker.
     let doc = ordo_plan::interface::interface_document_with(
         &json!(loaded.fixture.schema.domain),
@@ -1421,7 +1501,7 @@ async fn interface_route(
         ordo_plan::interface::RefineLimits::default(),
         ordo_plan::artifact::auth_artifact(&loaded.fixture.schema).as_ref(),
     );
-    (StatusCode::OK, Json(doc)).into_response()
+    with_tenant_version((StatusCode::OK, Json(doc)).into_response(), &loaded)
 }
 
 // ── shared ───────────────────────────────────────────────────────────────

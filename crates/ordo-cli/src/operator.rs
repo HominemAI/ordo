@@ -107,6 +107,7 @@ const SWITCHES: &[&str] = &[
     "--dry-run",
     "--no-activate",
     "--bump",
+    "--remove-landed-prev",
     "--no-wait",
     "--apply",
     "--record",
@@ -142,7 +143,15 @@ fn command_switches(cmd: &str) -> &'static [&'static str] {
     match cmd {
         "versions" => &["--source", "--schema", "--clear"],
         "windows" => &["--all"],
-        "evolve" => &["--run", "--list"],
+        "evolve" => &[
+            "--run",
+            "--list",
+            "--orphans",
+            "--revert",
+            "--close-soak",
+            "--one-way",
+        ],
+        "rollout" => &["--clear", "--share-partners"],
         "release-check" => &["--json", "--override"],
         _ => &[],
     }
@@ -410,8 +419,12 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         "windows" => rt.block_on(crate::windows::run(flags)),
         "environments" => rt.block_on(environments_cmd(flags)),
         "clones" => rt.block_on(clones_cmd(flags)),
+        "branches" => rt.block_on(crate::branches::run(flags)),
+        "rehearsals" => rt.block_on(rehearsals_cmd(flags)),
+        "tenant-builds" => rt.block_on(crate::tenant_builds::run(flags)),
         "promote" => rt.block_on(promote_cmd(flags)),
         "evolve" => rt.block_on(crate::evolve::run(flags)),
+        "rollout" => rt.block_on(crate::rollout::run(flags)),
         "prune" => rt.block_on(prune(flags)),
         "restore" => rt.block_on(restore(flags)),
         "quota" => rt.block_on(quota(flags)),
@@ -1353,6 +1366,17 @@ async fn security_checkpoint(flags: Flags) -> Outcome {
 /// is worse than refusing. The manual form (no `--tenant`) is unchanged and
 /// stays as break-glass, for a host `$spacedb` cannot resolve or an
 /// operator who does not trust what is stored.
+///
+/// # `--tenant`: the pin follows the restored data (§2.9, increment 17)
+///
+/// A tenant's own database restored from a snapshot taken on another
+/// version records that version in its `$migrations`. Before the marker,
+/// the version is checked against what this deployment stores: one it does
+/// not store is refused, naming it, and nothing is recorded. After the
+/// marker, `Versions::restore_pin` moves the tenant's pin to it, cause
+/// `restore`, or leaves the pin ahead and the tenant closed when that
+/// version is revoked or below `versions.minimum` (Q13). The manual form
+/// does the same when `--control-db` names a database other than `--db`.
 async fn restore(flags: Flags) -> Outcome {
     if let Err(e) = flags.only(&[
         "--record",
@@ -1404,9 +1428,20 @@ async fn restore(flags: Flags) -> Outcome {
         Err(e) => return Outcome::usage(e),
     };
 
-    let (pool, witness, resolved) = match restore_target(&flags, &space).await {
+    let (pool, witness, resolved, control) = match restore_target(&flags, &space).await {
         Ok(t) => t,
         Err(o) => return o,
+    };
+    // **The version the restored data is at** (§2.9, increment 17), read
+    // before the marker: a version this deployment does not store is
+    // refused here, and the tenant stays closed until it is stored and this
+    // runs again.
+    let data_version = match &control {
+        None => None,
+        Some(control) => match restored_version(control, &pool, &space).await {
+            Ok(v) => v,
+            Err(o) => return o,
+        },
     };
     let db = Db::Pool(&pool);
     let before = undo::continuity(db, &witness, &space)
@@ -1421,6 +1456,7 @@ async fn restore(flags: Flags) -> Outcome {
             Err(_) => return Outcome::usage(format!("`--restored-from` is an index, not `{v}`")),
         },
     };
+    let actor = operator.clone();
     let rec = undo::RestoreRecord {
         operator,
         source,
@@ -1475,6 +1511,18 @@ async fn restore(flags: Flags) -> Outcome {
                 }
             ));
             out.push_str(&format!("continuity after   {after}\n"));
+            if let (Some(control), Some(data)) = (&control, &data_version) {
+                match ordo_host::versions::Versions::on(control)
+                    .restore_pin(&space.0, data, &actor, now().0)
+                    .await
+                {
+                    Ok(pin) => out.push_str(&restore_pin_line(&space.0, &pin)),
+                    Err(e) => {
+                        out.push_str(&format!("version REFUSED {e}\n"));
+                        return Outcome::failed(out);
+                    }
+                }
+            }
             if r.witnessed {
                 Outcome::ok(out)
             } else {
@@ -1497,14 +1545,83 @@ async fn restore(flags: Flags) -> Outcome {
 /// Returns the database this call actually used, for the report — `None`
 /// in the manual form, which already knows what it typed and gains
 /// nothing from being told back.
+/// The version a restored tenant database records, checked against what
+/// this deployment stores (`Versions::restore_check`). `None` for a
+/// database that records none (provisioned before versions were recorded).
+async fn restored_version(
+    control: &Pool,
+    pool: &Pool,
+    space: &SpaceId,
+) -> Result<Option<String>, Outcome> {
+    let data = match ordo_exec::spacedb::recorded_version(pool).await {
+        Ok(ordo_exec::spacedb::TargetVersion::At(v)) => v,
+        Ok(ordo_exec::spacedb::TargetVersion::Unknown) => return Ok(None),
+        Err(e) => return Err(Outcome::failed(format!("database: {e}\n"))),
+    };
+    match ordo_host::versions::Versions::on(control)
+        .restore_check(&space.0, &data)
+        .await
+    {
+        Ok(_) => Ok(Some(data)),
+        Err(e) => Err(Outcome::failed(format!(
+            "space   {space}\nREFUSED {e}\nNothing was recorded, and the tenant stays closed\n"
+        ))),
+    }
+}
+
+/// One line for where a restore left the tenant's pin.
+fn restore_pin_line(space: &str, pin: &ordo_host::versions::RestorePin) -> String {
+    use ordo_host::versions::RestorePin;
+    match pin {
+        RestorePin::Unchanged { version } => {
+            format!("version {version}, the tenant's pin already\n")
+        }
+        RestorePin::Pinned { change } => format!(
+            "version PINNED {} -> {} · cause restore · epoch {}. The tenant serves {}; it \
+             moves on with a rollout or `ordo versions pin {space} <version>`\n",
+            change.from.as_deref().unwrap_or("(none)"),
+            change.to,
+            change.epoch,
+            change.to,
+        ),
+        RestorePin::Held { data, pin, why } => {
+            let pin = pin.as_deref().unwrap_or("(none)");
+            format!(
+                "version HELD the data is at {data} and the pin stays at {pin}: {why}. The \
+                 tenant is closed until its database is brought to {pin} (the catch-up does \
+                 it for the active version, or `ordo versions pin {space} <version>`)\n"
+            )
+        }
+    }
+}
+
+/// The fourth part is the control database when the tenant sits on a
+/// database of its own (`--tenant` form only): where its pin is, which a
+/// restore of that database moves to the data's version (§2.9).
 async fn restore_target(
     flags: &Flags,
     space: &SpaceId,
-) -> Result<(Pool, Witness, Option<String>), Outcome> {
+) -> Result<(Pool, Witness, Option<String>, Option<Pool>), Outcome> {
     if !flags.has("--tenant") {
         let pool = connect(flags).await?;
         let witness = witness_for(flags, &pool).await?;
-        return Ok((pool, witness, None));
+        // A control database apart from the tenant's (`--control-db` other
+        // than `--db`) holds the pin, which follows the restored data as it
+        // does with `--tenant`. One database for both was restored whole,
+        // pins and all, so nothing moves.
+        let control = match flags.named.get("--control-db") {
+            Some(db) if Some(db) != flags.named.get("--db") => {
+                let mut cfg = pool_config(flags);
+                cfg.db = db.clone();
+                Some(
+                    Pool::connect(cfg)
+                        .await
+                        .map_err(|e| Outcome::failed(format!("control database: {e}\n")))?,
+                )
+            }
+            _ => None,
+        };
+        return Ok((pool, witness, None, control));
     }
     // The control connection: `--control-db`, or `--db`'s own default —
     // the same fallback `witness_for` already uses for the single-database
@@ -1539,26 +1656,24 @@ async fn restore_target(
         // row is served from the deployment's default.
         None => {
             let witness = Witness::new(control.clone());
-            Ok((control, witness, Some("default (unattached)".to_string())))
+            Ok((
+                control,
+                witness,
+                Some("default (unattached)".to_string()),
+                None,
+            ))
         }
         Some(a) => {
-            let credentials = ordo_host::runtime::credentials_from_env()
-                .map_err(|e| Outcome::failed(format!("{e}")))?
-                .ok_or_else(|| {
-                    Outcome::failed(
-                        "this tenant is attached to its own database, and no \
-                         ORDO_TENANT_CREDENTIALS provider is configured on this node to \
-                         dial it\n"
-                            .to_string(),
-                    )
-                })?;
             let label = ordo_exec::route::target_label(&a.host, a.port, &a.db);
             let template = pool_config(flags);
             // `$deployment` is the password this command already holds for
             // the control database, so a tenant on the deployment's own
-            // cluster needs no second copy in the directory.
-            let credentials = ordo_exec::route::WithOwnCredential::wrapping(
-                credentials,
+            // cluster needs no second copy in the directory: the door dials
+            // it the same way (`runtime::tenant_credentials`). Any other
+            // label is refused naming ORDO_TENANT_CREDENTIALS.
+            let credentials = ordo_host::runtime::tenant_credentials(
+                ordo_host::runtime::credentials_from_env()
+                    .map_err(|e| Outcome::failed(format!("{e}")))?,
                 template.password.clone(),
             );
             let cfg = ordo_exec::route::target_config(&a, credentials.as_ref(), &template)
@@ -1570,8 +1685,8 @@ async fn restore_target(
             // witness is never restored, and it is what makes a restore
             // checkable), never the resolved target — a tenant on its own
             // perimeter has no witness of its own to be.
-            let witness = Witness::new(control);
-            Ok((pool, witness, Some(label)))
+            let witness = Witness::new(control.clone());
+            Ok((pool, witness, Some(label), Some(control)))
         }
     }
 }
@@ -1838,6 +1953,9 @@ fn floor_report(f: &ordo_exec::prune::Floor, policy: &ordo_exec::cadence::LogPol
 /// file is changed only on that refusal, and only with `--bump`.
 async fn apply(flags: Flags) -> Outcome {
     let first = apply_once(&flags).await;
+    if first.code == 0 && flags.has("--remove-landed-prev") {
+        return remove_landed_prev(&flags, first);
+    }
     if first.code == 0 || !flags.has("--bump") {
         return first;
     }
@@ -1863,6 +1981,35 @@ async fn apply(flags: Flags) -> Outcome {
     }
 }
 
+/// `--remove-landed-prev`: after a clean apply, cut the `prev` marks it
+/// named as landed out of the source (ruled 2026-10-04).
+fn remove_landed_prev(flags: &Flags, done: Outcome) -> Outcome {
+    let marks = crate::prev::read_landed(&done.report);
+    if marks.is_empty() {
+        return Outcome::ok(format!(
+            "{}prev       no `prev` mark has landed everywhere yet\n",
+            done.report
+        ));
+    }
+    let Some(path) = flags.positional.first() else {
+        return done;
+    };
+    match crate::prev::remove(std::path::Path::new(path), &marks) {
+        Ok(cut) => {
+            let mut out = done.report;
+            for at in cut {
+                out.push_str(&format!("removed    a landed `prev` mark at {at}\n"));
+            }
+            out.push_str("           apply again to store the source without it\n");
+            Outcome::ok(out)
+        }
+        Err(e) => Outcome::failed(format!(
+            "{}REFUSED  --remove-landed-prev: {e}\n",
+            done.report
+        )),
+    }
+}
+
 /// Raise `domain … @ from` to `to` in whichever file under `path` holds the
 /// header, and name that file.
 fn bump_source(path: &std::path::Path, from: &str, to: &str) -> Result<String, String> {
@@ -1883,6 +2030,7 @@ fn bump_source(path: &std::path::Path, from: &str, to: &str) -> Result<String, S
 async fn apply_once(flags: &Flags) -> Outcome {
     if let Err(e) = flags.only(&[
         "--bump",
+        "--remove-landed-prev",
         "--label",
         "--db",
         "--as",
@@ -1890,11 +2038,37 @@ async fn apply_once(flags: &Flags) -> Outcome {
         "--no-wait",
         "--wait-secs",
         "--env",
+        "--branch",
+        "--seed",
         "--host",
         "--token",
         "--space",
     ]) {
         return Outcome::usage(e);
+    }
+    // `--branch` (`plan-versions.md` §3.3): through the door only, never
+    // activated, in dev. `--seed` comes with it.
+    let branch = flags.named_value("--branch").map(str::to_string);
+    if branch.is_none() && flags.named_value("--seed").is_some() {
+        return Outcome::usage(
+            "`--seed <file>` fills a new branch tenant, so it goes with `--branch <name>`\n".into(),
+        );
+    }
+    if branch.is_some() {
+        for clash in ["--no-activate", "--env", "--as", "--bump"] {
+            if flags.has(clash) || flags.named.contains_key(clash) {
+                return Outcome::usage(format!(
+                    "`--branch` takes no `{clash}`: a branch's version is stored in dev and \
+                     never activated, and serves the branch's own tenant alone\n"
+                ));
+            }
+        }
+        if flags.direct || crate::wire::requested(flags).is_none() {
+            return Outcome::usage(
+                "`--branch` goes through the door: drop `--direct` and give `--host <dev>`\n"
+                    .into(),
+            );
+        }
     }
     // How long to wait for the nodes to serve what this activates
     // (`deploy_wait`). Read before anything is applied, so a bad value
@@ -1971,6 +2145,19 @@ async fn apply_once(flags: &Flags) -> Outcome {
             Ok(c) => c,
             Err(e) => return Outcome::failed(format!("REFUSED  {e}\n")),
         };
+        if let Some(branch) = &branch {
+            return crate::branches::apply(
+                &host,
+                flags,
+                branch,
+                src.text(),
+                code,
+                &provenance,
+                &path,
+                &db,
+            )
+            .await;
+        }
         return crate::wire::apply_over_the_wire(
             &host,
             flags,
@@ -2158,7 +2345,9 @@ pub(crate) fn served_version(report: &ordo_host::apply_op::Report) -> Option<Str
     match &report.activation {
         Activation::Switched { to, .. } => Some(to.clone()),
         Activation::AlreadyActive { version } => Some(version.clone()),
-        Activation::Staged => None,
+        // `ordo apply` returns when the rollout starts (§3.5); the rollout
+        // moves the deployment, and `ordo rollout status` follows it.
+        Activation::Staged | Activation::RolloutStarted { .. } => None,
     }
 }
 
@@ -2172,7 +2361,7 @@ pub(crate) fn served_version(report: &ordo_host::apply_op::Report) -> Option<Str
 /// `path` and `db` are the caller's own facts rather than the report's —
 /// the server does not know what the operator called the file or the
 /// database — so the remedies that name a command are built here.
-pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, _path: &str, _db: &str) -> String {
+pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, path: &str, _db: &str) -> String {
     use ordo_host::apply_op::{Activation, SchemaOutcome, Stored};
 
     let mut out = String::new();
@@ -2210,6 +2399,9 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, _path: &str, _d
              objects, increment 5 contracts them)\n"
         )),
         SchemaOutcome::Behind { changes } => behind = changes,
+        SchemaOutcome::Untouched => out.push_str(
+            "schema     untouched  (a branch: the deployment's own database is not changed)\n",
+        ),
     }
     let version = numbered(report.ordinal, &report.version);
     out.push_str(&match report.stored {
@@ -2241,6 +2433,10 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, _path: &str, _d
              --to {} --run --host <h>`, then activate)\n",
             report.version
         )),
+        Activation::Staged if report.schema == SchemaOutcome::Untouched => out.push_str(
+            "activated  no  (a branch's version serves its own tenant; the deployment still \
+             points where it did)\n",
+        ),
         Activation::Staged => out
             .push_str("activated  no  (--no-activate: the deployment still points where it did)\n"),
         Activation::Switched { from, to } => out.push_str(&format!(
@@ -2250,6 +2446,18 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, _path: &str, _d
         )),
         Activation::AlreadyActive { version } => out.push_str(&format!(
             "activated  {version}  (already active; nothing re-pointed)\n"
+        )),
+        Activation::RolloutStarted {
+            id,
+            strategy,
+            from,
+            to,
+        } => out.push_str(&format!(
+            "activated  not yet: rollout {id} to {to} started ({strategy}, from {})\n\
+             rollout    `ordo rollout status` follows it; `ordo rollout abort` stops it. \
+             `ordo rollout set rollout.strategy all --reason \"...\"` makes the next apply \
+             move every tenant at once\n",
+            from.as_deref().unwrap_or("nothing"),
         )),
     }
     let t = &report.tenants;
@@ -2269,6 +2477,18 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, _path: &str, _d
                  forward; the deployment retries the ones that were unreachable\n",
             );
         }
+    }
+    // The offer to remove landed `prev` marks (ruled 2026-10-04).
+    for mark in &report.landed_prev {
+        out.push_str(&format!(
+            "{}`{mark}` has landed in every environment; the mark can go\n",
+            crate::prev::LANDED
+        ));
+    }
+    if !report.landed_prev.is_empty() {
+        out.push_str(&format!(
+            "           remove them with `ordo apply {path} --remove-landed-prev`\n"
+        ));
     }
     out
 }
@@ -2401,14 +2621,28 @@ async fn rollback(flags: Flags) -> Outcome {
             Err(o) => return o,
         };
         let to = row["version"].as_str().unwrap_or(&version);
-        return Outcome::ok(match row["state"].as_str() {
+        let list = |k: &str| -> Vec<String> {
+            row[k]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|t| t.as_str().map(String::from))
+                .collect()
+        };
+        let reverted = ordo_host::apply_op::Reverted {
+            soaks: list("reverted"),
+            pins: list("movedBack"),
+        };
+        let mut out = match row["state"].as_str() {
             Some("alreadyActive") => format!("UNCHANGED  {to} is already active\n"),
             _ => format!(
                 "rolled back to {to}  (was {})\nnodes      nudged on `{}`\n",
                 row["from"].as_str().unwrap_or("nothing"),
                 ordo_host::versions::DEPLOY_CHANNEL,
             ),
-        });
+        };
+        out.push_str(&reverted_lines(to, &reverted));
+        return Outcome::ok(out);
     }
     let actor = flags
         .named
@@ -2434,18 +2668,40 @@ async fn rollback(flags: Flags) -> Outcome {
     // lock as an apply, and the same refusal for a version whose tables
     // this database does not hold.
     use ordo_host::apply_op::Activation;
-    match ordo_host::apply_op::activate(&pool, &version, &actor).await {
-        Ok(Activation::Switched { from, to }) => Outcome::ok(format!(
-            "rolled back to {to}  (was {})\nnodes      nudged on `{}`\n",
+    match ordo_host::apply_op::activate_reverting(&pool, None, None, &version, &actor).await {
+        Ok((Activation::Switched { from, to }, reverted)) => Outcome::ok(format!(
+            "rolled back to {to}  (was {})\nnodes      nudged on `{}`\n{}",
             from.as_deref().unwrap_or("nothing"),
             ordo_host::versions::DEPLOY_CHANNEL,
+            reverted_lines(&to, &reverted),
         )),
-        Ok(Activation::AlreadyActive { version }) => {
-            Outcome::ok(format!("UNCHANGED  {version} is already active\n"))
+        Ok((Activation::AlreadyActive { version }, reverted)) => Outcome::ok(format!(
+            "UNCHANGED  {version} is already active\n{}",
+            reverted_lines(&version, &reverted)
+        )),
+        Ok((Activation::Staged, _)) | Ok((Activation::RolloutStarted { .. }, _)) => {
+            Outcome::failed("REFUSED an activation answered staged\n".into())
         }
-        Ok(Activation::Staged) => Outcome::failed("REFUSED an activation answered staged\n".into()),
         Err(e) => Outcome::failed(format!("REFUSED {e}\n")),
     }
+}
+
+/// One line per tenant a rollback put back in its soak (increment 11b),
+/// and per tenant an aborted rollout pinned with no soak (ruled
+/// 2026-11-25).
+fn reverted_lines(to: &str, reverted: &ordo_host::apply_op::Reverted) -> String {
+    let mut out: String = reverted
+        .soaks
+        .iter()
+        .map(|t| format!("reverted   {t} back on {to} in its soak; every write kept\n"))
+        .collect();
+    for t in &reverted.pins {
+        out.push_str(&format!(
+            "moved back {t} on {to}: the aborted rollout pinned it with no soak; every write \
+             kept\n"
+        ));
+    }
+    out
 }
 
 /// `ordo deploys` — what is stored, what is serving, and every re-point.
@@ -2582,10 +2838,11 @@ const CLONES_USAGE: &str = "ordo clones key  --host <h> ...\n\
      ordo clones clone <tenant> [--from <env>] [--name <n>] [--from-token <t>] \
      --reason \"<text>\"  --host <h> ...\n\
      ordo clones list  --host <h> ...\n\
-     ordo clones set mask|readers <value> --reason \"<text>\"  --host <h> ...\n\
+     ordo clones set mask|readers|sinks <value> --reason \"<text>\"  --host <h> ...\n\
+     ordo clones sink [<tenant>] [--limit <n>]  --host <h> ...\n\
      each goes through the door (`--host <h>` or ORDO_HOST)";
 
-/// `ordo clones key|set-key|clone|list|set`: staging clones named
+/// `ordo clones key|set-key|clone|list|set|sink`: staging clones named
 /// production tenants (`plan-versions.md` §3.4, increment 12), through the
 /// door. `clone` runs on staging: staging asks production for the tenant as
 /// you, with your own token for production, and production masks it before
@@ -2598,12 +2855,13 @@ async fn clones_cmd(flags: Flags) -> Outcome {
     flags.positional.remove(0);
     let own: &[&str] = match sub.as_str() {
         "key" | "list" => &[],
+        "sink" => &["--limit"],
         "set-key" | "set" => &["--reason"],
         "clone" => &["--from", "--name", "--from-token", "--reason"],
         other => {
             return Outcome::usage(format!(
                 "unknown `ordo clones` subcommand `{other}`; there are `key`, `set-key`, \
-                 `clone`, `list` and `set`\n{CLONES_USAGE}\n"
+                 `clone`, `list`, `set` and `sink`\n{CLONES_USAGE}\n"
             ))
         }
     };
@@ -2626,6 +2884,23 @@ async fn clones_cmd(flags: Flags) -> Outcome {
         }
         ("list", []) => {
             crate::wire::door_op(&host, &flags, c::CLONES, serde_json::json!({}), false).await
+        }
+        ("sink", rest) if rest.len() <= 1 => {
+            let limit = match flags.named_value("--limit").map(str::parse::<u32>) {
+                None => None,
+                Some(Ok(n)) => Some(n),
+                Some(Err(_)) => {
+                    return Outcome::usage("`--limit <n>` takes a whole number\n".into())
+                }
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                c::SINKS,
+                serde_json::json!({ "tenant": rest.first(), "limit": limit }),
+                false,
+            )
+            .await
         }
         ("set-key", [env, key]) => {
             let Some(reason) = reason else {
@@ -2700,6 +2975,26 @@ async fn clones_cmd(flags: Flags) -> Outcome {
             row["env"].as_str().unwrap_or("?"),
             row["key"].as_str().unwrap_or("?"),
         ),
+        "sink" => {
+            let entries = row["entries"].as_array().cloned().unwrap_or_default();
+            if entries.is_empty() {
+                "SINK  empty: nothing in staging has sent anything\n".to_string()
+            } else {
+                let mut out = String::from("SINK  what staging would have sent, newest first\n");
+                for e in entries {
+                    out.push_str(&format!(
+                        "  {}  {}  {}  to {}  \"{}\"  {} bytes\n",
+                        e["at"].as_u64().unwrap_or(0),
+                        e["space"].as_str().unwrap_or("?"),
+                        e["kind"].as_str().unwrap_or("?"),
+                        e["target"].as_str().unwrap_or("?"),
+                        e["summary"].as_str().unwrap_or(""),
+                        e["bytes"].as_u64().unwrap_or(0),
+                    ));
+                }
+                out
+            }
+        }
         "set-key" => format!(
             "recorded    the clone key of {}\n",
             row["env"].as_str().unwrap_or("?")
@@ -2718,11 +3013,10 @@ async fn clones_cmd(flags: Flags) -> Outcome {
                 .map(|a| a.len())
                 .unwrap_or(0);
             let mut out = format!(
-                "cloned      {} from {} on {} into {} ({})\nversion     {}\nrows        {}, \
+                "cloned      {} from {} into {} ({})\nversion     {}\nrows        {}, \
                  {} field(s) masked\nopens as    {} for a staging admin\n",
-                cl["fromName"].as_str().unwrap_or("?"),
-                cl["fromEnv"].as_str().unwrap_or("?"),
                 cl["fromTenant"].as_str().unwrap_or("?"),
+                cl["fromEnv"].as_str().unwrap_or("?"),
                 cl["name"].as_str().unwrap_or("?"),
                 cl["space"].as_str().unwrap_or("?"),
                 cl["version"].as_str().unwrap_or("?"),
@@ -2730,6 +3024,12 @@ async fn clones_cmd(flags: Flags) -> Outcome {
                 masked,
                 cl["opensAs"].as_str().unwrap_or("?"),
             );
+            if let Some(v) = row["arrived"].as_str() {
+                out.push_str(&format!(
+                    "arrived     {v} came down with the clone, through the promotion gate: \
+                     stored, not activated\n"
+                ));
+            }
             if let Some(n) = row["notCloned"].as_array().filter(|a| !a.is_empty()) {
                 out.push_str(&format!(
                     "not cloned  {} (foreign tables: staging needs its own copy and peer)\n",
@@ -2743,11 +3043,13 @@ async fn clones_cmd(flags: Flags) -> Outcome {
         }
         _ => {
             let mut out = format!(
-                "{} {}\n{} {}\nCLONES\n",
+                "{} {}\n{} {}\n{} {}\nCLONES\n",
                 c::MASK_SETTING,
                 row["mask"].as_str().unwrap_or("?"),
                 c::READERS_SETTING,
                 readers_line(&row["readers"]),
+                c::SINKS_SETTING,
+                row["sinks"].as_str().unwrap_or("on"),
             );
             for cl in row["clones"].as_array().cloned().unwrap_or_default() {
                 out.push_str(&format!(
@@ -2765,6 +3067,277 @@ async fn clones_cmd(flags: Flags) -> Outcome {
         }
     };
     Outcome::ok(out)
+}
+
+// ── rehearsals ───────────────────────────────────────────────────────────
+
+const REHEARSALS_USAGE: &str =
+    "ordo rehearsals rehearse --from <v> --to <v> --clone <clone>[,<clone>] \
+     --reason \"<text>\"  --host <staging> ...\n\
+     ordo rehearsals accept --from <v> --to <v> [--from-token <t>] [--trust-key <k>]  \
+     --host <production> ...\n\
+     ordo rehearsals break-glass --from <v> --to <v> --reason \"<text>\"  --host <production> ...\n\
+     ordo rehearsals list [--from <v>] [--to <v>]  --host <h> ...\n\
+     each goes through the door (`--host <h>` or ORDO_HOST)";
+
+/// `ordo rehearsals rehearse|accept|list`: the signed rehearsal
+/// (`plan-versions.md` §3.2, increment 12b), through the door. `rehearse`
+/// runs on staging, over clones; `accept` runs on production, which reads
+/// staging's signed rehearsal as you, with your own token for staging.
+/// `break-glass` runs on production when staging is down: the step's
+/// stored plan runs without a rehearsal for one hour, with your reason.
+async fn rehearsals_cmd(flags: Flags) -> Outcome {
+    let Some(sub) = flags.positional.first().cloned() else {
+        return Outcome::usage(format!("{REHEARSALS_USAGE}\n"));
+    };
+    let mut flags = flags;
+    flags.positional.remove(0);
+    let own: &[&str] = match sub.as_str() {
+        "list" => &["--from", "--to"],
+        "rehearse" => &["--from", "--to", "--clone", "--reason"],
+        "accept" => &["--from", "--to", "--from-token", "--trust-key"],
+        "break-glass" => &["--from", "--to", "--reason"],
+        other => {
+            return Outcome::usage(format!(
+                "unknown `ordo rehearsals` subcommand `{other}`; there are `rehearse`, \
+                 `accept`, `break-glass` and `list`\n{REHEARSALS_USAGE}\n"
+            ))
+        }
+    };
+    let mut allowed = own.to_vec();
+    allowed.extend(DOOR_FLAGS);
+    if let Err(e) = flags.only(&allowed) {
+        return Outcome::usage(e);
+    }
+    if !flags.positional.is_empty() {
+        return Outcome::usage(format!("{REHEARSALS_USAGE}\n"));
+    }
+    let host = match door_only(&flags) {
+        Ok(h) => h,
+        Err(o) => return o,
+    };
+    use ordo_host::rehearsals as r;
+    let named = |k: &str| flags.named_value(k).map(str::to_string);
+    let step = || match (named("--from"), named("--to")) {
+        (Some(f), Some(t)) => Ok((f, t)),
+        _ => Err(Outcome::usage(
+            "`--from <version> --to <version>` name the step\n".into(),
+        )),
+    };
+    let row = match sub.as_str() {
+        "list" => {
+            crate::wire::door_op(
+                &host,
+                &flags,
+                r::REHEARSALS,
+                serde_json::json!({ "from": named("--from"), "to": named("--to") }),
+                false,
+            )
+            .await
+        }
+        "rehearse" => {
+            let (from, to) = match step() {
+                Ok(s) => s,
+                Err(o) => return o,
+            };
+            let Some(tenants) = named("--clone") else {
+                return Outcome::usage(
+                    "`--clone <clone>` names the clones to rehearse on; `ordo clones list` \
+                     names them\n"
+                        .into(),
+                );
+            };
+            let Some(reason) = named("--reason") else {
+                return Outcome::usage(
+                    "`--reason \"<text>\"` says why, and is kept with the rehearsal\n".into(),
+                );
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                r::REHEARSE,
+                serde_json::json!({
+                    "from": from, "to": to, "tenants": tenants, "reason": reason,
+                }),
+                true,
+            )
+            .await
+        }
+        "break-glass" => {
+            let (from, to) = match step() {
+                Ok(s) => s,
+                Err(o) => return o,
+            };
+            let Some(reason) = named("--reason") else {
+                return Outcome::usage(
+                    "`--reason \"<text>\"` says why staging is passed by, and is kept on the \
+                     deployment's stream\n"
+                        .into(),
+                );
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                r::BREAK_GLASS,
+                serde_json::json!({ "from": from, "to": to, "reason": reason }),
+                true,
+            )
+            .await
+        }
+        _ => {
+            let (from, to) = match step() {
+                Ok(s) => s,
+                Err(o) => return o,
+            };
+            let token = match named("--from-token") {
+                Some(t) => t,
+                None => {
+                    match clone_source_token(&host, &flags, ordo_host::environments::STAGING).await
+                    {
+                        Ok(t) => t,
+                        Err(o) => return o,
+                    }
+                }
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                r::ACCEPT,
+                serde_json::json!({
+                    "from": from, "to": to, "fromToken": token,
+                    "trustKey": named("--trust-key"),
+                }),
+                true,
+            )
+            .await
+        }
+    };
+    let row = match row {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    Outcome::ok(rehearsal_lines(&sub, &row))
+}
+
+/// What `ordo rehearsals <sub>` prints for the door's answer.
+fn rehearsal_lines(sub: &str, row: &serde_json::Value) -> String {
+    let s = |v: &serde_json::Value| v.as_str().unwrap_or("?").to_string();
+    let count = |v: &serde_json::Value| v.as_array().map(|c| c.len()).unwrap_or(0);
+    match sub {
+        "rehearse" => {
+            let a = &row["rehearsal"]["attestation"];
+            let mut out = format!(
+                "rehearsed   {} to {} on {} clone(s), green\ndigest      {}\nsigned by   {} \
+                 (key {})\nrelease     {}\n",
+                s(&a["from"]),
+                s(&a["to"]),
+                count(&a["clones"]),
+                s(&a["digest"]),
+                s(&a["env"]),
+                s(&a["key"]),
+                s(&a["release"]),
+            );
+            for nr in a["notReproducible"].as_array().cloned().unwrap_or_default() {
+                out.push_str(&format!(
+                    "not reproducible  {}.{} by function {}: it declares secrets or hosts\n",
+                    s(&nr["entity"]),
+                    s(&nr["field"]),
+                    s(&nr["function"]),
+                ));
+            }
+            out.push_str(&format!(
+                "Accept it on production: `ordo rehearsals accept --from {} --to {}`\n",
+                s(&a["from"]),
+                s(&a["to"])
+            ));
+            out
+        }
+        "accept" => {
+            let mut out = format!(
+                "accepted    {} to {}, rehearsed on {}\ndigest      {}\nkey         {}{}\n\
+                 plan        {}\n",
+                s(&row["from"]),
+                s(&row["to"]),
+                s(&row["env"]),
+                s(&row["digest"]),
+                s(&row["key"]),
+                if row["keyRecorded"].as_bool() == Some(true) {
+                    " (recorded)"
+                } else {
+                    ""
+                },
+                if row["planStored"].as_bool() == Some(true) {
+                    "stored here"
+                } else {
+                    "already stored here"
+                },
+            );
+            for w in row["warnings"].as_array().cloned().unwrap_or_default() {
+                out.push_str(&format!("warning     {}\n", s(&w)));
+            }
+            out
+        }
+        "break-glass" => format!(
+            "broke glass {} to {}: {} is down\ndigest      {}\nstaging     {}\nreason      {}\n\
+             until       {} (1 hour)\nThe step's stored plan runs here until then, without a \
+             rehearsal. The deployment's stream marks it.\n",
+            s(&row["from"]),
+            s(&row["to"]),
+            s(&row["env"]),
+            s(&row["digest"]),
+            s(&row["stagingSaid"]),
+            s(&row["reason"]),
+            row["until"].as_u64().unwrap_or(0),
+        ),
+        _ => {
+            let mut out = format!(
+                "environment {}\nsigning key {}\nSIGNED\n",
+                s(&row["env"]),
+                row["key"].as_str().unwrap_or("none yet"),
+            );
+            for x in row["rehearsals"].as_array().cloned().unwrap_or_default() {
+                let a = &x["attestation"];
+                out.push_str(&format!(
+                    "  {} to {}  {}  {} clone(s)  by {}  at {}\n",
+                    s(&a["from"]),
+                    s(&a["to"]),
+                    s(&a["digest"]),
+                    count(&a["clones"]),
+                    s(&a["actor"]),
+                    a["at"].as_u64().unwrap_or(0),
+                ));
+            }
+            out.push_str("ACCEPTED\n");
+            for x in row["accepted"].as_array().cloned().unwrap_or_default() {
+                out.push_str(&format!(
+                    "  {} to {}  {}  from {}  by {}\n",
+                    s(&x["from"]),
+                    s(&x["to"]),
+                    s(&x["digest"]),
+                    s(&x["env"]),
+                    s(&x["actor"]),
+                ));
+            }
+            out.push_str("BREAK-GLASS\n");
+            for x in row["brokenGlass"].as_array().cloned().unwrap_or_default() {
+                out.push_str(&format!(
+                    "  {} to {}  {}  by {}  until {} ({})  reason: {}\n",
+                    s(&x["from"]),
+                    s(&x["to"]),
+                    s(&x["digest"]),
+                    s(&x["actor"]),
+                    x["until"].as_u64().unwrap_or(0),
+                    if x["active"].as_bool() == Some(true) {
+                        "active"
+                    } else {
+                        "ended"
+                    },
+                    s(&x["reason"]),
+                ));
+            }
+            out
+        }
+    }
 }
 
 fn readers_line(v: &serde_json::Value) -> String {
@@ -2828,6 +3401,8 @@ const ENVIRONMENTS_USAGE: &str = "ordo environments list [<name>]  --host <h> ..
      --host <h> ...\n\
      ordo environments door <name> --clear --reason \"<text>\"  --host <h> ...\n\
      ordo environments set skip-staging on|off --reason \"<text>\"  --host <h> ...\n\
+     ordo environments set release-mismatch refuse|warn --reason \"<text>\"  --host <h> ...\n\
+     ordo environments set attestation-max-age <n>d --reason \"<text>\"  --host <h> ...\n\
      ordo environments set-own <name> --reason \"<text>\"  --host <h> ...\n\
      ordo environments remove <name> --reason \"<text>\"  --host <h> ...\n\
      ordo environments rename <name> <new-name> --reason \"<text>\"  --host <h> ...\n\
@@ -3192,6 +3767,7 @@ async fn versions_cmd(flags: Flags) -> Outcome {
         "revoke" => versions_revoke(flags).await,
         "unrevoke" => versions_unrevoke(flags).await,
         "revoked" => versions_revoked(flags).await,
+        "remove" => versions_remove(flags).await,
         "pin" => versions_pin(flags).await,
         "move" => versions_move(flags).await,
         "target" => versions_target(flags).await,
@@ -3199,8 +3775,8 @@ async fn versions_cmd(flags: Flags) -> Outcome {
         "set" => versions_set(flags).await,
         other => Outcome::usage(format!(
             "unknown `ordo versions` subcommand `{other}`; there are `list`, `show`, \
-             `label`, `diff`, `revoke`, `unrevoke`, `revoked`, `pin`, `move`, `target`, \
-             `settings` and `set`\n"
+             `label`, `diff`, `revoke`, `unrevoke`, `revoked`, `remove`, `pin`, `move`, \
+             `target`, `settings` and `set`\n"
         )),
     }
 }
@@ -3215,9 +3791,15 @@ const VERSIONS_USAGE: &str = "ordo versions list [--tenant <id>]  --host <h> ...
      ordo versions revoke <version> --reason \"<text>\" [--move-to <version>]  --host <h> ...\n\
      ordo versions unrevoke <version> --reason \"<text>\"  --host <h> ...\n\
      ordo versions revoked  --host <h> ...\n\
+     ordo versions remove <version> --reason \"<text>\" [--move-to <version>]  --host <h> ...\n\
      ordo versions settings [--limit <n>]  --host <h> ...\n\
-     ordo versions set <served|minimum|new-tenant|min-residency|idle-evict-after> <value> | --clear  --reason \"<text>\"  \
+     ordo versions set <served|minimum|new-tenant|min-residency|idle-evict-after|restore-window|max-loaded|memory-budget|max-concurrent-loads|at-capacity|wake-wait> <value> | --clear  --reason \"<text>\"  \
      --host <h> ...\n\
+     ordo versions set backfill.<chunk_rows|chunk_timeout|max_attempts|budget> <value> | --clear  --reason \"<text>\"  \
+     --host <h> ...\n\
+     ordo versions set windows.<list_months|max_tenants|max_times|max_times_per_window|max_message_chars|max_reason_chars|max_id_chars> <n> | --clear  --reason \"<text>\"  \
+     --host <h> ...\n\
+     ordo versions set soak.length <length> | --clear  --reason \"<text>\"  --host <h> ...\n\
      every `versions` command goes through the door (`--host <h>` or ORDO_HOST)\n\
      a version is its name or its order number, `#4`";
 
@@ -3478,6 +4060,64 @@ async fn versions_revoked(flags: Flags) -> Outcome {
     }
 }
 
+/// `ordo versions remove <version> --reason "..." [--move-to <w>]`: remove
+/// a stored version, moving its tenants to `<w>` first
+/// (`plan-versions.md` §1.6), through `std.deployment.removeVersion`,
+/// deployment owner only. Refused by name when it is active, a tenant build
+/// serves it, a restore may still need it, or a tenant cannot move.
+async fn versions_remove(flags: Flags) -> Outcome {
+    let mut allowed = vec!["--reason", "--move-to"];
+    allowed.extend(DOOR_FLAGS);
+    if let Err(e) = flags.only(&allowed) {
+        return Outcome::usage(e);
+    }
+    let [version] = flags.positional.as_slice() else {
+        return Outcome::usage(format!("{VERSIONS_USAGE}\n"));
+    };
+    let reason = match flags.require("--reason") {
+        Ok(r) => r.to_string(),
+        Err(e) => return Outcome::usage(format!("{e}: a removal says why, and stays on record\n")),
+    };
+    let move_to = flags.named_value("--move-to").map(str::to_string);
+    let host = match door_only(&flags) {
+        Ok(h) => h,
+        Err(o) => return o,
+    };
+    let row = match crate::wire::door_op(
+        &host,
+        &flags,
+        ordo_host::deploy_ops::REMOVE_VERSION,
+        serde_json::json!({ "version": version, "reason": reason, "moveTo": move_to }),
+        true,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let moved: Vec<&str> = row["moved"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|t| t.as_str()).collect())
+        .unwrap_or_default();
+    let mut out = String::new();
+    if let Some(to) = row["movedTo"].as_str() {
+        out.push_str(&format!(
+            "moved      {} tenant{} to {to}: {}\n",
+            moved.len(),
+            if moved.len() == 1 { "" } else { "s" },
+            moved.join(", ")
+        ));
+    }
+    out.push_str(&format!(
+        "removed    {}  \"{reason}\"\n",
+        numbered(
+            row["ordinal"].as_u64(),
+            row["version"].as_str().unwrap_or(version)
+        )
+    ));
+    Outcome::ok(out)
+}
+
 /// `ordo versions move <tenant>`: move one tenant off the revoked version
 /// it is on, now, to the target the app developer chose (ruled
 /// 2026-11-05). Locally through `Versions::move_off_revoked`, or over the
@@ -3604,6 +4244,21 @@ async fn rollback_dry_run(host: &crate::wire::Host, flags: &Flags, version: &str
     for n in row["notes"].as_array().into_iter().flatten() {
         out.push_str(&format!("note       {}\n", n.as_str().unwrap_or("")));
     }
+    // Each tenant the rollback moves, and whether every write is kept
+    // (plan-versions.md §2.5, increment 11b).
+    for t in row["tenants"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "{}  {} on {}: {}\n",
+            if t["kept"].as_bool() == Some(true) {
+                "tenant    "
+            } else {
+                "LOSES     "
+            },
+            t["tenant"].as_str().unwrap_or("?"),
+            t["on"].as_str().unwrap_or("?"),
+            t["note"].as_str().unwrap_or(""),
+        ));
+    }
     let refusals = row["refusals"].as_array().cloned().unwrap_or_default();
     if refusals.is_empty() {
         out.push_str("externals  every external and peer table it reads checks out\n");
@@ -3644,18 +4299,41 @@ fn door_unless_direct(flags: &Flags) -> Option<Result<crate::wire::Host, String>
     }
 }
 
-/// The three settings as `ordo versions settings` and `set` print them.
+/// The version settings as `ordo versions settings` and `set` print them.
 fn settings_lines(row: &serde_json::Value) -> String {
     let show = |k: &str, unset: &str| row[k].as_str().unwrap_or(unset).to_string();
     format!(
-        "  served      {}\n  minimum     {}\n  new tenants {}\n",
+        "  served      {}\n  minimum     {}\n  new tenants {}\n  restore window {}\n  \
+         min residency {}\n  idle evict after {}\n  max loaded {}\n  memory budget {}\n  \
+         max concurrent loads {}\n  at capacity {}\n  wake wait {}\n",
         show("served", "in-use"),
         show("minimum", "none"),
-        show("newTenant", "the active version")
-    ) + &row["waiting"]["line"]
-        .as_str()
-        .map(|l| format!("  WAITING     {l}\n"))
+        show("newTenant", "the active version"),
+        show(
+            "restoreWindow",
+            "unset: 30d, or your backup retention when known"
+        ),
+        show("minResidency", "10m"),
+        show("idleEvictAfter", "30m"),
+        show("maxLoaded", "8"),
+        show("memoryBudget", "512MB"),
+        show("maxConcurrentLoads", "1"),
+        show("atCapacity", "evict-idle"),
+        show("wakeWait", "5s"),
+    ) + &row["soakSecs"]
+        .as_u64()
+        .map(|s| {
+            format!(
+                "  soak length {}\n",
+                ordo_host::windows::format_length(s as i64)
+            )
+        })
         .unwrap_or_default()
+        + &windows_lines(&row["windows"])
+        + &row["waiting"]["line"]
+            .as_str()
+            .map(|l| format!("  WAITING     {l}\n"))
+            .unwrap_or_default()
 }
 
 /// `ordo versions settings`: `versions.served`, `versions.minimum` and
@@ -3691,7 +4369,11 @@ async fn versions_settings(flags: Flags) -> Outcome {
         Ok(r) => r,
         Err(o) => return o,
     };
-    let mut out = format!("VERSION SETTINGS\n{}", settings_lines(&row));
+    let mut out = format!(
+        "VERSION SETTINGS\n{}{}",
+        settings_lines(&row),
+        backfill_lines(&row["backfill"])
+    );
     let history = row["history"].as_array().cloned().unwrap_or_default();
     out.push_str(&format!("CHANGES ({})\n", history.len()));
     if history.is_empty() {
@@ -3726,16 +4408,57 @@ async fn versions_set(flags: Flags) -> Outcome {
         ([s], true) => (s.clone(), None),
         _ => return Outcome::usage(format!("{VERSIONS_USAGE}\n")),
     };
-    let Some(setting) = ordo_host::versions::VersionSetting::parse(&name) else {
-        return Outcome::usage(format!(
-            "`{name}` is not a version setting; there are `served`, `minimum`, \
-             `new-tenant`, `min-residency` and `idle-evict-after`\n"
-        ));
-    };
     let Some(reason) = flags.named_value("--reason") else {
         return Outcome::usage(
             "`--reason \"<text>\"` says why, and is kept with the change\n".into(),
         );
+    };
+    // The backfill settings are stored beside these and set the same way
+    // (Q15): `ordo versions set backfill.chunk_rows 500 --reason "..."`.
+    if name.trim().starts_with("backfill.") {
+        let Some(setting) = ordo_host::backfill::setting_name(&name) else {
+            return Outcome::usage(format!(
+                "`{name}` is not a backfill setting; there are {}\n",
+                ordo_host::backfill::SETTINGS.join(", ")
+            ));
+        };
+        return backfill_set(&flags, setting, value, reason).await;
+    }
+    // The window caps and `soak.length` too (owner, 2026-11-25: no number
+    // is hard coded).
+    if name.trim().starts_with("windows.") {
+        let Some(setting) = ordo_host::windows::setting_name(&name) else {
+            return Outcome::usage(format!(
+                "`{name}` is not a window setting; there are {}\n",
+                ordo_host::windows::SETTINGS.map(|(n, ..)| n).join(", ")
+            ));
+        };
+        return named_set(&flags, setting, value, reason).await;
+    }
+    // The input caps (owner, 2026-11-25).
+    if name.trim().starts_with("limits.") {
+        let Some(setting) = ordo_host::input_caps::setting_name(&name) else {
+            return Outcome::usage(format!(
+                "`{name}` is not an input cap; there are {}\n",
+                ordo_host::input_caps::SETTINGS.map(|(n, ..)| n).join(", ")
+            ));
+        };
+        return named_set(&flags, setting, value, reason).await;
+    }
+    if name.trim() == ordo_host::dual_writes::SOAK_SETTING {
+        return named_set(&flags, ordo_host::dual_writes::SOAK_SETTING, value, reason).await;
+    }
+    let Some(setting) = ordo_host::versions::VersionSetting::parse(&name) else {
+        return Outcome::usage(format!(
+            "`{name}` is not a version setting; there are {}, `soak.length`, the backfill \
+             settings {}, the window settings {} and the input caps {}\n",
+            ordo_host::versions::VersionSetting::ALL
+                .map(|s| format!("`{}`", s.command().trim_start_matches("ordo versions set ")))
+                .join(", "),
+            ordo_host::backfill::SETTINGS.join(", "),
+            ordo_host::windows::SETTINGS.map(|(n, ..)| n).join(", "),
+            ordo_host::input_caps::SETTINGS.map(|(n, ..)| n).join(", ")
+        ));
     };
     let host = match door_only(&flags) {
         Ok(h) => h,
@@ -3763,6 +4486,115 @@ async fn versions_set(flags: Flags) -> Outcome {
         format!("unchanged  {} is already {now}\n", setting.name())
     };
     Outcome::ok(format!("{head}{}", settings_lines(&row)))
+}
+
+/// `ordo versions set backfill.<name> <value> | --clear --reason "..."`:
+/// one backfill setting through the same door op.
+async fn backfill_set(
+    flags: &Flags,
+    setting: &'static str,
+    value: Option<String>,
+    reason: &str,
+) -> Outcome {
+    let host = match door_only(flags) {
+        Ok(h) => h,
+        Err(o) => return o,
+    };
+    let row = match crate::wire::door_op(
+        &host,
+        flags,
+        ordo_host::deploy_ops::SET_VERSION_SETTING,
+        serde_json::json!({ "setting": setting, "value": value, "reason": reason }),
+        true,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let now = match &row["value"] {
+        serde_json::Value::Null => "none".to_string(),
+        v => v.to_string(),
+    };
+    let head = if row["changed"].as_bool() == Some(true) {
+        format!("set        {setting} = {now}\n")
+    } else {
+        format!("unchanged  {setting} is already {now}\n")
+    };
+    Outcome::ok(format!("{head}{}", backfill_lines(&row["backfill"])))
+}
+
+/// The window caps as the settings op answers them.
+fn windows_lines(w: &serde_json::Value) -> String {
+    if w.is_null() {
+        return String::new();
+    }
+    let n = |k: &str| {
+        w[k].as_u64()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "?".into())
+    };
+    format!(
+        "WINDOWS\n  list months {}  max times {}  per window {}\n  max tenants {}  \
+         message {} chars  reason {} chars  id {} chars\n",
+        n("listMonths"),
+        n("maxTimes"),
+        n("maxTimesPerWindow"),
+        n("maxTenants"),
+        n("maxMessageChars"),
+        n("maxReasonChars"),
+        n("maxIdChars"),
+    )
+}
+
+/// `ordo versions set windows.<name> <n>` and `soak.length <length>`: one
+/// setting stored beside the version settings, through the same door op.
+async fn named_set(flags: &Flags, setting: &str, value: Option<String>, reason: &str) -> Outcome {
+    let host = match door_only(flags) {
+        Ok(h) => h,
+        Err(o) => return o,
+    };
+    let row = match crate::wire::door_op(
+        &host,
+        flags,
+        ordo_host::deploy_ops::SET_VERSION_SETTING,
+        serde_json::json!({ "setting": setting, "value": value, "reason": reason }),
+        true,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let now = match &row["value"] {
+        serde_json::Value::Null => "the default".to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        v => v.to_string(),
+    };
+    let head = if row["changed"].as_bool() == Some(true) {
+        format!("set        {setting} = {now}\n")
+    } else {
+        format!("unchanged  {setting} is already {now}\n")
+    };
+    Outcome::ok(format!("{head}{}", settings_lines(&row)))
+}
+
+/// The backfill settings as the settings op answers them.
+fn backfill_lines(b: &serde_json::Value) -> String {
+    if b.is_null() {
+        return String::new();
+    }
+    let n = |k: &str| b[k].as_u64().map(|n| n.to_string());
+    format!(
+        "BACKFILL\n  chunk rows    {}\n  chunk timeout {}s\n  max attempts  {}\n  budget        {}\n  \
+         concurrency   {}\n  per database  {}\n",
+        n("chunkRows").unwrap_or_else(|| "?".into()),
+        n("chunkTimeout").unwrap_or_else(|| "?".into()),
+        n("maxAttempts").unwrap_or_else(|| "?".into()),
+        n("budget").map(|b| format!("{b} chunks")).unwrap_or_else(|| "none".into()),
+        n("concurrency").map(|b| format!("{b} moves")).unwrap_or_else(|| "?".into()),
+        n("perDatabase").map(|b| format!("{b} moves")).unwrap_or_else(|| "?".into()),
+    )
 }
 
 /// What `ordo versions revoked` prints, on both paths.

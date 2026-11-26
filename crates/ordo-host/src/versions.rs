@@ -37,7 +37,7 @@
 //!
 //! A person names a stored version by its name or by its order number,
 //! `#4` ([`Versions::resolve`]). A version may carry a **label**, one line
-//! of at most [`MAX_LABEL_CHARS`] characters, and the **git commit** of the
+//! of at most `limits.label_chars` characters, and the **git commit** of the
 //! source it was applied from ([`Provenance`]). Neither is part of the
 //! version's identity.
 //!
@@ -127,15 +127,164 @@ pub enum VersionSetting {
     /// served no request for this long is unloaded, and loaded again on the
     /// next signed-in request for one of its tenants (§1.5).
     IdleEvictAfter,
+    /// `versions.restore_window`: how long the deployment owner keeps
+    /// database backups and exit bundles. A version some tenant or the
+    /// deployment was on within it is one a restore may still need, so it
+    /// is not removed, and a field it declares is not pruned (§1.6, §2.7,
+    /// increment 17). Unset, it is the deployment's backup retention, or 30
+    /// days when Ordo does not know that (owner, 2026-11-25).
+    RestoreWindow,
+    /// `versions.max_loaded`: how many versions a node holds loaded at
+    /// once, the active one included (§1.5). Owner, 2026-11-25: no number
+    /// is hard coded.
+    MaxLoaded,
+    /// `versions.memory_budget`: the memory a node gives per-space views
+    /// across every loaded version (§1.5).
+    MemoryBudget,
+    /// `versions.max_concurrent_loads`: versions a node compiles and gates
+    /// at once.
+    MaxConcurrentLoads,
+    /// `versions.at_capacity`: what a load past `versions.max_loaded` does.
+    /// `evict-idle` (the default, ruled 2026-11-25) pushes out the least
+    /// recently used idle version; `refuse` refuses the load.
+    AtCapacity,
+    /// `versions.wake_wait`: how long a request for a tenant whose version
+    /// was unloaded for idleness waits for it to load again.
+    WakeWait,
+}
+
+/// `versions.max_loaded`.
+pub const MAX_LOADED_SETTING: &str = "versions.max_loaded";
+/// `versions.memory_budget`.
+pub const MEMORY_BUDGET_SETTING: &str = "versions.memory_budget";
+/// `versions.max_concurrent_loads`.
+pub const MAX_CONCURRENT_LOADS_SETTING: &str = "versions.max_concurrent_loads";
+/// `versions.at_capacity`.
+pub const AT_CAPACITY_SETTING: &str = "versions.at_capacity";
+/// `versions.wake_wait`.
+pub const WAKE_WAIT_SETTING: &str = "versions.wake_wait";
+/// Their defaults (§7): 8 versions, 512 MB, 1 load at once, 5 seconds.
+pub const DEFAULT_MAX_LOADED: usize = 8;
+pub const DEFAULT_MEMORY_BUDGET: u64 = 512 * 1024 * 1024;
+pub const DEFAULT_MAX_CONCURRENT_LOADS: usize = 1;
+pub const DEFAULT_WAKE_WAIT_SECS: u64 = 5;
+/// The bounds a value is checked against: `max_loaded` 1 to 256, loads at
+/// once 1 to 16, the budget at least one view (256 KB), the wake wait 0
+/// to 5 minutes, so a request never holds its connection longer.
+pub const MAX_MAX_LOADED: usize = 256;
+pub const MAX_CONCURRENT_LOADS: usize = 16;
+pub const MIN_MEMORY_BUDGET: u64 = 256 * 1024;
+pub const MAX_WAKE_WAIT_SECS: u64 = 300;
+
+/// What a load past `versions.max_loaded` does (`versions.at_capacity`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AtCapacity {
+    /// Push out the least recently used idle version beside the active
+    /// one; refuse only when none is idle (owner, 2026-11-25).
+    #[default]
+    EvictIdle,
+    /// Refuse the load; the version's tenants stay closed on the node.
+    Refuse,
+}
+
+impl AtCapacity {
+    pub fn parse(v: &str) -> Option<AtCapacity> {
+        match v.trim() {
+            "evict-idle" | "evict_idle" => Some(AtCapacity::EvictIdle),
+            "refuse" => Some(AtCapacity::Refuse),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AtCapacity::EvictIdle => "evict-idle",
+            AtCapacity::Refuse => "refuse",
+        }
+    }
+}
+
+/// `512MB`, `2GB`, `256KB` or a number of bytes.
+pub fn parse_bytes(v: &str) -> Option<u64> {
+    let t = v.trim().to_ascii_uppercase();
+    let (n, unit) = match t.find(|c: char| !c.is_ascii_digit()) {
+        Some(i) => (&t[..i], t[i..].trim()),
+        None => (t.as_str(), ""),
+    };
+    let n: u64 = n.parse().ok()?;
+    let mul = match unit {
+        "" | "B" => 1,
+        "KB" | "K" => 1024,
+        "MB" | "M" => 1024 * 1024,
+        "GB" | "G" => 1024 * 1024 * 1024,
+        _ => return None,
+    };
+    n.checked_mul(mul)
+}
+
+/// **Check a value for a setting that names no version**, and answer it
+/// as stored (trimmed). `None` when the value is not of the setting's
+/// form; [`guard_form`] says what the form is.
+pub fn check_guard(setting: VersionSetting, value: &str) -> Option<String> {
+    let v = value.trim();
+    let count = |hi: usize| match v.parse::<usize>() {
+        Ok(n) if (1..=hi).contains(&n) => Some(n.to_string()),
+        _ => None,
+    };
+    match setting {
+        VersionSetting::MaxLoaded => count(MAX_MAX_LOADED),
+        VersionSetting::MaxConcurrentLoads => count(MAX_CONCURRENT_LOADS),
+        VersionSetting::MemoryBudget => parse_bytes(v)
+            .filter(|b| *b >= MIN_MEMORY_BUDGET)
+            .map(|_| v.to_string()),
+        VersionSetting::AtCapacity => AtCapacity::parse(v).map(|a| a.as_str().to_string()),
+        VersionSetting::WakeWait => guard_secs(setting, v)
+            .flatten()
+            .filter(|s| *s <= MAX_WAKE_WAIT_SECS)
+            .map(|_| v.to_string()),
+        VersionSetting::MinResidency
+        | VersionSetting::IdleEvictAfter
+        | VersionSetting::RestoreWindow => guard_secs(setting, v).map(|_| v.to_string()),
+        VersionSetting::Served | VersionSetting::Minimum | VersionSetting::NewTenant => None,
+    }
+}
+
+/// What a value of `setting` looks like, for its refusal.
+pub fn guard_form(setting: &str) -> String {
+    match VersionSetting::from_name(setting) {
+        Some(VersionSetting::MaxLoaded) => {
+            format!("a whole number of versions from 1 to {MAX_MAX_LOADED}")
+        }
+        Some(VersionSetting::MaxConcurrentLoads) => {
+            format!("a whole number of loads from 1 to {MAX_CONCURRENT_LOADS}")
+        }
+        Some(VersionSetting::MemoryBudget) => {
+            "a size like `512MB` or `2GB`, at least `256KB`".to_string()
+        }
+        Some(VersionSetting::AtCapacity) => "`evict-idle` or `refuse`".to_string(),
+        Some(VersionSetting::WakeWait) => format!(
+            "a duration like `5s` or `1m`, or `0`, at most {} minutes",
+            MAX_WAKE_WAIT_SECS / 60
+        ),
+        Some(VersionSetting::IdleEvictAfter) => {
+            "a duration like `10m`, `30s` or `2h`, or `0`, or `off`".to_string()
+        }
+        _ => "a duration like `10m`, `30s` or `2h`, or `0`".to_string(),
+    }
 }
 
 /// `versions.min_residency`.
 pub const MIN_RESIDENCY_SETTING: &str = "versions.min_residency";
 /// `versions.idle_evict_after`.
 pub const IDLE_EVICT_SETTING: &str = "versions.idle_evict_after";
+/// `versions.restore_window`.
+pub const RESTORE_WINDOW_SETTING: &str = "versions.restore_window";
 /// Their defaults, in seconds: 10 minutes and 30 minutes (§7).
 pub const DEFAULT_MIN_RESIDENCY_SECS: u64 = 600;
 pub const DEFAULT_IDLE_EVICT_SECS: u64 = 1_800;
+/// `versions.restore_window` when unset and the deployment's backup
+/// retention is not known: 30 days (owner, 2026-11-25).
+pub const DEFAULT_RESTORE_WINDOW_SECS: u64 = 30 * 86_400;
 
 /// A load guard's value: a duration like `10m`, `30s` or `2h`, `0`, or
 /// for `versions.idle_evict_after` also `off`. `None` when it is none of
@@ -152,19 +301,26 @@ pub fn guard_secs(setting: VersionSetting, value: &str) -> Option<Option<u64>> {
 }
 
 impl VersionSetting {
-    pub const ALL: [VersionSetting; 5] = [
+    pub const ALL: [VersionSetting; 11] = [
         VersionSetting::Served,
         VersionSetting::Minimum,
         VersionSetting::NewTenant,
         VersionSetting::MinResidency,
         VersionSetting::IdleEvictAfter,
+        VersionSetting::RestoreWindow,
+        VersionSetting::MaxLoaded,
+        VersionSetting::MemoryBudget,
+        VersionSetting::MaxConcurrentLoads,
+        VersionSetting::AtCapacity,
+        VersionSetting::WakeWait,
     ];
 
-    /// A load guard: a duration, not a version.
+    /// Names no version: the load guards, the residency limits and the
+    /// restore window. Each is checked alone ([`check_guard`]).
     pub fn is_guard(self) -> bool {
-        matches!(
+        !matches!(
             self,
-            VersionSetting::MinResidency | VersionSetting::IdleEvictAfter
+            VersionSetting::Served | VersionSetting::Minimum | VersionSetting::NewTenant
         )
     }
 
@@ -176,17 +332,32 @@ impl VersionSetting {
             VersionSetting::NewTenant => NEW_TENANT_SETTING,
             VersionSetting::MinResidency => MIN_RESIDENCY_SETTING,
             VersionSetting::IdleEvictAfter => IDLE_EVICT_SETTING,
+            VersionSetting::RestoreWindow => RESTORE_WINDOW_SETTING,
+            VersionSetting::MaxLoaded => MAX_LOADED_SETTING,
+            VersionSetting::MemoryBudget => MEMORY_BUDGET_SETTING,
+            VersionSetting::MaxConcurrentLoads => MAX_CONCURRENT_LOADS_SETTING,
+            VersionSetting::AtCapacity => AT_CAPACITY_SETTING,
+            VersionSetting::WakeWait => WAKE_WAIT_SETTING,
         }
     }
 
-    /// The environment variable it was read from before 2026-11-05.
+    /// The environment variable it was read from before it was stored
+    /// (2026-11-05 for the first three, 2026-11-25 for the node limits).
+    /// Empty for one that never was.
     pub fn env(self) -> &'static str {
         match self {
             VersionSetting::Served => SERVED_ENV,
             VersionSetting::Minimum => MINIMUM_ENV,
             VersionSetting::NewTenant => NEW_TENANT_ENV,
+            VersionSetting::MaxLoaded => "ORDO_VERSIONS_MAX_LOADED",
+            VersionSetting::MemoryBudget => "ORDO_VERSIONS_MEMORY_BUDGET",
+            VersionSetting::MaxConcurrentLoads => "ORDO_VERSIONS_MAX_CONCURRENT_LOADS",
             // Never an environment variable: stored in Ordo from the start.
-            VersionSetting::MinResidency | VersionSetting::IdleEvictAfter => "",
+            VersionSetting::MinResidency
+            | VersionSetting::IdleEvictAfter
+            | VersionSetting::RestoreWindow
+            | VersionSetting::AtCapacity
+            | VersionSetting::WakeWait => "",
         }
     }
 
@@ -198,6 +369,12 @@ impl VersionSetting {
             VersionSetting::NewTenant => "ordo versions set new-tenant",
             VersionSetting::MinResidency => "ordo versions set min-residency",
             VersionSetting::IdleEvictAfter => "ordo versions set idle-evict-after",
+            VersionSetting::RestoreWindow => "ordo versions set restore-window",
+            VersionSetting::MaxLoaded => "ordo versions set max-loaded",
+            VersionSetting::MemoryBudget => "ordo versions set memory-budget",
+            VersionSetting::MaxConcurrentLoads => "ordo versions set max-concurrent-loads",
+            VersionSetting::AtCapacity => "ordo versions set at-capacity",
+            VersionSetting::WakeWait => "ordo versions set wake-wait",
         }
     }
 
@@ -209,6 +386,12 @@ impl VersionSetting {
             VersionSetting::NewTenant => "the active version",
             VersionSetting::MinResidency => "10m",
             VersionSetting::IdleEvictAfter => "30m",
+            VersionSetting::RestoreWindow => "30d, or your backup retention when known",
+            VersionSetting::MaxLoaded => "8",
+            VersionSetting::MemoryBudget => "512MB",
+            VersionSetting::MaxConcurrentLoads => "1",
+            VersionSetting::AtCapacity => "evict-idle",
+            VersionSetting::WakeWait => "5s",
         }
     }
 
@@ -227,6 +410,18 @@ impl VersionSetting {
             "idle_evict_after" | "idle-evict-after" | "idleEvictAfter" => {
                 Some(VersionSetting::IdleEvictAfter)
             }
+            "restore_window" | "restore-window" | "restoreWindow" => {
+                Some(VersionSetting::RestoreWindow)
+            }
+            "max_loaded" | "max-loaded" | "maxLoaded" => Some(VersionSetting::MaxLoaded),
+            "memory_budget" | "memory-budget" | "memoryBudget" => {
+                Some(VersionSetting::MemoryBudget)
+            }
+            "max_concurrent_loads" | "max-concurrent-loads" | "maxConcurrentLoads" => {
+                Some(VersionSetting::MaxConcurrentLoads)
+            }
+            "at_capacity" | "at-capacity" | "atCapacity" => Some(VersionSetting::AtCapacity),
+            "wake_wait" | "wake-wait" | "wakeWait" => Some(VersionSetting::WakeWait),
             _ => None,
         }
     }
@@ -252,6 +447,16 @@ pub struct VersionSettings {
     pub min_residency: Option<String>,
     /// `versions.idle_evict_after` as stored, `None` for the default.
     pub idle_evict_after: Option<String>,
+    /// `versions.restore_window` as stored, `None` when unset.
+    pub restore_window: Option<String>,
+    /// `versions.max_loaded`, `versions.memory_budget`,
+    /// `versions.max_concurrent_loads`, `versions.at_capacity` and
+    /// `versions.wake_wait` as stored, `None` for the default.
+    pub max_loaded: Option<String>,
+    pub memory_budget: Option<String>,
+    pub max_concurrent_loads: Option<String>,
+    pub at_capacity: Option<String>,
+    pub wake_wait: Option<String>,
 }
 
 impl VersionSettings {
@@ -263,7 +468,71 @@ impl VersionSettings {
             VersionSetting::NewTenant => self.new_tenant.clone(),
             VersionSetting::MinResidency => self.min_residency.clone(),
             VersionSetting::IdleEvictAfter => self.idle_evict_after.clone(),
+            VersionSetting::RestoreWindow => self.restore_window.clone(),
+            VersionSetting::MaxLoaded => self.max_loaded.clone(),
+            VersionSetting::MemoryBudget => self.memory_budget.clone(),
+            VersionSetting::MaxConcurrentLoads => self.max_concurrent_loads.clone(),
+            VersionSetting::AtCapacity => self.at_capacity.clone(),
+            VersionSetting::WakeWait => self.wake_wait.clone(),
         }
+    }
+
+    /// The stored value of `s` checked again, `None` when unset or when it
+    /// would be refused now (written by hand): the default then holds.
+    fn checked(&self, s: VersionSetting) -> Option<String> {
+        self.value(s).and_then(|v| check_guard(s, &v))
+    }
+
+    /// `versions.max_loaded`: the stored value or 8.
+    pub fn max_loaded(&self) -> usize {
+        self.checked(VersionSetting::MaxLoaded)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_MAX_LOADED)
+    }
+
+    /// `versions.memory_budget` in bytes: the stored value or 512 MB.
+    pub fn memory_budget(&self) -> u64 {
+        self.checked(VersionSetting::MemoryBudget)
+            .and_then(|v| parse_bytes(&v))
+            .unwrap_or(DEFAULT_MEMORY_BUDGET)
+    }
+
+    /// `versions.max_concurrent_loads`: the stored value or 1.
+    pub fn max_concurrent_loads(&self) -> usize {
+        self.checked(VersionSetting::MaxConcurrentLoads)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_MAX_CONCURRENT_LOADS)
+    }
+
+    /// `versions.at_capacity`: the stored value or `evict-idle`.
+    pub fn at_capacity(&self) -> AtCapacity {
+        self.checked(VersionSetting::AtCapacity)
+            .and_then(|v| AtCapacity::parse(&v))
+            .unwrap_or_default()
+    }
+
+    /// `versions.wake_wait` in seconds: the stored value or 5.
+    pub fn wake_wait_secs(&self) -> u64 {
+        self.checked(VersionSetting::WakeWait)
+            .and_then(|v| guard_secs(VersionSetting::WakeWait, &v).flatten())
+            .unwrap_or(DEFAULT_WAKE_WAIT_SECS)
+    }
+
+    /// `versions.restore_window` in seconds, as set. `None` when unset.
+    pub fn restore_window_set_secs(&self) -> Option<u64> {
+        self.restore_window
+            .as_deref()
+            .and_then(|v| guard_secs(VersionSetting::RestoreWindow, v))
+            .flatten()
+    }
+
+    /// `versions.restore_window` in seconds: the stored value, or when
+    /// unset the deployment's backup retention (`backup_retention`, which
+    /// Ordo does not learn from any setting today), or 30 days.
+    pub fn restore_window_secs(&self, backup_retention: Option<u64>) -> u64 {
+        self.restore_window_set_secs()
+            .or(backup_retention)
+            .unwrap_or(DEFAULT_RESTORE_WINDOW_SECS)
     }
 
     /// `versions.min_residency` in seconds: the stored value, or the
@@ -310,6 +579,12 @@ impl VersionSettings {
             VersionSetting::NewTenant => out.new_tenant = value,
             VersionSetting::MinResidency => out.min_residency = value,
             VersionSetting::IdleEvictAfter => out.idle_evict_after = value,
+            VersionSetting::RestoreWindow => out.restore_window = value,
+            VersionSetting::MaxLoaded => out.max_loaded = value,
+            VersionSetting::MemoryBudget => out.memory_budget = value,
+            VersionSetting::MaxConcurrentLoads => out.max_concurrent_loads = value,
+            VersionSetting::AtCapacity => out.at_capacity = value,
+            VersionSetting::WakeWait => out.wake_wait = value,
         }
         out
     }
@@ -400,12 +675,6 @@ impl ServedPolicy {
     }
 }
 
-/// The longest label a version may carry, in characters.
-pub const MAX_LABEL_CHARS: usize = 80;
-
-/// The longest reason a revoke or unrevoke may carry, in characters.
-pub const MAX_REASON_CHARS: usize = 500;
-
 /// The most tenants [`Versions::pinned_to_revoked`] names for one version.
 /// The count is always whole.
 pub const MAX_REVOKED_TENANTS: usize = 1_000;
@@ -422,26 +691,27 @@ pub struct Provenance {
     pub git_commit: Option<String>,
 }
 
-/// A label as stored: trimmed, one line, at most [`MAX_LABEL_CHARS`]
+/// A label as stored: trimmed, one line, at most `limits.label_chars`
 /// characters. Anything else is refused, saying the limit.
 pub fn check_label(text: &str) -> Result<String, VersionRefusal> {
+    let max = crate::input_caps::InputCaps::current().label_chars;
     let label = text.trim();
     let n = label.chars().count();
     if n == 0 {
         return Err(VersionRefusal::Label(format!(
-            "a label is 1 to {MAX_LABEL_CHARS} characters; this one is empty. \
+            "a label is 1 to {max} characters; this one is empty. \
              `ordo versions label <version> --clear` removes a label"
         )));
     }
     if label.chars().any(char::is_control) {
         return Err(VersionRefusal::Label(format!(
-            "a label is one line of at most {MAX_LABEL_CHARS} characters; this one has a \
+            "a label is one line of at most {max} characters; this one has a \
              line break or another control character"
         )));
     }
-    if n > MAX_LABEL_CHARS {
+    if n > max {
         return Err(VersionRefusal::Label(format!(
-            "a label is at most {MAX_LABEL_CHARS} characters; this one is {n}"
+            "a label is at most {max} characters; this one is {n}. `ordo versions set limits.label_chars <n> --reason \"...\"` changes the limit"
         )));
     }
     Ok(label.to_string())
@@ -466,20 +736,21 @@ pub fn check_git_commit(text: &str) -> Result<String, VersionRefusal> {
 }
 
 /// A revoke's or unrevoke's reason as stored: trimmed, 1 to
-/// [`MAX_REASON_CHARS`] characters, any text. Anything else is refused,
+/// `limits.reason_chars` characters, any text. Anything else is refused,
 /// saying the limit.
 pub fn check_reason(text: &str) -> Result<String, VersionRefusal> {
+    let max = crate::input_caps::InputCaps::current().reason_chars;
     let reason = text.trim();
     let n = reason.chars().count();
     if n == 0 {
         return Err(VersionRefusal::Reason(format!(
-            "a reason is 1 to {MAX_REASON_CHARS} characters; this one is empty. \
+            "a reason is 1 to {max} characters; this one is empty. \
              `--reason \"...\"` says why, and stays on record"
         )));
     }
-    if n > MAX_REASON_CHARS {
+    if n > max {
         return Err(VersionRefusal::Reason(format!(
-            "a reason is at most {MAX_REASON_CHARS} characters; this one is {n}"
+            "a reason is at most {max} characters; this one is {n}. `ordo versions set limits.reason_chars <n> --reason \"...\"` changes the limit"
         )));
     }
     Ok(reason.to_string())
@@ -532,8 +803,36 @@ CREATE TABLE IF NOT EXISTS \"$moves\" ( \
   \"phase\" text NOT NULL, \
   \"soak_until\" bigint NOT NULL DEFAULT 0, \
   \"started_at\" bigint NOT NULL, \
-  \"reason\" text NOT NULL DEFAULT '' \
+  \"reason\" text NOT NULL DEFAULT '', \
+  \"step\" text NOT NULL DEFAULT '', \
+  \"overlay\" text NOT NULL DEFAULT '' \
 )";
+
+/// `$tenant_builds` and `$tenant_build_members` (`plan-versions.md` §3.8,
+/// increment 16): each named build and its version, and which tenants
+/// each holds, one build per tenant. A member's row names a tenant and
+/// holds none of its data.
+const TENANT_BUILDS_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS \"$tenant_builds\" ( \
+  \"name\" text PRIMARY KEY, \
+  \"version\" text NOT NULL, \
+  \"reason\" text NOT NULL, \
+  \"actor\" text NOT NULL, \
+  \"at\" bigint NOT NULL \
+); \
+CREATE TABLE IF NOT EXISTS \"$tenant_build_members\" ( \
+  \"space\" text PRIMARY KEY, \
+  \"build\" text NOT NULL, \
+  \"actor\" text NOT NULL, \
+  \"at\" bigint NOT NULL \
+)";
+
+/// **Not in a tenant build** (`plan-versions.md` §3.8, increment 16): an
+/// `AND` on `"$space"` that leaves out every tenant a build holds. An
+/// activation, a rollout and the revoked-version sweep move none of them;
+/// only the build does (`crate::tenant_builds`).
+pub const NOT_IN_A_BUILD: &str =
+    "AND \"$space\" NOT IN (SELECT \"space\" FROM \"$tenant_build_members\")";
 
 /// `$revocations`, beside `$artifacts`: each revoke and unrevoke of a
 /// version, append-only. A version is revoked when its newest row says
@@ -549,6 +848,31 @@ CREATE TABLE IF NOT EXISTS \"$revocations\" ( \
   \"move_to\" text NULL \
 ); \
 CREATE INDEX IF NOT EXISTS \"$revocations_version\" ON \"$revocations\" (\"version\", \"seq\")";
+
+/// `$version_removals`, beside `$artifacts`: each removal of a stored
+/// version (§1.6), append-only: who, why, where its tenants went and how
+/// many. The version's own row stays as its tombstone.
+const REMOVALS_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS \"$version_removals\" ( \
+  \"seq\" bigserial PRIMARY KEY, \
+  \"version\" text NOT NULL, \
+  \"actor\" text NOT NULL, \
+  \"reason\" text NOT NULL, \
+  \"moved_to\" text NULL, \
+  \"moved\" bigint NOT NULL, \
+  \"at\" bigint NOT NULL \
+)";
+
+/// One removal of a stored version, as `$version_removals` holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Removal {
+    pub version: String,
+    pub actor: String,
+    pub reason: String,
+    pub moved_to: Option<String>,
+    pub moved: u64,
+    pub at: u64,
+}
 
 /// `$move_targets`, beside `$spaces`: where one tenant goes when it moves
 /// off a revoked version, set by the deployment owner (ruled 2026-11-05).
@@ -602,8 +926,35 @@ async fn ensure_revocations(pool: &Pool) -> Result<(), PoolError> {
         Err(e) => return Err(e),
         Ok(_) => {}
     }
+    // `$moves.step` and `overlay` came with increment 11a (dual writes).
+    match pool
+        .rows("SELECT \"step\", \"overlay\" FROM \"$moves\" LIMIT 0")
+        .await
+    {
+        Err(e) if e.is_missing_column() => {
+            pool.rows(
+                "ALTER TABLE \"$moves\" ADD COLUMN IF NOT EXISTS \"step\" text NOT NULL \
+                 DEFAULT ''; ALTER TABLE \"$moves\" ADD COLUMN IF NOT EXISTS \"overlay\" text \
+                 NOT NULL DEFAULT ''",
+            )
+            .await?;
+        }
+        Err(e) => return Err(e),
+        Ok(_) => {}
+    }
     if pool.rows(SETTINGS_DDL).await.is_err() {
         pool.rows(SETTINGS_DDL).await?;
+    }
+    // `$pins.rollout` came with increment 10 (2026-11-23): the rollout a
+    // pin change was part of, NULL for every other cause.
+    match pool.rows("SELECT \"rollout\" FROM \"$pins\" LIMIT 0").await {
+        Err(e) if e.is_missing_column() => {
+            pool.rows("ALTER TABLE \"$pins\" ADD COLUMN IF NOT EXISTS \"rollout\" bigint NULL")
+                .await?;
+        }
+        Err(e) if e.is_missing_table() => ensure_pin_tables(pool).await?,
+        Err(e) => return Err(e),
+        Ok(_) => {}
     }
     Ok(())
 }
@@ -622,6 +973,68 @@ CREATE TABLE IF NOT EXISTS \"$version_settings\" ( \
 ); \
 CREATE INDEX IF NOT EXISTS \"$version_settings_setting\" \
   ON \"$version_settings\" (\"setting\", \"seq\")";
+
+/// **One named setting's stored value** in `$version_settings`, for the
+/// settings stored beside the version settings by other modules (the
+/// window caps, `soak.length`). `None` when unset, cleared, or the table
+/// is not there yet.
+pub(crate) async fn stored_named(pool: &Pool, name: &str) -> Result<Option<String>, PoolError> {
+    match pool
+        .rows(&format!(
+            "SELECT \"value\" FROM \"$version_settings\" WHERE \"setting\" = {} \
+             ORDER BY \"seq\" DESC LIMIT 1",
+            sql_lit(name)
+        ))
+        .await
+    {
+        Ok(rows) => Ok(rows.first().and_then(|r| r.first().cloned().flatten())),
+        Err(e) if e.is_missing_table() => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// **Write one named setting's row**, checked by the caller, under the pin
+/// lock with the pin stream's nudge, with who and why. `false` when it
+/// already held that value (or clearing what was never set): nothing is
+/// written.
+pub(crate) async fn record_named(
+    pool: &Pool,
+    name: &str,
+    value: Option<&str>,
+    actor: &str,
+    reason: &str,
+    at: u64,
+) -> Result<bool, PoolError> {
+    if pool.rows(SETTINGS_DDL).await.is_err() {
+        pool.rows(SETTINGS_DDL).await?;
+    }
+    let tx = pool.begin().await?;
+    tx.rows(&pin_lock_sql()).await?;
+    let now = tx
+        .rows(&format!(
+            "SELECT \"value\" FROM \"$version_settings\" WHERE \"setting\" = {} \
+             ORDER BY \"seq\" DESC LIMIT 1",
+            sql_lit(name)
+        ))
+        .await?;
+    let current = now.first().and_then(|r| r.first().cloned().flatten());
+    if current.as_deref() == value {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    tx.rows(&format!(
+        "INSERT INTO \"$version_settings\" (\"setting\", \"value\", \"actor\", \"reason\", \"at\") \
+         VALUES ({}, {}, {}, {}, {at})",
+        sql_lit(name),
+        value.map(sql_lit).unwrap_or_else(|| "NULL".into()),
+        sql_lit(actor),
+        sql_lit(reason),
+    ))
+    .await?;
+    tx.notify(PINS_CHANNEL, "").await?;
+    tx.commit().await?;
+    Ok(true)
+}
 
 /// The newest row of each setting.
 const SETTINGS_NOW_SQL: &str = "SELECT DISTINCT ON (\"setting\") \"setting\", \"value\" \
@@ -706,7 +1119,35 @@ pub async fn ensure_pin_tables(pool: &Pool) -> Result<(), PoolError> {
     if pool.rows(PIN_TABLES_DDL).await.is_err() {
         pool.rows(PIN_TABLES_DDL).await?;
     }
+    ensure_build_tables(pool).await
+}
+
+/// Create the tenant builds' tables. Every act that moves many pins reads
+/// them (an activation, a rollout, the revoked-version sweep), so each
+/// makes sure of them first. Retried once, for [`ensure_pin_tables`]'
+/// reason.
+pub async fn ensure_build_tables(pool: &Pool) -> Result<(), PoolError> {
+    if pool.rows(TENANT_BUILDS_DDL).await.is_err() {
+        pool.rows(TENANT_BUILDS_DDL).await?;
+    }
     Ok(())
+}
+
+/// The build that holds `space`, and its version, read in `tx`.
+pub(crate) async fn build_of_in(
+    tx: &ordo_exec::TxConn,
+    space: &str,
+) -> Result<Option<(String, String)>, PoolError> {
+    let rows = tx
+        .rows(&format!(
+            "SELECT m.\"build\", b.\"version\" FROM \"$tenant_build_members\" m \
+             JOIN \"$tenant_builds\" b ON b.\"name\" = m.\"build\" WHERE m.\"space\" = {}",
+            sql_lit(space)
+        ))
+        .await?;
+    Ok(rows
+        .first()
+        .and_then(|r| Some((r.first()?.clone()?, r.get(1)?.clone()?))))
 }
 
 /// The advisory lock every pin change takes first, in its own
@@ -774,6 +1215,104 @@ async fn active_in(tx: &ordo_exec::TxConn) -> Result<Option<String>, PoolError> 
     Ok(rows.first().and_then(|r| r.first().cloned().flatten()))
 }
 
+/// The open deployment-wide rollout, `(id, target)`, read inside `tx` after
+/// its pin lock (`crate::rollouts`). A deployment that never started one
+/// has no `$rollouts`, and answers none: the table is looked up first, so a
+/// missing one does not abort `tx`.
+pub(crate) async fn open_rollout_in(
+    tx: &ordo_exec::TxConn,
+) -> Result<Option<(i64, String)>, PoolError> {
+    let there = tx
+        .rows("SELECT to_regclass('\"$rollouts\"') IS NOT NULL")
+        .await?
+        .first()
+        .and_then(|r| r.first().cloned().flatten())
+        .is_some_and(|v| v == "t" || v == "true");
+    if !there {
+        return Ok(None);
+    }
+    let rows = tx
+        .rows(
+            "SELECT \"id\", \"target\" FROM \"$rollouts\" \
+             WHERE \"state\" IN ('running', 'paused') ORDER BY \"id\" DESC LIMIT 1",
+        )
+        .await?;
+    Ok(rows
+        .first()
+        .and_then(|r| Some((r.first()?.clone()?.parse().ok()?, r.get(1)?.clone()?))))
+}
+
+/// `$own_pin`: the version the deployment's own space is served, when a
+/// rollout moved it apart from the active version (`plan-versions.md` §3.7,
+/// ruled 2026-11-23, Q4 and Q5). One row at most. The own space has no
+/// `$spaces` row, so its pin lives here; every change is a `$pins` row
+/// too, so nodes take it from the pin stream like a tenant's.
+const OWN_PIN_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS \"$own_pin\" ( \
+  \"space\" text PRIMARY KEY, \
+  \"version\" text NOT NULL, \
+  \"epoch\" bigint NOT NULL \
+)";
+
+/// Move the own space's pin to `to` inside `tx`, after its pin lock, when
+/// it has one and it names another version: the row, its epoch, a `$pins`
+/// row, the nudge. Every activation calls it, so the own space follows
+/// every activation. With `space`, a row is made first, at the active
+/// version. A deployment no rollout touched has no `$own_pin`.
+async fn repin_own_in(
+    tx: &ordo_exec::TxConn,
+    to: &str,
+    actor: &str,
+    cause: PinCause,
+    at: u64,
+    rollout: Option<i64>,
+    space: Option<&str>,
+) -> Result<bool, PoolError> {
+    let there = tx
+        .rows("SELECT to_regclass('\"$own_pin\"') IS NOT NULL")
+        .await?
+        .first()
+        .and_then(|r| r.first().cloned().flatten())
+        .is_some_and(|v| v == "t" || v == "true");
+    if !there {
+        return Ok(false);
+    }
+    if let Some(space) = space {
+        tx.rows(&format!(
+            "INSERT INTO \"$own_pin\" (\"space\", \"version\", \"epoch\") \
+             SELECT {s}, coalesce((SELECT \"version\" FROM \"$activations\" \
+               ORDER BY \"seq\" DESC LIMIT 1), {to}), 0 \
+             WHERE NOT EXISTS (SELECT 1 FROM \"$own_pin\")",
+            s = sql_lit(space),
+            to = sql_lit(to),
+        ))
+        .await?;
+    }
+    let rows = tx
+        .rows(&format!(
+            "WITH old AS (SELECT \"space\", \"version\" FROM \"$own_pin\" \
+               WHERE \"version\" <> {to} FOR UPDATE), \
+             moved AS (UPDATE \"$own_pin\" o SET \"version\" = {to}, \
+               \"epoch\" = o.\"epoch\" + 1 FROM old WHERE o.\"space\" = old.\"space\" \
+               RETURNING o.\"space\", old.\"version\" AS \"from\", o.\"epoch\") \
+             INSERT INTO \"$pins\" (\"space\", \"from\", \"to\", \"epoch\", \"actor\", \
+               \"cause\", \"at\", \"rollout\") \
+             SELECT \"space\", \"from\", {to}, \"epoch\", {actor}, {cause}, {at}, {rollout} \
+             FROM moved RETURNING \"space\"",
+            to = sql_lit(to),
+            actor = sql_lit(actor),
+            cause = sql_lit(cause.as_str()),
+            rollout = rollout
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "NULL".into()),
+        ))
+        .await?;
+    if !rows.is_empty() {
+        tx.notify(PINS_CHANNEL, "").await?;
+    }
+    Ok(!rows.is_empty())
+}
+
 /// `versions.new_tenant` as the environment sets it. Empty is unset.
 pub fn new_tenant_from_env() -> Option<String> {
     std::env::var(NEW_TENANT_ENV)
@@ -809,6 +1348,18 @@ pub enum PinCause {
     /// the tenant's own database took the active version, was gated
     /// against it, and the pin followed.
     Move,
+    /// A rollout's batch moved it (`plan-versions.md` §3.7, increment
+    /// 10). Its `$pins` row names the rollout.
+    Rollout,
+    /// The tenant's own database was restored from a snapshot taken on
+    /// another version, and the pin followed the data (§2.9, increment 17).
+    Restore,
+    /// A tenant build moved it: it joined or left one, or its build was set
+    /// to another version (`plan-versions.md` §3.8, increment 16).
+    Build,
+    /// Its version was removed, and the deployment owner named where its
+    /// tenants go (`ordo versions remove --move-to`, §1.6).
+    Remove,
 }
 
 /// Where an open move stands (`$moves.phase`, §2.1).
@@ -822,6 +1373,16 @@ pub enum MovePhase {
     /// The change was refused by name. The tenant stays on its version
     /// until a new version is activated.
     Refused,
+    /// A move with dual writes (increment 11a): the expand landed, the
+    /// backfill worker fills the new shape, and every write the tenant
+    /// makes on `from` writes both shapes.
+    Backfilling,
+    /// Verified: both shapes are full and current. The tenant still
+    /// serves `from` and writes both. A revert in the soak returns here.
+    Gated,
+    /// The pin switched to `to`. Every write the tenant makes writes the
+    /// old shape too, so a revert is a pin switch, until `soak_until`.
+    Soaking,
 }
 
 impl MovePhase {
@@ -830,6 +1391,9 @@ impl MovePhase {
             MovePhase::Expanding => "expanding",
             MovePhase::Waiting => "waiting",
             MovePhase::Refused => "refused",
+            MovePhase::Backfilling => "backfilling",
+            MovePhase::Gated => "gated",
+            MovePhase::Soaking => "soaking",
         }
     }
 
@@ -837,6 +1401,9 @@ impl MovePhase {
         match text {
             "waiting" => MovePhase::Waiting,
             "refused" => MovePhase::Refused,
+            "backfilling" => MovePhase::Backfilling,
+            "gated" => MovePhase::Gated,
+            "soaking" => MovePhase::Soaking,
             _ => MovePhase::Expanding,
         }
     }
@@ -853,6 +1420,14 @@ pub struct Move {
     /// Empty until a try fails. Never shown to the tenant's people.
     pub reason: String,
     pub started_at: u64,
+    /// The stored plan's digest, for a move with dual writes (increment
+    /// 11a). Empty for an activation's move (increment 7).
+    pub step: String,
+    /// When the soak ends, in seconds. 0 outside `soaking`.
+    pub soak_until: u64,
+    /// The move overlays, as `crate::dual_writes` renders them. Empty for
+    /// an activation's move.
+    pub overlay: String,
 }
 
 impl Move {
@@ -871,7 +1446,35 @@ impl Move {
                 "{} stays on {} and keeps serving it: moving to {} was refused: {}",
                 self.space, self.from, self.to, self.reason
             ),
+            MovePhase::Backfilling => format!(
+                "{} serves {} while its database is filled for {}; every write keeps both shapes{}",
+                self.space,
+                self.from,
+                self.to,
+                if self.reason.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (last try: {})", self.reason)
+                }
+            ),
+            MovePhase::Gated => format!(
+                "{} serves {}; its database holds {} too, and every write keeps both shapes",
+                self.space, self.from, self.to
+            ),
+            MovePhase::Soaking => format!(
+                "{} serves {} in its soak until {}; every write keeps {}'s shape too, so a revert \
+                 loses nothing",
+                self.space,
+                self.to,
+                utc_minute(self.soak_until),
+                self.from
+            ),
         }
+    }
+
+    /// A move with dual writes (increment 11a), rather than an activation's.
+    pub fn is_dual(&self) -> bool {
+        !self.step.is_empty()
     }
 }
 
@@ -887,7 +1490,8 @@ pub struct MovePlan {
     pub held: BTreeMap<String, (MovePhase, String)>,
 }
 
-const MOVE_COLUMNS: &str = "\"space\", \"from\", \"to\", \"phase\", \"reason\", \"started_at\"";
+const MOVE_COLUMNS: &str = "\"space\", \"from\", \"to\", \"phase\", \"reason\", \"started_at\", \
+                            \"step\", \"soak_until\", \"overlay\"";
 
 fn move_row(r: &[Option<String>]) -> Option<Move> {
     Some(Move {
@@ -897,7 +1501,57 @@ fn move_row(r: &[Option<String>]) -> Option<Move> {
         phase: MovePhase::parse(r.get(3)?.as_deref()?),
         reason: r.get(4).cloned().flatten().unwrap_or_default(),
         started_at: r.get(5)?.clone()?.parse().ok()?,
+        step: r.get(6).cloned().flatten().unwrap_or_default(),
+        soak_until: r
+            .get(7)
+            .cloned()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+        overlay: r.get(8).cloned().flatten().unwrap_or_default(),
     })
+}
+
+/// Raise one tenant's pin epoch without moving its version, cause `move`,
+/// and nudge the pin stream: a move with dual writes changed what its
+/// writes carry. The epoch after.
+async fn bump_in(
+    tx: &ordo_exec::TxConn,
+    space: &str,
+    actor: &str,
+    at: u64,
+) -> Result<i64, PoolError> {
+    let rows = tx
+        .rows(&format!(
+            "WITH bumped AS ( \
+               UPDATE \"$spaces\" SET \"pin_epoch\" = \"pin_epoch\" + 1 \
+               WHERE \"$space\" = {space} AND \"version\" IS NOT NULL \
+               RETURNING \"$space\" AS \"space\", \"version\", \"pin_epoch\") \
+             INSERT INTO \"$pins\" (\"space\", \"from\", \"to\", \"epoch\", \"actor\", \"cause\", \"at\") \
+             SELECT \"space\", \"version\", \"version\", \"pin_epoch\", {}, {}, {at} FROM bumped \
+             RETURNING \"epoch\"",
+            sql_lit(actor),
+            sql_lit(PinCause::Move.as_str()),
+            space = sql_lit(space),
+        ))
+        .await?;
+    tx.notify(PINS_CHANNEL, "").await?;
+    Ok(rows
+        .first()
+        .and_then(|r| r.first().cloned().flatten())
+        .and_then(|e| e.parse().ok())
+        .unwrap_or(0))
+}
+
+/// The tenant's open move with dual writes, read inside `tx`.
+async fn dual_move_in(tx: &ordo_exec::TxConn, space: &str) -> Result<Option<Move>, PoolError> {
+    let rows = tx
+        .rows(&format!(
+            "SELECT {MOVE_COLUMNS} FROM \"$moves\" WHERE \"space\" = {} AND \"step\" <> ''",
+            sql_lit(space)
+        ))
+        .await?;
+    Ok(rows.first().and_then(|r| move_row(r)))
 }
 
 fn sql_list(items: &[String]) -> String {
@@ -920,6 +1574,10 @@ impl PinCause {
             PinCause::Demand => "demand",
             PinCause::Tenant => "tenant",
             PinCause::Move => "move",
+            PinCause::Rollout => "rollout",
+            PinCause::Restore => "restore",
+            PinCause::Build => "build",
+            PinCause::Remove => "remove",
         }
     }
 }
@@ -942,6 +1600,39 @@ pub struct PinChange {
     pub actor: String,
     pub cause: String,
     pub at: u64,
+}
+
+/// Where a restore left a tenant's pin ([`Versions::restore_pin`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestorePin {
+    /// The tenant was already pinned to the restored data's version.
+    Unchanged { version: String },
+    /// The pin followed the data, cause `restore`.
+    Pinned { change: PinChange },
+    /// The data's version may not be served now (revoked, left out of
+    /// `versions.served`, or below `versions.minimum`). The restore stands,
+    /// the pin stays ahead of the data, and the tenant is held closed until
+    /// its database is brought to its pin. `why` names the fix.
+    Held {
+        data: String,
+        pin: Option<String>,
+        why: String,
+    },
+}
+
+/// Two version names in order: dotted numbers compared as numbers, part by
+/// part; anything else compared as text.
+pub fn version_order(a: &str, b: &str) -> std::cmp::Ordering {
+    let parts = |v: &str| -> Option<Vec<u64>> {
+        v.split(['.', '-', '+'])
+            .take(3)
+            .map(|p| p.parse::<u64>().ok())
+            .collect()
+    };
+    match (parts(a), parts(b)) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        _ => a.cmp(b),
+    }
 }
 
 /// A revoke or an unrevoke.
@@ -1103,7 +1794,7 @@ pub enum VersionRefusal {
     /// No version is stored under the name or `#n` a person gave. Fix the
     /// input; `stored` names every version there is, `#n · name`.
     NotStored { asked: String, stored: Vec<String> },
-    /// A label that is empty, longer than [`MAX_LABEL_CHARS`], or more than
+    /// A label that is empty, longer than `limits.label_chars`, or more than
     /// one line. Fix the input.
     Label(String),
     /// A git commit that is not one. Fix the input.
@@ -1138,7 +1829,7 @@ pub enum VersionRefusal {
         named: String,
         setting: &'static str,
     },
-    /// A reason that is empty or longer than [`MAX_REASON_CHARS`]. Fix the
+    /// A reason that is empty or longer than `limits.reason_chars`. Fix the
     /// input.
     Reason(String),
     /// A pin of a tenant there is none of, or one that serves nothing
@@ -1183,10 +1874,42 @@ pub enum VersionRefusal {
     /// promotion gate (`crate::promotion`). The text says which, and the
     /// command that promotes it.
     NotPromoted(String),
+    /// **One deployment-wide rollout at a time** (ruled 2026-11-23, Q3):
+    /// an activation while rollout `id` to `target` is open is refused,
+    /// naming `ordo rollout status` and `ordo rollout abort`. Moving one
+    /// tenant on its own is never refused for this.
+    RolloutOpen { id: i64, target: String },
+    /// A restored database is at a version this deployment does not store
+    /// (§2.9, increment 17). `newer` when it is newer than every stored
+    /// version. Refused until the version is stored here.
+    RestoreNotStored {
+        version: String,
+        newer: bool,
+        stored: Vec<String>,
+    },
     /// A load guard's value that is not a duration. Fix the input.
     Guard {
         setting: &'static str,
         value: String,
+    },
+    /// A tenant in a move with dual writes (increment 11a): its pin moves
+    /// only through the move's own commands, which keep both shapes
+    /// current. The text names them.
+    Moving {
+        space: String,
+        from: String,
+        to: String,
+        phase: String,
+    },
+    /// A revert or a soak's close for a tenant with no move with dual
+    /// writes open. Fix the input.
+    NoMove { space: String },
+    /// **A tenant a build holds** (increment 16): only the build moves it.
+    /// The text names `ordo tenant-builds leave`.
+    InBuild {
+        space: String,
+        build: String,
+        version: String,
     },
     /// The database. Its class says whether a retry can help.
     Store(PoolError),
@@ -1219,7 +1942,12 @@ impl VersionRefusal {
             | VersionRefusal::Revoked { .. }
             | VersionRefusal::AlreadyRevoked { .. }
             | VersionRefusal::NotOnRevoked { .. }
-            | VersionRefusal::NotRevoked { .. } => Remedy::Refuse,
+            | VersionRefusal::NotRevoked { .. }
+            | VersionRefusal::RestoreNotStored { .. }
+            | VersionRefusal::Moving { .. }
+            | VersionRefusal::RolloutOpen { .. }
+            | VersionRefusal::InBuild { .. } => Remedy::Refuse,
+            VersionRefusal::NoMove { .. } => Remedy::FixInput,
             VersionRefusal::Store(e) => match e.class() {
                 // A broken store is the deployment's to mend, and the
                 // same call may pass once it is.
@@ -1275,10 +2003,13 @@ impl VersionRefusal {
             | VersionRefusal::NotServed { .. }
             | VersionRefusal::BelowMinimum { .. }
             | VersionRefusal::NotPromoted(_)
-            | VersionRefusal::NamedBySetting { .. } => {
-                ExecError::new(ErrorCode::ApplyRefused, message)
-            }
+            | VersionRefusal::RolloutOpen { .. }
+            | VersionRefusal::RestoreNotStored { .. }
+            | VersionRefusal::InBuild { .. }
+            | VersionRefusal::NamedBySetting { .. }
+            | VersionRefusal::Moving { .. } => ExecError::new(ErrorCode::ApplyRefused, message),
             VersionRefusal::NotRevoked { .. }
+            | VersionRefusal::NoMove { .. }
             | VersionRefusal::NoTenant { .. }
             | VersionRefusal::NotOnRevoked { .. } => ExecError::new(ErrorCode::NotFound, message),
             VersionRefusal::Store(e) => {
@@ -1291,15 +2022,31 @@ impl VersionRefusal {
 impl std::fmt::Display for VersionRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            VersionRefusal::RestoreNotStored {
+                version,
+                newer: true,
+                stored,
+            } => write!(
+                f,
+                "the restored database is at {version}, newer than every version this \
+                 deployment stores ({}). Store {version} first (`ordo apply` its source, or \
+                 `ordo promote {version}`), then run `ordo restore --record` again",
+                stored.join(", ")
+            ),
+            VersionRefusal::RestoreNotStored {
+                version, stored, ..
+            } => write!(
+                f,
+                "the restored database is at {version}, which this deployment does not store \
+                 (stored: {}). Bring it here first (`ordo promote {version}` from the \
+                 environment that holds it, or `ordo apply` its source), then run `ordo \
+                 restore --record` again",
+                stored.join(", ")
+            ),
             VersionRefusal::Guard { setting, value } => write!(
                 f,
-                "`{setting}` is a duration like `10m`, `30s` or `2h`, or `0`{}, not `{value}`. \
-                 Set it with `{}`",
-                if *setting == IDLE_EVICT_SETTING {
-                    ", or `off`"
-                } else {
-                    ""
-                },
+                "`{setting}` is {}, not `{value}`. Set it with `{}`",
+                guard_form(setting),
                 command_of(setting)
             ),
             // The registry's own words, so a refusal reads the same moved.
@@ -1397,6 +2144,25 @@ impl std::fmt::Display for VersionRefusal {
                  the active version, then revoke",
                 cmd = command_of(setting)
             ),
+            VersionRefusal::Moving {
+                space,
+                from,
+                to,
+                phase,
+            } => write!(
+                f,
+                "tenant_moving: tenant `{space}` is moving from {from} to {to} with dual writes \
+                 ({phase}), and its pin moves only through the move. Finish it with `ordo \
+                 evolve --tenant {space}`, revert it in its soak with `ordo evolve --tenant \
+                 {space} --revert`, or close the soak with `ordo evolve --tenant {space} \
+                 --close-soak`"
+            ),
+            VersionRefusal::NoMove { space } => write!(
+                f,
+                "no_move: tenant `{space}` has no move with dual writes open, so there is no \
+                 soak to revert or close. `ordo fleet --host <h>` shows each tenant's move; \
+                 `ordo evolve --tenant {space} --to <version>` starts one"
+            ),
             VersionRefusal::NoTenant { space } => write!(
                 f,
                 "no_tenant: no tenant `{space}` is provisioning, active or paused here, so \
@@ -1453,6 +2219,24 @@ impl std::fmt::Display for VersionRefusal {
                 list.join(",")
             ),
             VersionRefusal::NotPromoted(why) => write!(f, "not_promoted: {why}"),
+            VersionRefusal::InBuild {
+                space,
+                build,
+                version,
+            } => write!(
+                f,
+                "in_tenant_build: tenant {space} is in tenant build `{build}` on {version}, and \
+                 only the build moves it. `ordo tenant-builds set {build} <version>` moves the \
+                 whole build; `ordo tenant-builds leave {space}` returns it to the active \
+                 version"
+            ),
+            VersionRefusal::RolloutOpen { id, target } => write!(
+                f,
+                "rollout_open: rollout {id} to {target} is open, and one deployment-wide \
+                 rollout runs at a time. `ordo rollout status` shows where it stands; `ordo \
+                 rollout finish` or `ordo rollout abort` closes it. One tenant may still move \
+                 on its own: `ordo versions pin <tenant> <version>`"
+            ),
             VersionRefusal::BelowMinimum { named, minimum } => write!(
                 f,
                 "below_minimum: {named} is older than {MINIMUM_SETTING}, {minimum}. Name a \
@@ -1851,7 +2635,8 @@ impl<'a> Versions<'a> {
             Some(Ok(n)) => self
                 .pool
                 .rows(&format!(
-                    "SELECT \"version\" FROM \"$artifacts\" WHERE \"ordinal\" = {n}"
+                    "SELECT \"version\" FROM \"$artifacts\" WHERE \"ordinal\" = {n} \
+                     AND \"removed_at\" IS NULL"
                 ))
                 .await?
                 .first()
@@ -1874,7 +2659,7 @@ impl<'a> Versions<'a> {
             .pool
             .rows(
                 "SELECT \"version\", \"ordinal\" FROM \"$artifacts\" \
-                 ORDER BY \"ordinal\" NULLS LAST, \"version\"",
+                 WHERE \"removed_at\" IS NULL ORDER BY \"ordinal\" NULLS LAST, \"version\"",
             )
             .await?;
         Ok(rows
@@ -2066,11 +2851,18 @@ impl<'a> Versions<'a> {
             None => PinCause::Activate,
         };
         ensure_revocations(self.pool).await?;
+        ensure_build_tables(self.pool).await?;
         let tx = self.pool.begin().await?;
         tx.rows(&pin_lock_sql()).await?;
         if let Some(mark) = mark_in(&tx, version).await? {
             tx.rollback().await?;
             return Err(self.revoked(mark, None).await);
+        }
+        // One deployment-wide rollout at a time (ruled 2026-11-23, Q3).
+        // Read under the pin lock a rollout's start takes too.
+        if let Some((id, target)) = open_rollout_in(&tx).await? {
+            tx.rollback().await?;
+            return Err(VersionRefusal::RolloutOpen { id, target });
         }
         // Every tenant would land below `versions.minimum`. Read under the
         // lock a setting change takes (audit L4).
@@ -2092,9 +2884,15 @@ impl<'a> Versions<'a> {
             .first()
             .and_then(|r| r.first().cloned().flatten())
             .is_some_and(|v| v == "t" || v == "true");
-        tx.rows("DELETE FROM \"$moves\"").await?;
+        // A tenant in a move with dual writes (increment 11a) keeps its
+        // move and its pin: only the move's own commands switch it.
+        tx.rows("DELETE FROM \"$moves\" WHERE \"step\" = ''")
+            .await?;
+        let moving = "AND \"$space\" NOT IN (SELECT \"space\" FROM \"$moves\")";
         if !attached {
-            repin(&tx, &repin_sql(version, actor, cause, at.0, None)).await?;
+            // A tenant in a tenant build keeps the build's version.
+            let keep = format!("{moving} {NOT_IN_A_BUILD}");
+            repin(&tx, &repin_sql(version, actor, cause, at.0, Some(&keep))).await?;
         } else {
             let ready: Vec<String> = plan.ready.iter().cloned().collect();
             let ready_sql = if ready.is_empty() {
@@ -2106,7 +2904,8 @@ impl<'a> Versions<'a> {
             // already brought forward: pinned now.
             let now = format!(
                 "AND (\"version\" IS NULL \
-                  OR \"$space\" NOT IN (SELECT \"$space\" FROM \"$spacedb\"){ready_sql})"
+                  OR \"$space\" NOT IN (SELECT \"$space\" FROM \"$spacedb\"){ready_sql}) \
+                 {moving} {NOT_IN_A_BUILD}"
             );
             repin(&tx, &repin_sql(version, actor, cause, at.0, Some(&now))).await?;
             // Every other tenant stays where it is, with a move open.
@@ -2117,7 +2916,9 @@ impl<'a> Versions<'a> {
                  FROM \"$spaces\" \
                  WHERE \"state\" IN {PINNED_STATES} AND \"version\" IS NOT NULL \
                    AND \"version\" <> {to} \
-                   AND \"$space\" IN (SELECT \"$space\" FROM \"$spacedb\")",
+                   AND \"$space\" IN (SELECT \"$space\" FROM \"$spacedb\") \
+                   AND \"$space\" NOT IN (SELECT \"space\" FROM \"$moves\") \
+                   {NOT_IN_A_BUILD}",
                 to = sql_lit(version),
                 at = at.0,
             ))
@@ -2125,7 +2926,7 @@ impl<'a> Versions<'a> {
             for (space, (phase, reason)) in &plan.held {
                 tx.rows(&format!(
                     "UPDATE \"$moves\" SET \"phase\" = {}, \"reason\" = {} \
-                     WHERE \"space\" = {}",
+                     WHERE \"space\" = {} AND \"step\" = ''",
                     sql_lit(phase.as_str()),
                     sql_lit(reason),
                     sql_lit(space)
@@ -2133,11 +2934,375 @@ impl<'a> Versions<'a> {
                 .await?;
             }
         }
+        // The own space follows the activation, when a rollout pinned it.
+        repin_own_in(&tx, version, actor, cause, at.0, None, None).await?;
         tx.commit().await?;
         Ok(Activated::Switched {
             from,
             to: version.to_string(),
         })
+    }
+
+    /// **"Active" flips to `version`, and no tenant moves**
+    /// (`plan-versions.md` §3.7; ruled 2026-11-23, Q5): the end of a
+    /// rollout. One activation row and its nudge, under the pin lock, so
+    /// every node loads `version` and swaps: sign-in (`AuthApp`) and new
+    /// tenants follow it from here. A tenant keeps its pin; only one that
+    /// has none yet is pinned. Open moves to another version are closed.
+    /// The own space's pin follows, as on every activation.
+    ///
+    /// Called by the rollout that is open, so it is not refused for it.
+    /// Refused: a version not stored, or revoked.
+    pub async fn activate_alone(
+        &self,
+        version: &str,
+        actor: &str,
+        at: Timestamp,
+    ) -> Result<Activated, VersionRefusal> {
+        if registry::get(self.pool, version).await?.is_none() {
+            return Err(VersionRefusal::UnknownVersion(version.to_string()));
+        }
+        let from = registry::active_version(self.pool).await?;
+        if from.as_deref() == Some(version) {
+            return Ok(Activated::AlreadyActive(version.to_string()));
+        }
+        self.require_arrival(version).await?;
+        ensure_revocations(self.pool).await?;
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        if let Some(mark) = mark_in(&tx, version).await? {
+            tx.rollback().await?;
+            return Err(self.revoked(mark, None).await);
+        }
+        registry::record_activation(&tx, version, actor, at).await?;
+        tx.rows(&format!(
+            "DELETE FROM \"$moves\" WHERE \"to\" <> {}",
+            sql_lit(version)
+        ))
+        .await?;
+        repin(
+            &tx,
+            &repin_sql(
+                version,
+                actor,
+                PinCause::Rollout,
+                at.0,
+                Some("AND \"version\" IS NULL"),
+            ),
+        )
+        .await?;
+        repin_own_in(&tx, version, actor, PinCause::Rollout, at.0, None, None).await?;
+        tx.commit().await?;
+        Ok(Activated::Switched {
+            from,
+            to: version.to_string(),
+        })
+    }
+
+    /// **The deployment's own space moves to `version`, apart from the
+    /// active version** (`plan-versions.md` §3.7, §1.14; ruled 2026-11-23,
+    /// Q4): the rollout's named step. `space` is the own space's id. Its
+    /// pin is `$own_pin`, a `$pins` row records the move, and the nudge
+    /// tells every node, which loads `version` and serves the own space on
+    /// it. "Active", sign-in and new tenants do not move until the rollout
+    /// finishes ([`Versions::activate_alone`]). `true` when it moved.
+    pub async fn pin_own(
+        &self,
+        space: &str,
+        version: &str,
+        rollout: i64,
+        actor: &str,
+        at: u64,
+    ) -> Result<bool, VersionRefusal> {
+        ensure_revocations(self.pool).await?;
+        if self.pool.rows(OWN_PIN_DDL).await.is_err() {
+            self.pool.rows(OWN_PIN_DDL).await?;
+        }
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        if let Some(mark) = mark_in(&tx, version).await? {
+            tx.rollback().await?;
+            return Err(self.revoked(mark, None).await);
+        }
+        let moved = repin_own_in(
+            &tx,
+            version,
+            actor,
+            PinCause::Rollout,
+            at,
+            Some(rollout),
+            Some(space),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(moved)
+    }
+
+    /// **The own space's pin, made when it has none** (increment 13): at
+    /// the active version, epoch 0, with a `$pins` row and the nudge, so
+    /// every node serves the own space under an epoch, and its writes check
+    /// the pin fence. A seal on the deployment's database fences them at
+    /// its end. `(version, epoch)`; `None` when no version is active.
+    pub async fn own_pin_made(
+        &self,
+        space: &str,
+        actor: &str,
+        at: u64,
+    ) -> Result<Option<(String, i64)>, VersionRefusal> {
+        ensure_revocations(self.pool).await?;
+        if self.pool.rows(OWN_PIN_DDL).await.is_err() {
+            self.pool.rows(OWN_PIN_DDL).await?;
+        }
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        let made = tx
+            .rows(&format!(
+                "INSERT INTO \"$own_pin\" (\"space\", \"version\", \"epoch\") \
+                 SELECT {s}, a.\"version\", 0 FROM (SELECT \"version\" FROM \"$activations\" \
+                   ORDER BY \"seq\" DESC LIMIT 1) a \
+                 WHERE NOT EXISTS (SELECT 1 FROM \"$own_pin\") RETURNING \"version\"",
+                s = sql_lit(space),
+            ))
+            .await?;
+        if let Some(v) = made.first().and_then(|r| r.first().cloned().flatten()) {
+            tx.rows(&format!(
+                "INSERT INTO \"$pins\" (\"space\", \"from\", \"to\", \"epoch\", \"actor\", \
+                 \"cause\", \"at\") VALUES ({}, NULL, {}, 0, {}, {}, {at})",
+                sql_lit(space),
+                sql_lit(&v),
+                sql_lit(actor),
+                sql_lit(PinCause::Move.as_str()),
+            ))
+            .await?;
+            tx.notify(PINS_CHANNEL, "").await?;
+        }
+        let row = tx
+            .rows("SELECT \"version\", \"epoch\" FROM \"$own_pin\" LIMIT 1")
+            .await?;
+        tx.commit().await?;
+        Ok(row
+            .first()
+            .and_then(|r| Some((r.first()?.clone()?, r.get(1)?.clone()?.parse().ok()?))))
+    }
+
+    /// **The own space moves to `version` with a seal's end on the
+    /// deployment's database** (increment 13): the version before can no
+    /// longer write the sealed field there, so the own space follows the
+    /// data, first, as a rollout moves it (Q4). "Active", sign-in and new
+    /// tenants stay until the activation. Cause `move`. `true` when it
+    /// moved.
+    pub async fn pin_own_for_step(
+        &self,
+        space: &str,
+        version: &str,
+        actor: &str,
+        at: u64,
+    ) -> Result<bool, VersionRefusal> {
+        ensure_revocations(self.pool).await?;
+        if self.pool.rows(OWN_PIN_DDL).await.is_err() {
+            self.pool.rows(OWN_PIN_DDL).await?;
+        }
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        if let Some(mark) = mark_in(&tx, version).await? {
+            tx.rollback().await?;
+            return Err(self.revoked(mark, None).await);
+        }
+        let moved =
+            repin_own_in(&tx, version, actor, PinCause::Move, at, None, Some(space)).await?;
+        tx.commit().await?;
+        Ok(moved)
+    }
+
+    /// The own space's pin, `(space, version, epoch)`, when a rollout gave
+    /// it one.
+    pub async fn own_pin(&self) -> Result<Option<(String, String, i64)>, VersionRefusal> {
+        match self
+            .pool
+            .rows("SELECT \"space\", \"version\", \"epoch\" FROM \"$own_pin\" LIMIT 1")
+            .await
+        {
+            Ok(rows) => Ok(rows.first().and_then(|r| {
+                Some((
+                    r.first()?.clone()?,
+                    r.get(1)?.clone()?,
+                    r.get(2)?.clone()?.parse().ok()?,
+                ))
+            })),
+            Err(e) if e.is_missing_table() => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// **Move one tenant as part of rollout `rollout`** (§3.7), cause
+    /// `rollout`, its `$pins` row naming the rollout. The caller has brought
+    /// a tenant's own database to `version` and gated it.
+    ///
+    /// `version` is the rollout's target, which becomes the active version,
+    /// so `versions.served` does not refuse it; a revoked version and one
+    /// below `versions.minimum` are refused. `None`: the tenant was on
+    /// `version` already. Refused as [`VersionRefusal::NoTenant`] when it
+    /// no longer holds a pin (reaped meanwhile).
+    pub async fn pin_in_rollout(
+        &self,
+        space: &str,
+        version: &str,
+        rollout: i64,
+        actor: &str,
+        at: u64,
+    ) -> Result<Option<PinChange>, VersionRefusal> {
+        ensure_revocations(self.pool).await?;
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        if let Some(mark) = mark_in(&tx, version).await? {
+            tx.rollback().await?;
+            return Err(self.revoked(mark, None).await);
+        }
+        let policy = self.policy_in(&tx).await?;
+        if let Err(e) = self
+            .with_policy(&policy)
+            .refuse_below_minimum(version)
+            .await
+        {
+            tx.rollback().await?;
+            return Err(e);
+        }
+        let held = tx
+            .rows(&format!(
+                "SELECT \"version\" FROM \"$spaces\" \
+                 WHERE \"$space\" = {} AND \"state\" IN {PINNED_STATES}",
+                sql_lit(space)
+            ))
+            .await?;
+        let Some(row) = held.first() else {
+            tx.rollback().await?;
+            return Err(VersionRefusal::NoTenant {
+                space: space.to_string(),
+            });
+        };
+        let from = row.first().cloned().flatten();
+        let filter = format!("AND \"$space\" = {}", sql_lit(space));
+        let moved = repin(
+            &tx,
+            &repin_sql(version, actor, PinCause::Rollout, at, Some(&filter)),
+        )
+        .await?;
+        tx.rows(&format!(
+            "UPDATE \"$pins\" SET \"rollout\" = {rollout} \
+             WHERE \"seq\" = (SELECT max(\"seq\") FROM \"$pins\" WHERE \"space\" = {})",
+            sql_lit(space)
+        ))
+        .await?;
+        tx.rows(&format!(
+            "DELETE FROM \"$moves\" WHERE \"space\" = {}",
+            sql_lit(space)
+        ))
+        .await?;
+        tx.commit().await?;
+        if moved.is_empty() {
+            return Ok(None);
+        }
+        let epoch = self.pin_of(space).await?.map(|p| p.epoch).unwrap_or(0);
+        Ok(Some(PinChange {
+            seq: 0,
+            space: space.to_string(),
+            from,
+            to: version.to_string(),
+            epoch,
+            actor: actor.to_string(),
+            cause: PinCause::Rollout.as_str().to_string(),
+            at,
+        }))
+    }
+
+    /// Name rollout `rollout` on the tenant's newest `$pins` row: a move
+    /// with dual writes a rollout drove pinned it at its switch (increment
+    /// 11b).
+    pub async fn tag_rollout(&self, space: &str, rollout: i64) -> Result<(), VersionRefusal> {
+        self.pool
+            .rows(&format!(
+                "UPDATE \"$pins\" SET \"rollout\" = {rollout} \
+                 WHERE \"seq\" = (SELECT max(\"seq\") FROM \"$pins\" WHERE \"space\" = {})",
+                sql_lit(space)
+            ))
+            .await?;
+        Ok(())
+    }
+
+    /// **Pin `spaces` back to `version`, the active version, after an
+    /// aborted rollout** (ruled 2026-11-25): cause `rollback`, a new epoch
+    /// each, the nudge. The caller chose tenants that rollout pinned with
+    /// no soak and whose every write is kept
+    /// (`crate::every_tenant::rollout_pins_back`). Under the pin lock a
+    /// tenant in a move, in a tenant build, or pinned again meanwhile by a
+    /// person is left; so is every tenant while a rollout is open. The
+    /// deployment's own space follows when it is among them. The tenants
+    /// moved.
+    pub async fn pin_back_from_rollout(
+        &self,
+        spaces: &[String],
+        version: &str,
+        actor: &str,
+        at: u64,
+    ) -> Result<Vec<String>, VersionRefusal> {
+        if spaces.is_empty() {
+            return Ok(Vec::new());
+        }
+        ensure_build_tables(self.pool).await?;
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        if open_rollout_in(&tx).await?.is_some()
+            || active_in(&tx).await?.as_deref() != Some(version)
+        {
+            tx.rollback().await?;
+            return Ok(Vec::new());
+        }
+        let list = sql_list(spaces);
+        // Still the rollout's own pin: its newest `$pins` row names one.
+        let filter = format!(
+            "AND \"$space\" IN ({list}) \
+             AND \"$space\" NOT IN (SELECT \"space\" FROM \"$moves\") {NOT_IN_A_BUILD} \
+             AND (SELECT p.\"rollout\" FROM \"$pins\" p WHERE p.\"space\" = \"$space\" \
+               ORDER BY p.\"seq\" DESC LIMIT 1) IS NOT NULL"
+        );
+        let mut moved: Vec<String> = repin(
+            &tx,
+            &repin_sql(version, actor, PinCause::Rollback, at, Some(&filter)),
+        )
+        .await?
+        .into_iter()
+        .filter_map(|r| r.into_iter().next().flatten())
+        .collect();
+        if let Some((own, _, _)) = self.own_pin().await? {
+            if spaces.contains(&own)
+                && repin_own_in(&tx, version, actor, PinCause::Rollback, at, None, None).await?
+            {
+                moved.push(own);
+            }
+        }
+        tx.commit().await?;
+        Ok(moved)
+    }
+
+    /// Reopen one tenant's refused move (§2.1, increment 7), so the
+    /// catch-up tries it again: phase `expanding`, reason cleared. The
+    /// move it reopened; `None` when the tenant has no refused move.
+    pub async fn retry_move(&self, space: &str) -> Result<Option<Move>, VersionRefusal> {
+        let sql = format!(
+            "UPDATE \"$moves\" SET \"phase\" = 'expanding', \"reason\" = '' \
+             WHERE \"space\" = {} AND \"phase\" = 'refused' RETURNING {MOVE_COLUMNS}",
+            sql_lit(space)
+        );
+        let rows = match self.pool.rows(&sql).await {
+            Ok(r) => r,
+            Err(e) if e.is_missing_table() => return Ok(None),
+            Err(e) if e.is_missing_column() => {
+                ensure_revocations(self.pool).await?;
+                self.pool.rows(&sql).await?
+            }
+            Err(e) => return Err(e.into()),
+        };
+        Ok(rows.first().and_then(|r| move_row(r)))
     }
 
     /// **Every open move** (§2.1), oldest first. A database with no
@@ -2226,6 +3391,264 @@ impl<'a> Versions<'a> {
         .await?;
         tx.commit().await?;
         Ok(moved)
+    }
+
+    // ── moves with dual writes (increment 11a) ─────────────────────────
+
+    /// The tenant's open move with dual writes, if any.
+    pub async fn dual_move(&self, space: &str) -> Result<Option<Move>, VersionRefusal> {
+        Ok(self
+            .moves()
+            .await?
+            .into_iter()
+            .find(|m| m.space == space && m.is_dual()))
+    }
+
+    /// Every open move with dual writes.
+    pub async fn dual_moves(&self) -> Result<Vec<Move>, VersionRefusal> {
+        Ok(self
+            .moves()
+            .await?
+            .into_iter()
+            .filter(Move::is_dual)
+            .collect())
+    }
+
+    /// **Open a move with dual writes** for one tenant pinned to `from`
+    /// (`plan-backfill-dual-writes.md` §1): the move, its step and its
+    /// overlays, in phase `expanding`, and the tenant's pin epoch raised in
+    /// the same transaction, so every node takes the overlays before it
+    /// writes again (the pin fence refuses one that has not). An
+    /// activation's move for the tenant is replaced. The epoch after.
+    // The move's two ends, its step and overlays, and who and when: each
+    // is one column of the row it writes.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_dual_move(
+        &self,
+        space: &str,
+        from: &str,
+        to: &str,
+        step: &str,
+        overlay: &str,
+        actor: &str,
+        at: u64,
+    ) -> Result<i64, VersionRefusal> {
+        ensure_revocations(self.pool).await?;
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        if let Some(m) = dual_move_in(&tx, space).await? {
+            tx.rollback().await?;
+            return Err(VersionRefusal::Moving {
+                space: m.space,
+                from: m.from,
+                to: m.to,
+                phase: m.phase.as_str().to_string(),
+            });
+        }
+        let held = tx
+            .rows(&format!(
+                "SELECT \"version\" FROM \"$spaces\" WHERE \"$space\" = {} \
+                 AND \"state\" IN {PINNED_STATES} FOR UPDATE",
+                sql_lit(space)
+            ))
+            .await?;
+        let Some(version) = held.first().and_then(|r| r.first().cloned().flatten()) else {
+            tx.rollback().await?;
+            return Err(VersionRefusal::NoTenant {
+                space: space.to_string(),
+            });
+        };
+        if version != from {
+            tx.rollback().await?;
+            return Err(VersionRefusal::MoveTo(format!(
+                "tenant `{space}` is on {version}, and the step starts from {from}: replay it \
+                 to {from} first (`ordo evolve --tenant {space} --to {from}`)"
+            )));
+        }
+        tx.rows(&format!(
+            "DELETE FROM \"$moves\" WHERE \"space\" = {}",
+            sql_lit(space)
+        ))
+        .await?;
+        tx.rows(&format!(
+            "INSERT INTO \"$moves\" (\"space\", \"from\", \"to\", \"phase\", \"reason\", \
+               \"soak_until\", \"started_at\", \"step\", \"overlay\") \
+             VALUES ({}, {}, {}, 'expanding', '', 0, {at}, {}, {})",
+            sql_lit(space),
+            sql_lit(from),
+            sql_lit(to),
+            sql_lit(step),
+            sql_lit(overlay),
+        ))
+        .await?;
+        let epoch = bump_in(&tx, space, actor, at).await?;
+        tx.commit().await?;
+        Ok(epoch)
+    }
+
+    /// Say where a move with dual writes stands. The overlays do not
+    /// change, so no pin epoch moves.
+    pub async fn note_dual_move(
+        &self,
+        space: &str,
+        phase: MovePhase,
+        reason: &str,
+    ) -> Result<(), VersionRefusal> {
+        self.pool
+            .rows(&format!(
+                "UPDATE \"$moves\" SET \"phase\" = {}, \"reason\" = {} \
+                 WHERE \"space\" = {} AND \"step\" <> ''",
+                sql_lit(phase.as_str()),
+                sql_lit(reason),
+                sql_lit(space)
+            ))
+            .await?;
+        Ok(())
+    }
+
+    /// **The switch** (§2.1 step 5): the tenant's pin moves from the move's
+    /// `from` to its `to`, cause `move`, and the move enters its soak until
+    /// `soak_until`, in one transaction. Only from `gated`.
+    pub async fn switch_dual_move(
+        &self,
+        space: &str,
+        actor: &str,
+        at: u64,
+        soak_until: u64,
+    ) -> Result<PinChange, VersionRefusal> {
+        self.flip_dual_move(
+            space,
+            MovePhase::Gated,
+            MovePhase::Soaking,
+            actor,
+            at,
+            soak_until,
+        )
+        .await
+    }
+
+    /// **A revert in the soak** (`plan-backfill-dual-writes.md` §1): the
+    /// pin moves back to the move's `from`, cause `rollback`, and the move
+    /// returns to `gated`, both shapes still current. Only from `soaking`.
+    pub async fn revert_dual_move(
+        &self,
+        space: &str,
+        actor: &str,
+        at: u64,
+    ) -> Result<PinChange, VersionRefusal> {
+        self.flip_dual_move(space, MovePhase::Soaking, MovePhase::Gated, actor, at, 0)
+            .await
+    }
+
+    async fn flip_dual_move(
+        &self,
+        space: &str,
+        expect: MovePhase,
+        next: MovePhase,
+        actor: &str,
+        at: u64,
+        soak_until: u64,
+    ) -> Result<PinChange, VersionRefusal> {
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        let Some(m) = dual_move_in(&tx, space).await? else {
+            tx.rollback().await?;
+            return Err(VersionRefusal::NoMove {
+                space: space.to_string(),
+            });
+        };
+        if m.phase != expect {
+            tx.rollback().await?;
+            return Err(VersionRefusal::Moving {
+                space: m.space,
+                from: m.from,
+                to: m.to,
+                phase: m.phase.as_str().to_string(),
+            });
+        }
+        let (to, cause) = if next == MovePhase::Soaking {
+            (&m.to, PinCause::Move)
+        } else {
+            (&m.from, PinCause::Rollback)
+        };
+        if let Some(mark) = mark_in(&tx, to).await? {
+            tx.rollback().await?;
+            return Err(self.revoked(mark, None).await);
+        }
+        let filter = format!("AND \"$space\" = {}", sql_lit(space));
+        repin(&tx, &repin_sql(to, actor, cause, at, Some(&filter))).await?;
+        tx.rows(&format!(
+            "UPDATE \"$moves\" SET \"phase\" = {}, \"soak_until\" = {soak_until}, \
+             \"reason\" = '' WHERE \"space\" = {} AND \"step\" <> ''",
+            sql_lit(next.as_str()),
+            sql_lit(space)
+        ))
+        .await?;
+        let epoch = tx
+            .rows(&format!(
+                "SELECT \"pin_epoch\" FROM \"$spaces\" WHERE \"$space\" = {}",
+                sql_lit(space)
+            ))
+            .await?
+            .first()
+            .and_then(|r| r.first().cloned().flatten())
+            .and_then(|e| e.parse().ok())
+            .unwrap_or(0);
+        tx.commit().await?;
+        Ok(PinChange {
+            seq: 0,
+            space: space.to_string(),
+            from: Some(if next == MovePhase::Soaking {
+                m.from.clone()
+            } else {
+                m.to.clone()
+            }),
+            to: to.clone(),
+            epoch,
+            actor: actor.to_string(),
+            cause: cause.as_str().to_string(),
+            at,
+        })
+    }
+
+    /// **The soak's close**: the move leaves `$moves` and the tenant's pin
+    /// epoch rises, so every node drops its overlays. Only from `soaking`.
+    /// The caller has made the database the move's `to` alone first. The
+    /// epoch after.
+    pub async fn close_dual_move(
+        &self,
+        space: &str,
+        actor: &str,
+        at: u64,
+    ) -> Result<i64, VersionRefusal> {
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        match dual_move_in(&tx, space).await? {
+            None => {
+                tx.rollback().await?;
+                return Err(VersionRefusal::NoMove {
+                    space: space.to_string(),
+                });
+            }
+            Some(m) if m.phase != MovePhase::Soaking => {
+                tx.rollback().await?;
+                return Err(VersionRefusal::Moving {
+                    space: m.space,
+                    from: m.from,
+                    to: m.to,
+                    phase: m.phase.as_str().to_string(),
+                });
+            }
+            Some(_) => {}
+        }
+        tx.rows(&format!(
+            "DELETE FROM \"$moves\" WHERE \"space\" = {}",
+            sql_lit(space)
+        ))
+        .await?;
+        let epoch = bump_in(&tx, space, actor, at).await?;
+        tx.commit().await?;
+        Ok(epoch)
     }
 
     /// The version a tenant created now starts on: `versions.new_tenant`
@@ -2377,6 +3800,9 @@ impl<'a> Versions<'a> {
     /// Refused: a version not stored or revoked, a tenant that is not
     /// `provisioning`, `active` or `paused`. A tenant already there moves
     /// nothing and answers its pin. The pin the tenant has after.
+    ///
+    /// A tenant a tenant build holds is refused ([`VersionRefusal::InBuild`]):
+    /// only its build moves it (increment 16).
     pub async fn pin(
         &self,
         space: &str,
@@ -2384,9 +3810,25 @@ impl<'a> Versions<'a> {
         actor: &str,
         at: u64,
     ) -> Result<PinChange, VersionRefusal> {
+        self.pin_as(space, name, actor, at, PinCause::Pin).await
+    }
+
+    /// [`Versions::pin`], with the cause written to `$pins`. Only
+    /// [`PinCause::Build`] moves a tenant a build holds: the tenant builds'
+    /// client (`crate::tenant_builds`) calls it so. A restore keeps an open
+    /// move and points it at the restored version; every other cause ends it.
+    pub async fn pin_as(
+        &self,
+        space: &str,
+        name: &str,
+        actor: &str,
+        at: u64,
+        cause: PinCause,
+    ) -> Result<PinChange, VersionRefusal> {
         let version = self.resolve(name).await?;
         self.require_arrival(&version).await?;
         ensure_revocations(self.pool).await?;
+        ensure_build_tables(self.pool).await?;
         let tx = self.pool.begin().await?;
         tx.rows(&pin_lock_sql()).await?;
         if let Some(mark) = mark_in(&tx, &version).await? {
@@ -2414,19 +3856,49 @@ impl<'a> Versions<'a> {
             });
         };
         let from = row.first().cloned().flatten();
+        if let Some(m) = dual_move_in(&tx, space).await? {
+            tx.rollback().await?;
+            return Err(VersionRefusal::Moving {
+                space: m.space,
+                from: m.from,
+                to: m.to,
+                phase: m.phase.as_str().to_string(),
+            });
+        }
+        if cause != PinCause::Build {
+            if let Some((build, on)) = build_of_in(&tx, space).await? {
+                tx.rollback().await?;
+                return Err(VersionRefusal::InBuild {
+                    space: space.to_string(),
+                    build,
+                    version: on,
+                });
+            }
+        }
         let filter = format!("AND \"$space\" = {}", sql_lit(space));
-        repin(
-            &tx,
-            &repin_sql(&version, actor, PinCause::Pin, at, Some(&filter)),
-        )
-        .await?;
-        // A person chose this tenant's version, so an open move (§2.1) no
-        // longer applies to it.
-        tx.rows(&format!(
-            "DELETE FROM \"$moves\" WHERE \"space\" = {}",
-            sql_lit(space)
-        ))
-        .await?;
+        repin(&tx, &repin_sql(&version, actor, cause, at, Some(&filter))).await?;
+        if cause == PinCause::Restore {
+            // **The database's own cursor wins** (§2.9): a move that was
+            // open goes on from the version the data is at now, and the
+            // backfill reads its cursor from the restored `$backfills`. A
+            // move to the version restored is no move at all.
+            tx.rows(&format!(
+                "DELETE FROM \"$moves\" WHERE \"space\" = {s} AND \"to\" = {v}; \
+                 UPDATE \"$moves\" SET \"from\" = {v}, \"phase\" = 'expanding', \
+                 \"reason\" = 'restored at ' || {v} WHERE \"space\" = {s}",
+                s = sql_lit(space),
+                v = sql_lit(&version)
+            ))
+            .await?;
+        } else {
+            // A person chose this tenant's version, so an open move (§2.1)
+            // no longer applies to it.
+            tx.rows(&format!(
+                "DELETE FROM \"$moves\" WHERE \"space\" = {}",
+                sql_lit(space)
+            ))
+            .await?;
+        }
         tx.commit().await?;
         let epoch = self.pin_of(space).await?.map(|p| p.epoch).unwrap_or(0);
         Ok(PinChange {
@@ -2436,8 +3908,115 @@ impl<'a> Versions<'a> {
             to: version,
             epoch,
             actor: actor.to_string(),
-            cause: PinCause::Pin.as_str().to_string(),
+            cause: cause.as_str().to_string(),
             at,
+        })
+    }
+
+    /// **The pin after a tenant's own database was restored** (§2.9,
+    /// increment 17). `data` is the version the restored database records
+    /// (`$migrations`). The pin follows the data, so the tenant serves the
+    /// version its rows are shaped for:
+    ///
+    /// - already pinned there: nothing moves;
+    /// - stored, not revoked, served and not below `versions.minimum`:
+    ///   pinned there, cause `restore`, a new epoch;
+    /// - revoked, left out of `versions.served`, or below the minimum (Q13,
+    ///   ruled 2026-11-23): the restore stands and the pin is left where it
+    ///   is, ahead of the data. The tenant is held closed as any tenant
+    ///   whose database is behind (`SchemaBehind`) until the database is
+    ///   brought to its pin;
+    /// - not stored: refused, naming the version and how to store it.
+    ///
+    /// Asked before the restore marker is written, so a refusal leaves the
+    /// tenant closed and the same command runs again once the version is
+    /// stored. Moves the pin only for a version that passes every check.
+    pub async fn restore_pin(
+        &self,
+        space: &str,
+        data: &str,
+        actor: &str,
+        at: u64,
+    ) -> Result<RestorePin, VersionRefusal> {
+        let check = self.restore_check(space, data).await?;
+        match check {
+            RestorePin::Pinned { .. } => Ok(RestorePin::Pinned {
+                change: self
+                    .pin_as(space, data, actor, at, PinCause::Restore)
+                    .await?,
+            }),
+            other => Ok(other),
+        }
+    }
+
+    /// What [`Versions::restore_pin`] would do, moving nothing: refused for
+    /// a version not stored, otherwise the answer with no pin written (a
+    /// `Pinned` here carries the change that would be made, epoch 0).
+    pub async fn restore_check(
+        &self,
+        space: &str,
+        data: &str,
+    ) -> Result<RestorePin, VersionRefusal> {
+        let pin = self
+            .pin_of(space)
+            .await?
+            .ok_or_else(|| VersionRefusal::NoTenant {
+                space: space.to_string(),
+            })?;
+        if registry::get(self.pool, data).await?.is_none() {
+            let stored: Vec<String> = registry::stored(self.pool)
+                .await?
+                .into_iter()
+                .map(|(v, _, _)| v)
+                .collect();
+            let newer = stored
+                .iter()
+                .all(|v| version_order(data, v) == std::cmp::Ordering::Greater);
+            return Err(VersionRefusal::RestoreNotStored {
+                version: data.to_string(),
+                newer,
+                stored,
+            });
+        }
+        if pin.version.as_deref() == Some(data) {
+            return Ok(RestorePin::Unchanged {
+                version: data.to_string(),
+            });
+        }
+        ensure_revocations(self.pool).await?;
+        let held = if let Some(mark) = self.revocation_of(data).await? {
+            Some(format!(
+                "{data} is revoked ({}). Lift the mark (`ordo versions unrevoke {data}`), or \
+                 bring the database to its pin",
+                mark.reason
+            ))
+        } else {
+            match self.check_served(data).await {
+                Ok(()) => None,
+                Err(
+                    e @ (VersionRefusal::NotServed { .. } | VersionRefusal::BelowMinimum { .. }),
+                ) => Some(e.to_string()),
+                Err(e) => return Err(e),
+            }
+        };
+        Ok(match held {
+            Some(why) => RestorePin::Held {
+                data: data.to_string(),
+                pin: pin.version,
+                why,
+            },
+            None => RestorePin::Pinned {
+                change: PinChange {
+                    seq: 0,
+                    space: space.to_string(),
+                    from: pin.version,
+                    to: data.to_string(),
+                    epoch: 0,
+                    actor: String::new(),
+                    cause: PinCause::Restore.as_str().to_string(),
+                    at: 0,
+                },
+            },
         })
     }
 
@@ -2474,18 +4053,19 @@ impl<'a> Versions<'a> {
             }
             Err(e) => return Err(e.into()),
         };
-        Ok((
-            rows.into_iter()
-                .filter_map(|r| {
-                    Some((
-                        r.first()?.clone()?,
-                        r.get(1)?.clone()?,
-                        r.get(2)?.clone()?.parse().ok()?,
-                    ))
-                })
-                .collect(),
-            head,
-        ))
+        let mut pins: Vec<(String, String, i64)> = rows
+            .into_iter()
+            .filter_map(|r| {
+                Some((
+                    r.first()?.clone()?,
+                    r.get(1)?.clone()?,
+                    r.get(2)?.clone()?.parse().ok()?,
+                ))
+            })
+            .collect();
+        // The deployment's own space, when a rollout pinned it (§3.7).
+        pins.extend(self.own_pin().await?);
+        Ok((pins, head))
     }
 
     /// **The pin stream** (§1.8, ask 17): every `$pins` row after `seq`,
@@ -2565,6 +4145,135 @@ impl<'a> Versions<'a> {
             .into_iter()
             .filter_map(|r| Some((r.first()?.clone()?, r.get(1)?.clone()?.parse().ok()?)))
             .collect())
+    }
+
+    /// **When `version` last served**, in seconds: `now` while it is
+    /// active, the deployment's own space is on it, or a tenant is pinned
+    /// to it; else the latest of a tenant leaving it (`$pins`) and the
+    /// activation that replaced it (`$activations`). `None`: it never
+    /// served, so no backup or bundle can be at it.
+    pub async fn last_served(
+        &self,
+        version: &str,
+        now: u64,
+    ) -> Result<Option<u64>, VersionRefusal> {
+        if self.active_version().await?.as_deref() == Some(version) {
+            return Ok(Some(now));
+        }
+        if self.own_pin().await?.is_some_and(|(_, v, _)| v == version) {
+            return Ok(Some(now));
+        }
+        if self
+            .tenants_per_version()
+            .await?
+            .get(version)
+            .is_some_and(|n| *n > 0)
+        {
+            return Ok(Some(now));
+        }
+        let v = sql_lit(version);
+        let read = |sql: String| async move {
+            match self.pool.rows(&sql).await {
+                Ok(rows) => Ok(rows
+                    .first()
+                    .and_then(|r| r.first().cloned().flatten())
+                    .and_then(|s| s.parse::<u64>().ok())),
+                Err(e) if e.is_missing_table() => Ok(None),
+                Err(e) => Err(VersionRefusal::from(e)),
+            }
+        };
+        let left = read(format!(
+            "SELECT max(\"at\") FROM \"$pins\" WHERE \"from\" = {v}"
+        ))
+        .await?;
+        let replaced = read(format!(
+            "SELECT max(n.\"at\") FROM \"$activations\" a, LATERAL ( \
+               SELECT b.\"at\" FROM \"$activations\" b WHERE b.\"seq\" > a.\"seq\" \
+               ORDER BY b.\"seq\" LIMIT 1) n \
+             WHERE a.\"version\" = {v}"
+        ))
+        .await?;
+        Ok(left.max(replaced))
+    }
+
+    /// **Whether a restore may still need `version`** (increment 17, §2.7):
+    /// a database backup or an exit bundle taken while it served. Held when
+    /// it served within `versions.restore_window`, or ever, when the window
+    /// is unset. `None`: nothing can be at it, so it may be removed and a
+    /// field only it declares may be pruned.
+    pub async fn restore_hold(
+        &self,
+        version: &str,
+        now: u64,
+    ) -> Result<Option<RestoreHold>, VersionRefusal> {
+        let Some(last) = self.last_served(version, now).await? else {
+            return Ok(None);
+        };
+        let settings = self.settings().await?;
+        let window = settings.restore_window_secs(None);
+        let held = last.saturating_add(window) > now;
+        Ok(held.then(|| RestoreHold {
+            version: version.to_string(),
+            last_served: last,
+            serving: last >= now,
+            window,
+            by_default: settings.restore_window_set_secs().is_none(),
+        }))
+    }
+}
+
+/// A version a restore may still need ([`Versions::restore_hold`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreHold {
+    pub version: String,
+    /// When it last served, in seconds.
+    pub last_served: u64,
+    /// It serves now.
+    pub serving: bool,
+    /// The window in force, in seconds.
+    pub window: u64,
+    /// The window is the default, `versions.restore_window` being unset.
+    pub by_default: bool,
+}
+
+impl RestoreHold {
+    /// The hold in words, naming the setting that frees it.
+    pub fn line(&self) -> String {
+        let since = if self.serving {
+            "serves now".to_string()
+        } else {
+            format!("last served {} UTC", utc_minute(self.last_served))
+        };
+        let source = if self.by_default {
+            format!(
+                "`{RESTORE_WINDOW_SETTING}` is unset, so it is the default, {} (your backup \
+                 retention when Ordo knows it, else 30 days)",
+                duration_words(self.window)
+            )
+        } else {
+            format!(
+                "`{RESTORE_WINDOW_SETTING}` is {}",
+                duration_words(self.window)
+            )
+        };
+        format!(
+            "`{}` {since}, and {source}, so a backup or bundle taken then may still need it \
+             until {} UTC. Wait, or set the window to how long you keep backups and bundles \
+             (`ordo versions set restore-window <duration> --reason \"...\"`; `0` holds none)",
+            self.version,
+            utc_minute(self.last_served.saturating_add(self.window)),
+        )
+    }
+}
+
+/// A window in seconds as a person set it: `30d`, `12h`, `0`.
+fn duration_words(secs: u64) -> String {
+    match secs {
+        0 => "0".into(),
+        s if s % 86_400 == 0 => format!("{}d", s / 86_400),
+        s if s % 3_600 == 0 => format!("{}h", s / 3_600),
+        s if s % 60 == 0 => format!("{}m", s / 60),
+        s => format!("{s}s"),
     }
 }
 
@@ -2731,6 +4440,91 @@ impl<'a> Versions<'a> {
         .await?;
         tx.commit().await?;
         Ok(version)
+    }
+
+    /// **The last step of removing a stored version** (§1.6): under the pin
+    /// lock, check again that it is not active and no tenant is pinned to
+    /// it, then leave its tombstone ([`registry::mark_removed`]) and a
+    /// `$version_removals` row with who, why, where its tenants went and
+    /// how many. Every other check is the caller's, before this
+    /// (`crate::version_removal`). Answers the tenants still pinned to it
+    /// when there are any, and removes nothing then.
+    pub async fn remove_stored(
+        &self,
+        version: &str,
+        reason: &str,
+        moved_to: Option<&str>,
+        moved: usize,
+        actor: &str,
+        at: u64,
+    ) -> Result<Vec<String>, VersionRefusal> {
+        self.ensure().await?;
+        self.pool.rows(REMOVALS_DDL).await?;
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        if active_in(&tx).await?.as_deref() == Some(version) {
+            tx.rollback().await?;
+            return Err(VersionRefusal::MoveTo(format!(
+                "{} became the active version meanwhile, and the active version is not removed",
+                self.named(version).await?
+            )));
+        }
+        let left: Vec<String> = tx
+            .rows(&format!(
+                "SELECT \"$space\" FROM \"$spaces\" WHERE \"version\" = {} \
+                 AND \"state\" IN {PINNED_STATES} ORDER BY \"$space\"",
+                sql_lit(version)
+            ))
+            .await?
+            .into_iter()
+            .filter_map(|r| r.into_iter().next().flatten())
+            .collect();
+        if !left.is_empty() {
+            tx.rollback().await?;
+            return Ok(left);
+        }
+        registry::mark_removed(&tx, version, at).await?;
+        tx.rows(&format!(
+            "INSERT INTO \"$version_removals\" \
+               (\"version\", \"actor\", \"reason\", \"moved_to\", \"moved\", \"at\") \
+             VALUES ({}, {}, {}, {}, {moved}, {at})",
+            sql_lit(version),
+            sql_lit(actor),
+            sql_lit(reason),
+            moved_to.map(sql_lit).unwrap_or_else(|| "NULL".into()),
+        ))
+        .await?;
+        tx.commit().await?;
+        Ok(Vec::new())
+    }
+
+    /// Every removal, newest first: `(version, actor, reason, moved_to,
+    /// moved, at)`. Empty before the first.
+    pub async fn removals(&self) -> Result<Vec<Removal>, VersionRefusal> {
+        match self
+            .pool
+            .rows(
+                "SELECT \"version\", \"actor\", \"reason\", \"moved_to\", \"moved\", \"at\" \
+                 FROM \"$version_removals\" ORDER BY \"seq\" DESC",
+            )
+            .await
+        {
+            Ok(rows) => Ok(rows
+                .into_iter()
+                .filter_map(|r| {
+                    Some(Removal {
+                        version: r.first()?.clone()?,
+                        actor: r.get(1)?.clone()?,
+                        reason: r.get(2)?.clone()?,
+                        moved_to: r.get(3).cloned().flatten(),
+                        moved: r.get(4)?.clone()?.parse().ok()?,
+                        at: r.get(5)?.clone()?.parse().ok()?,
+                    })
+                })
+                .collect()),
+            Err(e) if e.is_missing_table() => Ok(Vec::new()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Every revoked version's mark. A database with no `$revocations`
@@ -2986,8 +4780,18 @@ impl<'a> Versions<'a> {
         at: u64,
     ) -> Result<MovedOff, VersionRefusal> {
         ensure_revocations(self.pool).await?;
+        ensure_build_tables(self.pool).await?;
         let tx = self.pool.begin().await?;
         tx.rows(&pin_lock_sql()).await?;
+        // A tenant build moves its own tenants (increment 16).
+        if let Some((build, on)) = build_of_in(&tx, space).await? {
+            tx.rollback().await?;
+            return Err(VersionRefusal::InBuild {
+                space: space.to_string(),
+                build,
+                version: on,
+            });
+        }
         // Under the lock, as a pin reads it (audit L4).
         let policy = self.policy_in(&tx).await?;
         let below = match self.with_policy(&policy).below_minimum().await {
@@ -3190,15 +4994,19 @@ impl<'a> Versions<'a> {
         // A load guard is a duration, checked alone: it names no version.
         if setting.is_guard() {
             let now = self.settings().await?;
-            if let Some(v) = value {
-                if guard_secs(setting, v).is_none() {
-                    return Err(VersionRefusal::Guard {
-                        setting: setting.name(),
-                        value: v.to_string(),
-                    });
-                }
-            }
-            let resolved = now.with(setting, value.map(str::to_string));
+            let value = match value {
+                Some(v) => match check_guard(setting, v) {
+                    Some(v) => Some(v),
+                    None => {
+                        return Err(VersionRefusal::Guard {
+                            setting: setting.name(),
+                            value: v.chars().take(40).collect(),
+                        })
+                    }
+                },
+                None => None,
+            };
+            let resolved = now.with(setting, value);
             return Ok((resolved.value(setting), resolved));
         }
         let value = match (setting, value) {
@@ -3220,15 +5028,12 @@ impl<'a> Versions<'a> {
             VersionSetting::Served | VersionSetting::Minimum => {
                 stored_only.check_policy(&candidate.policy).await?
             }
-            VersionSetting::NewTenant
-            | VersionSetting::MinResidency
-            | VersionSetting::IdleEvictAfter => candidate.policy.clone(),
+            _ => candidate.policy.clone(),
         };
         let mut resolved = VersionSettings {
             policy,
             new_tenant: None,
-            min_residency: candidate.min_residency.clone(),
-            idle_evict_after: candidate.idle_evict_after.clone(),
+            ..candidate.clone()
         };
         if let Some(named) = &candidate.new_tenant {
             let version = match self.resolve(named).await {
@@ -3347,7 +5152,7 @@ impl<'a> Versions<'a> {
             return out;
         }
         for s in VersionSetting::ALL {
-            if s.is_guard() {
+            if s.env().is_empty() {
                 continue;
             }
             // Empty was unset before 2026-11-05 too.

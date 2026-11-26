@@ -65,6 +65,19 @@ pub async fn serve(target_db: &str) -> std::net::SocketAddr {
     })
     .await
     .expect("target pool");
+    // With `rollout.strategy` unset, a deployment that is not dev rolls an
+    // apply out a batch at a time (ruled 2026-11-25). These tests apply and
+    // expect every tenant on the new version at once.
+    ordo_host::rollouts::Rollouts::on(&target)
+        .set_setting(
+            "rollout.strategy",
+            Some("all"),
+            "test",
+            "every tenant at once",
+            0,
+        )
+        .await
+        .expect("rollout.strategy all");
 
     let grants = Arc::new(PgGrantRegistry::new(dir_pool.clone()));
     grants.ensure_table().await.expect("platform table");
@@ -96,13 +109,25 @@ pub async fn serve(target_db: &str) -> std::net::SocketAddr {
     )
     .expect("platform specs");
 
+    let apply = apply_op::ApplyOps::new(
+        target.clone(),
+        std::sync::Arc::new(ordo_exec::route::SinglePool::new(target.clone())),
+        HOME,
+    );
+    // The clone ops seal this deployment's clone key under its own space.
+    let clone_keys = f.keys.clone();
+    clone_keys
+        .create_space(&ordo_crypto::SpaceId(HOME.to_string()))
+        .expect("home custody");
     let ops = Arc::new(
         PlatformOps::new(engine.clone(), grants, Arc::new(|| NOW))
-            .with_apply(apply_op::ApplyOps::new(
-                target.clone(),
-                std::sync::Arc::new(ordo_exec::route::SinglePool::new(target.clone())),
-                HOME,
-            ))
+            .with_apply(apply.clone())
+            .with_clones(Arc::new(ordo_host::clones::CloneOps {
+                apply,
+                keys: clone_keys,
+                tenants: None,
+                access: ordo_host::clones::CloneAccess::new(),
+            }))
             .with_tenant_list(Arc::new(ordo_host::fleet::TenantListOps {
                 control: target.clone(),
                 home: HOME.to_string(),

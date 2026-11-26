@@ -164,8 +164,8 @@ impl PresencePolicy {
             if crate::console_keys::NEVER_EXEMPT.contains(&entry) {
                 return Err(format!(
                     "`{entry}` can never be exempt: who holds a console key decides who can \
-                     sign in as the deployment owner, so it always takes the owner's touch. \
-                     Remove `{entry}` from {ENV}"
+                     sign in as the deployment owner, and breaking glass skips the staging \
+                     check, so each always takes the owner's touch. Remove `{entry}` from {ENV}"
                 ));
             }
             if !known.iter().any(|k| matches(entry, k)) {
@@ -224,7 +224,7 @@ impl PresencePolicy {
             return Some("a version move, which never asks");
         }
         if crate::console_keys::NEVER_EXEMPT.contains(&op) {
-            return Some("console keys, which always ask");
+            return Some("console keys and breaking glass, which always ask");
         }
         if self.names_required(op) {
             return Some(REQUIRED_ENV);

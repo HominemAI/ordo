@@ -85,7 +85,7 @@ async fn fresh(stem: &str) -> Pool {
 
 async fn apply(pool: &Pool, source: &str) -> Result<apply_op::Report, apply_op::ApplyRefused> {
     let program = Program::compile(source).expect("compiles");
-    apply_op::run_program(
+    run_all_at_once(
         pool,
         &SinglePool::new(pool.clone()),
         &program,
@@ -567,4 +567,25 @@ async fn the_door_reads_and_changes_the_settings() {
         })
         .collect();
     assert_eq!(acts, ["version-setting"]);
+}
+
+/// `apply_op::run_program` on a deployment that says it is dev. Outside dev,
+/// with `rollout.strategy` unset, an apply rolls out a batch at a time
+/// (ruled 2026-11-25); these tests apply and expect every tenant on the new
+/// version at once, and count the setting rows, so no rollout setting is
+/// written.
+async fn run_all_at_once(
+    pool: &ordo_exec::Pool,
+    pools: &dyn ordo_exec::route::PoolResolver,
+    program: &ordo_host::schema_apply::Program,
+    notes: Vec<String>,
+    actor: &str,
+    op: &str,
+    activate: bool,
+) -> Result<ordo_host::apply_op::Report, ordo_host::apply_op::ApplyRefused> {
+    ordo_host::environments::Environments::on(pool)
+        .declare_own("dev", "test", "the tests apply every tenant at once", 0)
+        .await
+        .expect("dev");
+    ordo_host::apply_op::run_program(pool, pools, program, notes, actor, op, activate).await
 }

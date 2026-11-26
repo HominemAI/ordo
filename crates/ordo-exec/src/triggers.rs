@@ -1268,6 +1268,7 @@ mod tests {
             actor: Actor::Source("hub".into()),
             commands: vec![cmd("tasks", "task_6", CommandKind::Create)],
             owner_administration: false,
+            backfill: None,
             restored_unverified: false,
             restore: None,
         };

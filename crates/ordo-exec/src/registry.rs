@@ -108,6 +108,7 @@ ALTER TABLE \"$artifacts\" ADD COLUMN IF NOT EXISTS \"ordinal\" bigint; \
 CREATE UNIQUE INDEX IF NOT EXISTS \"$artifacts_ordinal\" ON \"$artifacts\" (\"ordinal\"); \
 ALTER TABLE \"$artifacts\" ADD COLUMN IF NOT EXISTS \"label\" text; \
 ALTER TABLE \"$artifacts\" ADD COLUMN IF NOT EXISTS \"git_commit\" text; \
+ALTER TABLE \"$artifacts\" ADD COLUMN IF NOT EXISTS \"removed_at\" bigint; \
 CREATE TABLE IF NOT EXISTS \"$builds\" ( \
   \"version\" text NOT NULL REFERENCES \"$artifacts\" (\"version\"), \
   \"build_id\" text NOT NULL, \
@@ -169,6 +170,12 @@ pub enum Applied {
     /// differently by this Ordo release. The row now holds this build, and
     /// `$builds` keeps both. No version moved.
     Rebuilt(String),
+    /// The same program as the version stored under this name, from a
+    /// source rewritten to a newer language edition (`ordo fix`,
+    /// `plan-versions.md` §2.8). The row now holds that source and its
+    /// edition, so later releases load it past the old edition's window.
+    /// No version moved.
+    EditionMoved(String),
 }
 
 /// What activating did.
@@ -279,7 +286,10 @@ pub async fn ensure_tables(pool: &Pool) -> Result<(), PoolError> {
 /// are named.
 pub async fn ordinals(pool: &Pool) -> Result<std::collections::BTreeMap<String, u64>, PoolError> {
     let rows = pool
-        .rows("SELECT \"version\", \"ordinal\" FROM \"$artifacts\" WHERE \"ordinal\" IS NOT NULL")
+        .rows(
+            "SELECT \"version\", \"ordinal\" FROM \"$artifacts\" WHERE \"ordinal\" IS NOT NULL \
+             AND \"removed_at\" IS NULL",
+        )
         .await?;
     Ok(rows
         .into_iter()
@@ -301,12 +311,16 @@ pub async fn ordinal_of(pool: &Pool, version: &str) -> Result<Option<u64>, PoolE
         .and_then(|o| o.parse().ok()))
 }
 
-/// The source fingerprint of a stored row: its source, edition 1, and the
-/// code hashes its document carries.
+/// The source fingerprint of a stored row: its source, the edition it
+/// names, and the code hashes its document carries.
 fn source_id_of(artifact: &str, source: &str) -> String {
     use ordo_plan::artifact as a;
     let doc: serde_json::Value = serde_json::from_str(artifact).unwrap_or_default();
-    a::source_identity(source, a::FIRST_EDITION, &a::code_hashes(&doc))
+    a::source_identity(
+        source,
+        ordo_plan::edition::of_source(source),
+        &a::code_hashes(&doc),
+    )
 }
 
 /// The declared version as the `declared` column holds it: the `@` version,
@@ -421,11 +435,40 @@ pub async fn store(pool: &Pool, a: &Artifact) -> Result<Applied, RegistryRefusal
         record_build(pool, &a.version, &a.artifact, &a.ddl, a.applied_at).await?;
         return Ok(Applied::AlreadyStored(a.version.clone()));
     }
+    if let Some(was) = removed_identity(pool, &a.version).await? {
+        // **A removed version stored again** (`plan-versions.md` §1.6): its
+        // tombstone takes the program back, under the same name and order
+        // number, so a restore that needs it can be served again. Only the
+        // same program: the tombstone keeps its fingerprint, and another
+        // program under the name is a collision, as for a stored one.
+        if was != source_id_of(&a.artifact, &a.source) {
+            return Err(RegistryRefusal::VersionCollision {
+                version: a.version.clone(),
+            });
+        }
+        pool.rows(&format!(
+            "UPDATE \"$artifacts\" SET \"artifact\" = {}, \"source\" = {}, \"ddl\" = {}, \
+               \"applied_at\" = {}, \"actor\" = {}, \"source_id\" = {}, \"declared\" = {}, \
+               \"edition\" = {}, \"removed_at\" = NULL WHERE \"version\" = {}",
+            sql_lit(&a.artifact),
+            sql_lit(&a.source),
+            sql_lit(&a.ddl),
+            a.applied_at.0,
+            sql_lit(&a.actor),
+            sql_lit(&source_id_of(&a.artifact, &a.source)),
+            sql_lit(&declared_of(&a.source)),
+            ordo_plan::edition::of_source(&a.source),
+            sql_lit(&a.version),
+        ))
+        .await?;
+        record_build(pool, &a.version, &a.artifact, &a.ddl, a.applied_at).await?;
+        return Ok(Applied::Stored(a.version.clone()));
+    }
     pool.rows(&format!(
         "INSERT INTO \"$artifacts\" \
            (\"version\", \"artifact\", \"source\", \"ddl\", \"applied_at\", \"actor\", \
-            \"source_id\", \"declared\", \"ordinal\") \
-         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, \
+            \"source_id\", \"declared\", \"edition\", \"ordinal\") \
+         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, \
            (SELECT coalesce(max(\"ordinal\"), 0) + 1 FROM \"$artifacts\"))",
         sql_lit(&a.version),
         sql_lit(&a.artifact),
@@ -435,6 +478,7 @@ pub async fn store(pool: &Pool, a: &Artifact) -> Result<Applied, RegistryRefusal
         sql_lit(&a.actor),
         sql_lit(&source_id_of(&a.artifact, &a.source)),
         sql_lit(&declared_of(&a.source)),
+        ordo_plan::edition::of_source(&a.source),
     ))
     .await?;
     record_build(pool, &a.version, &a.artifact, &a.ddl, a.applied_at).await?;
@@ -449,11 +493,31 @@ pub async fn store(pool: &Pool, a: &Artifact) -> Result<Applied, RegistryRefusal
 /// build, which loads read, and `$builds` keeps both
 /// ([`Applied::Rebuilt`]). The stored source is kept, so an edit to
 /// comments or spacing alone leaves the row as it was.
+///
+/// A source at a newer language edition than the stored one replaces it,
+/// with its edition and fingerprint ([`Applied::EditionMoved`]): what
+/// `ordo fix` wrote is then what later releases load (`plan-versions.md`
+/// §2.8). The version keeps its name and its tenants.
 pub async fn rebuild(pool: &Pool, a: &Artifact) -> Result<Applied, RegistryRefusal> {
     let Some(existing) = get(pool, &a.version).await? else {
         return Err(RegistryRefusal::UnknownVersion(a.version.clone()));
     };
     record_build(pool, &a.version, &a.artifact, &a.ddl, a.applied_at).await?;
+    let edition = ordo_plan::edition::of_source(&a.source);
+    if edition > ordo_plan::edition::of_source(&existing.source) {
+        pool.rows(&format!(
+            "UPDATE \"$artifacts\" SET \"artifact\" = {}, \"ddl\" = {}, \"source\" = {}, \
+               \"source_id\" = {}, \"edition\" = {} WHERE \"version\" = {}",
+            sql_lit(&a.artifact),
+            sql_lit(&a.ddl),
+            sql_lit(&a.source),
+            sql_lit(&source_id_of(&a.artifact, &a.source)),
+            edition,
+            sql_lit(&a.version),
+        ))
+        .await?;
+        return Ok(Applied::EditionMoved(a.version.clone()));
+    }
     if existing.artifact == a.artifact && existing.ddl == a.ddl {
         return Ok(Applied::AlreadyStored(a.version.clone()));
     }
@@ -557,7 +621,7 @@ pub async fn get(pool: &Pool, version: &str) -> Result<Option<Artifact>, PoolErr
     let rows = pool
         .rows(&format!(
             "SELECT \"version\", \"artifact\", \"source\", \"ddl\", \"applied_at\", \"actor\" \
-             FROM \"$artifacts\" WHERE \"version\" = {}",
+             FROM \"$artifacts\" WHERE \"version\" = {} AND \"removed_at\" IS NULL",
             sql_lit(version)
         ))
         .await?;
@@ -589,7 +653,7 @@ pub async fn stored(pool: &Pool) -> Result<Vec<(String, Timestamp, String)>, Poo
     let rows = pool
         .rows(
             "SELECT \"version\", \"applied_at\", \"actor\" FROM \"$artifacts\" \
-             ORDER BY \"applied_at\" DESC, \"version\" DESC",
+             WHERE \"removed_at\" IS NULL ORDER BY \"applied_at\" DESC, \"version\" DESC",
         )
         .await?;
     Ok(rows
@@ -602,6 +666,45 @@ pub async fn stored(pool: &Pool) -> Result<Vec<(String, Timestamp, String)>, Poo
             ))
         })
         .collect())
+}
+
+/// Whether `version` was stored here and then removed: its row is a
+/// tombstone (`plan-versions.md` §1.6).
+pub async fn is_removed(pool: &Pool, version: &str) -> Result<bool, PoolError> {
+    Ok(removed_identity(pool, version).await?.is_some())
+}
+
+/// A removed version's source fingerprint, kept on its tombstone. `None`
+/// when the version is stored or was never stored.
+async fn removed_identity(pool: &Pool, version: &str) -> Result<Option<String>, PoolError> {
+    Ok(pool
+        .rows(&format!(
+            "SELECT coalesce(\"source_id\", '') FROM \"$artifacts\" \
+             WHERE \"version\" = {} AND \"removed_at\" IS NOT NULL",
+            sql_lit(version)
+        ))
+        .await?
+        .first()
+        .and_then(|r| r.first().cloned().flatten()))
+}
+
+/// **Remove a stored version, keeping a tombstone** (`plan-versions.md`
+/// §1.6, §2.7), inside a transaction the caller holds. The row keeps its
+/// name, order number, declared version, fingerprint and label, so the
+/// activation log and the stored plans that name it still read. Its
+/// program, source and DDL are cleared and its builds dropped. Nothing
+/// loads, serves, pins or resolves it after. Storing the same program again
+/// ([`store`]) brings it back. Checks nothing: the caller checks first
+/// (`ordo_host::version_removal`).
+pub async fn mark_removed(tx: &crate::TxConn, version: &str, at: u64) -> Result<(), PoolError> {
+    tx.rows(&format!(
+        "UPDATE \"$artifacts\" SET \"artifact\" = '', \"source\" = '', \"ddl\" = '', \
+           \"removed_at\" = {at} WHERE \"version\" = {v}; \
+         DELETE FROM \"$builds\" WHERE \"version\" = {v}",
+        v = sql_lit(version)
+    ))
+    .await
+    .map(|_| ())
 }
 
 /// The re-point log, newest first. `limit` bounds it because an operator

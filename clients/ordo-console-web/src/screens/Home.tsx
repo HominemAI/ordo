@@ -13,6 +13,9 @@ import { Shares } from './Shares';
 import { Tenants } from './Tenants';
 import { Usage } from './Usage';
 import { Windows } from './Windows';
+import { Builds } from './Builds';
+import { Moves } from './Moves';
+import { Rollouts } from './Rollouts';
 
 /**
  * The signed-in console: a bar with the groups, a row of the open group's
@@ -33,6 +36,9 @@ const SCREENS = [
   { path: 'runtime', name: 'Runtime', group: 'system' },
   { path: 'deployment', name: 'Connection', group: 'deployment' },
   { path: 'deploys', name: 'Deploys', group: 'deployment' },
+  { path: 'rollouts', name: 'Rollouts', group: 'deployment' },
+  { path: 'moves', name: 'Moves', group: 'deployment' },
+  { path: 'builds', name: 'Tenant builds', group: 'deployment' },
   { path: 'settings', name: 'Settings', group: 'deployment' },
   { path: 'sign-in', name: 'Sign-in', group: 'deployment' },
   { path: 'windows', name: 'Maintenance', group: 'deployment' },
@@ -143,6 +149,9 @@ export function Home(props: { session: Session; onSignedOut: () => void; onSignO
         {screen === 'runtime' && <Runtime onSignedOut={props.onSignedOut} />}
         {screen === 'deploys' && <Deploys onSignedOut={props.onSignedOut} />}
         {screen === 'windows' && <Windows onSignedOut={props.onSignedOut} />}
+        {screen === 'rollouts' && <Rollouts onSignedOut={props.onSignedOut} />}
+        {screen === 'moves' && <Moves onSignedOut={props.onSignedOut} />}
+        {screen === 'builds' && <Builds onSignedOut={props.onSignedOut} />}
         {screen === 'tenants' && <Tenants onSignedOut={props.onSignedOut} />}
         {screen === 'people' && <People onSignedOut={props.onSignedOut} />}
         {screen === 'sign-in' && <Settings key="sign-in" scope="signin" onSignedOut={props.onSignedOut} />}

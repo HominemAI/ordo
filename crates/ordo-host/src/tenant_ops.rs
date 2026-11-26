@@ -340,6 +340,61 @@ impl TenantOps {
         crate::deploy::announce_members(&self.pool, id).await
     }
 
+    /// Whether this server gives a tenant a database of its own.
+    pub fn gives_databases(&self) -> bool {
+        self.routing.is_some()
+    }
+
+    /// **A staging clone's own database**(`plan-versions.md` §3.4): made on
+    /// this deployment's default tenant cluster (level 3), with this
+    /// deployment's own credential, exactly as `std.space.create` makes one
+    /// when no cluster is named. Nothing of production's database is
+    /// carried: not its host, not its credential.
+    ///
+    /// `id` must already be reserved in the registry. Custody is minted
+    /// here, with the database. Answers the database's label.
+    pub async fn clone_database(&self, id: &str) -> Result<String, String> {
+        let attachment = self
+            .target_for(id, &BoundParams::default())
+            .map_err(|e| e.message)?;
+        let routing = self
+            .routing
+            .as_ref()
+            .ok_or("this server has no tenant databases to give")?;
+        let target = crate::provision::Target {
+            attachment: &attachment,
+            credentials: routing.credentials.as_ref(),
+            template: &routing.template,
+            hosts: &routing.hosts,
+        };
+        let now = crate::runtime::now_secs();
+        let pre = crate::provision::preflight(
+            &self.pool,
+            self.keys.as_ref(),
+            &routing.serving,
+            id,
+            &target,
+            now,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        let label = pre.label();
+        tenants::at_phase(&self.pool, id, tenants::Phase::Targeted, &label, now)
+            .await
+            .map_err(|e| e.to_string())?;
+        crate::provision::commit_target(
+            &self.pool,
+            self.keys.as_ref(),
+            id,
+            pre,
+            routing.stream.as_deref(),
+            now,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(label)
+    }
+
     /// Where this tenant's database goes, which is **always somewhere**
     /// (ruled 2026-09-25).
     ///

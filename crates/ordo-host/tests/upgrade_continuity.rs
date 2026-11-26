@@ -56,7 +56,9 @@
 //! list, fails on it until it is fixed. None is listed today (2026-10-27).
 //!
 //! Recorded by the first runs: across a program update the open feed carries
-//! on and the page cursor continues; across the Ordo upgrade from ef37d9de
+//! on and the page cursor continues. Since 2026-11-23 (increment 3, session
+//! 3) the feed ends with `event: version_changed` at the swap and a new one
+//! carries on; across the Ordo upgrade from ef37d9de
 //! the feed's connection closes (a new one carries on) and the cursor is
 //! refused `version_skew`, which the SDK answers by starting from page one.
 //!
@@ -230,6 +232,26 @@ impl World {
     /// `ordo apply <dir>` with this build's CLI, in this process, as the
     /// command line runs it. It waits for the running server to serve it.
     async fn apply_current(&self, dir: &Path) -> String {
+        // With `rollout.strategy` unset, a deployment that is not dev rolls
+        // an apply out a batch at a time (ruled 2026-11-25). This test
+        // expects every tenant on the new version at once.
+        let pool = ordo_exec::Pool::connect(PoolConfig {
+            db: self.db.clone(),
+            size: 1,
+            ..PoolConfig::from_env()
+        })
+        .await
+        .expect("control pool");
+        ordo_host::rollouts::Rollouts::on(&pool)
+            .set_setting(
+                "rollout.strategy",
+                Some("all"),
+                "test",
+                "every tenant at once",
+                0,
+            )
+            .await
+            .expect("rollout.strategy all");
         let args = vec![
             dir.display().to_string(),
             "--as".into(),
@@ -268,6 +290,35 @@ impl World {
         );
         assert!(out.status.success(), "{} apply: {said}", cli.display());
         said
+    }
+
+    /// `ordo release-check --direct` with this build, in this process, as
+    /// the new image runs it before its tag changes (`plan-versions.md`
+    /// §2.8): `(exit code, report)`.
+    async fn release_check(&self) -> (i32, String) {
+        let args = vec!["--db".to_string(), self.db.clone(), "--direct".into()];
+        let out =
+            tokio::task::spawn_blocking(move || ordo_cli::operator::run("release-check", &args))
+                .await
+                .expect("release-check ran");
+        (out.code, out.report)
+    }
+
+    /// The `$release_checks` rows, `(act, result)`, oldest first.
+    async fn release_checks(&self) -> Vec<(String, String)> {
+        let pool = ordo_exec::Pool::connect(PoolConfig {
+            db: self.db.clone(),
+            size: 1,
+            ..PoolConfig::from_env()
+        })
+        .await
+        .expect("control pool");
+        ordo_host::release_check::history(&pool, ordo_host::release_check::release())
+            .await
+            .expect("release checks")
+            .into_iter()
+            .map(|r| (r.act, r.result))
+            .collect()
     }
 
     /// `ordo verify` with this build, in this process: `(exit code, report)`.
@@ -1398,22 +1449,35 @@ async fn chains(w: &World, s: &Seeded) -> Vec<Check> {
 /// The live feed across the upgrade: after a write it carries the change,
 /// or it has ended (cleanly: an error frame, or the connection closed) and
 /// a new one carries it, as the SDK reconnects.
+///
+/// A program update moves the tenant to the new version, so a feed opened
+/// under the old one ends with `event: version_changed` as the swap lands
+/// (`plan-versions.md` §1.4). That frame comes before the write below, so
+/// it is looked for in everything the feed heard.
 fn feed_after(h: &Host, s: &Seeded, feed: &Feed) -> Check {
     let mark = feed.len();
-    create_note(h, &s.ada, "Written after the upgrade");
+    let moved = feed.text().contains("event: version_changed");
+    if !moved {
+        create_note(h, &s.ada, "Written after the upgrade");
+    }
     let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(10) {
+    while !moved && started.elapsed() < Duration::from_secs(10) {
         let text = feed.text();
         if text.len() > mark && text[mark..].contains("event: invalidate") {
             return check("the open feed", Ok("carried on".into()));
         }
-        if feed.ended() || (text.len() > mark && text[mark..].contains("event: error")) {
+        if feed.ended()
+            || (text.len() > mark && text[mark..].contains("event: error"))
+            || text.contains("event: version_changed")
+        {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
     let text = feed.text();
-    let how = if feed.ended() {
+    let how = if text.contains("event: version_changed") {
+        "ended with a version_changed frame".to_string()
+    } else if feed.ended() {
         "ended: the connection closed".to_string()
     } else if text[mark..].contains("event: error") {
         format!("ended with an error frame: {}", &text[mark..])
@@ -2049,23 +2113,61 @@ async fn binary_upgrade(known: &[(&str, &str)]) {
     let old_log = old.log();
     drop(old);
 
+    // The release check, from this build, between the 2 images
+    // (`plan-versions.md` §2.8, increment 6): it reads the control
+    // database the previous Ordo left, and version 1 compiles and loads.
+    let (code, said) = w.release_check().await;
+    let release_check = check(
+        "the release check from this build passes over the previous Ordo's database",
+        if code == 0 && said.contains("passed") {
+            Ok(String::new())
+        } else {
+            Err(format!("exit {code}: {said}"))
+        },
+    );
+
     // This build starts on the same databases with the same keys.
     let h = w.boot(Path::new(env!("CARGO_BIN_EXE_ordo-host")), "new");
     within(60, "the new server serves Ada's tenant", || {
         let (status, _) = h.op(&s.ada.space, &s.ada.token, "GET", "myJournal", json!({}));
         (status == 200).then_some(())
     });
-    let mut checks = vec![check(
-        "the open feed ended when the old server stopped",
-        if feed.ended() {
+    let mut checks = vec![
+        release_check,
+        check(
+            "the open feed ended when the old server stopped",
+            if feed.ended() {
+                Ok(String::new())
+            } else {
+                Err(format!(
+                    "still open after the old server exited: {}",
+                    old_log.len()
+                ))
+            },
+        ),
+    ];
+    // The boot of the new release ran the check too, once, and recorded it.
+    let mut boot_checked = Vec::new();
+    for _ in 0..300 {
+        boot_checked = w.release_checks().await;
+        if boot_checked.iter().any(|(act, _)| act == "boot") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    checks.push(check(
+        "the new release's boot ran the release check and it passed",
+        if boot_checked
+            == vec![
+                ("check".to_string(), "pass".to_string()),
+                ("boot".to_string(), "pass".to_string()),
+            ]
+        {
             Ok(String::new())
         } else {
-            Err(format!(
-                "still open after the old server exited: {}",
-                old_log.len()
-            ))
+            Err(format!("recorded: {boot_checked:?}"))
         },
-    )];
+    ));
     drop(feed);
     checks.push(feed_after_reopen(&h, &s));
     let mut s = s;

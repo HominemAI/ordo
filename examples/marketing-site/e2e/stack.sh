@@ -38,6 +38,7 @@ export ORDO_PAGE_KEY=22222222222222222222222222222222222222222222222222222222222
 export ORDO_REPLICA_ID=marketing-a
 export ORDO_HOST_ADDR="127.0.0.1:$door_port"
 export ORDO_AUTH_METHODS=passkey ORDO_AUTH_GUEST=on ORDO_APEX_DOMAIN=localhost
+export ORDO_AUTH_TENANT_PROVIDERS=on
 console_page="http://localhost:${E2E_REAL_CONSOLE_PORT:-5392}"
 export ORDO_CORS_TENANT_ORIGINS_MAX=10
 export ORDO_AUTH_ORIGINS="$page,$bootstrap_page,$console_page" ORDO_CORS_ORIGINS="$page,$bootstrap_page,$console_page" ORDO_PUBLIC_URL="$door"
@@ -45,6 +46,17 @@ export ORDO_AUTH_PROVISIONING=auto-onboard ORDO_PROVISION_SELF_SERVE=on-signup
 export ORDO_PUBLIC_HUMAN_CHECK=off ORDO_PUBLIC_WRITES_PER_HOUR=1000
 export ORDO_PG_POOL_SIZE=3 ORDO_PG_IDLE_SECS=5
 for v in ORDO_PG_ROUTING ORDO_TENANT_CREDENTIALS ORDO_TENANT_CREDENTIALS_DIR ORDO_DEPLOYMENT_OWNERS; do unset "$v"; done
+# The optional integration profile uses real S3 HTTP and per-tenant attachments.
+# Local files remain the default, so the journey can verify old-store retention.
+if [ -n "${E2E_S3_ENDPOINT:-}" ]; then
+  mkdir -p "$state/credentials/journey-s3"
+  printf '%s' 'ordo-ci-key' > "$state/credentials/journey-s3/access_key_id"
+  printf '%s' 'ordo-ci-secret-not-a-secret' > "$state/credentials/journey-s3/secret_access_key"
+  chmod 600 "$state/credentials/journey-s3/"*
+  export ORDO_TENANT_CREDENTIALS=dir ORDO_TENANT_CREDENTIALS_DIR="$state/credentials"
+  export ORDO_BLOB_ROUTING=attached ORDO_DEV_UNSAFE_BUCKET_ENDPOINT=1
+  export ORDO_TENANT_ATTACH_HOSTS=127.0.0.1
+fi
 start_door
 bootstrap_pid=$last
 "$ordo" apply "$repo/examples/marketing-site" --as marketing-e2e --direct >"$state/apply.log" 2>&1 || { cat "$state/apply.log" >&2; exit 1; }

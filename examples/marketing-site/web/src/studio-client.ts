@@ -57,16 +57,25 @@ export async function workspaces(session: Session): Promise<WorkspaceChoice[]> {
   return body.rows;
 }
 
-/** Only the tenant portability operations used by the data panel. */
-export async function portability(session: Session, action: 'export' | 'import', params: Params) {
-  const name = action === 'export' ? 'std.space.export' : 'std.space.import';
+/** Only the explicit tenant operations used by the data panel. */
+export async function workspaceData(session: Session, action: 'export' | 'import' | 'attach' | 'detach', params: Params) {
+  const name = { export: 'std.space.export', import: 'std.space.import', attach: 'std.space.attachBucket', detach: 'std.space.detachBucket' }[action];
+  return tenantCall(session, name, params);
+}
+
+export async function tenantConnections(session: Session, action: 'list' | 'add' | 'update' | 'retire', params: Params = {}) {
+  const name = { list: 'std.space.connections', add: 'std.space.addConnection', update: 'std.space.updateConnection', retire: 'std.space.retireConnection' }[action];
+  return tenantCall(session, name, params, action === 'list');
+}
+
+async function tenantCall(session: Session, name: string, params: Params, read = false): Promise<Row[]> {
   const idempotency = crypto.randomUUID();
   async function send(): Promise<Row[]> {
     const response = await doorRequest({ baseUrl: DOOR, timeoutOption: 'callTimeoutMs' }, `${DOOR}/op/${name}`, {
-      method: 'POST',
+      method: read ? 'GET' : 'POST',
       headers: { Authorization: `Bearer ${await session.token()}`, 'X-Ordo-Space': session.space,
         'Content-Type': 'application/json', 'Idempotency-Key': idempotency },
-      body: JSON.stringify(params),
+      ...(read ? {} : { body: JSON.stringify(params) }),
     });
     if (!response.ok) throw await refusalOf(response, name);
     return (await readBody(response) as { rows: Row[] }).rows;

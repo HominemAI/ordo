@@ -237,3 +237,33 @@ are not marked passing merely because they compile.
 Team also offers a confirmed workspace leave. The program permits members to
 leave; the platform still refuses the last owner. A leaving member loses
 access while their colleagues keep the shared records.
+
+### File-storage integration profile
+
+The Data panel can attach an operator-configured S3 bucket for new files and
+return new files to deployment storage. Existing files stay in their recorded
+store. The form accepts a credential label, never secret material, and keeps
+files sealed with workspace keys.
+
+Full marketing CI starts the pinned SeaweedFS S3 fixture used elsewhere in the
+repository. Its storage journey creates a disposable tenant, uploads before
+and after attachment, reads through both replicas, stops only that named S3
+container, observes refusal and recovery, then detaches and checks all files.
+A local run needs `bash s3-fixture.sh start`, `E2E_S3_ENDPOINT=http://127.0.0.1:8333`
+and `E2E_S3_CONTAINER=ordo-marketing-s3`. Stop it with `bash s3-fixture.sh stop`.
+Without those settings, local runs explicitly skip this profile; full CI
+requires it. Implementation is not yet validated runtime evidence.
+
+### Tenant sign-in connections
+
+Team's Sign-in providers section lets a tenant owner add an OIDC connection,
+rotate its secret and retire it with confirmation. The page never loads a
+stored secret back into an input. The example fixture enables the supported
+`ORDO_AUTH_TENANT_PROVIDERS=on` setting; other deployments decide whether to
+enable it. Keep an owner who can sign in without the tenant's own providers.
+
+The connection lifecycle journey checks redaction, duplicate/issuer-change
+refusals, foreign-tenant access, retirement on both replicas and re-addition
+with a new connection key. It does not claim a successful external-provider
+login: its issuer is deliberately unused, and no external call is needed for
+these configuration outcomes.

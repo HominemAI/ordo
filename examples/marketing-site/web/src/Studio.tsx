@@ -5,7 +5,7 @@ import { downloadFile, saveBlob, uploadFile } from '@hominemai/ordo-sdk/core/fil
 import type { Params, Row } from '@hominemai/ordo-sdk/core/client.js';
 import { DOOR } from './config.js';
 import { Session, sessionStore } from './session.js';
-import { commit, message, studioClient, workspaces, portability, type WorkspaceChoice } from './studio-client.js';
+import { commit, message, studioClient, workspaces, workspaceData, tenantConnections, type WorkspaceChoice } from './studio-client.js';
 
 const columnLabel = (name: string) =>
   ({
@@ -1011,6 +1011,7 @@ function Team(ctx: Context) {
           </>
         )}
       />
+      <Connections session={ctx.session} />
       <h3 id="invite-title">Invite a colleague</h3>
       <form
         className="form"
@@ -1060,11 +1061,11 @@ function DataTools({ session }: { session: Session }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [done, setDone] = useState('');
-  async function run(action: 'export' | 'import', params: Params) {
+  async function run(action: 'export' | 'import' | 'attach' | 'detach', params: Params) {
     setBusy(true); setError(''); setDone('');
     try {
-      const result = await portability(session, action, params);
-      setDone(action === 'export'
+      const result = await workspaceData(session, action, params);
+      setDone(action === 'attach' || action === 'detach' ? text(result[0]?.['disclosure']) : action === 'export'
         ? 'Export prepared. Your deployment operator can transfer the bundle to its destination.'
         : `Import complete. ${text(result[0]?.['rows'])} rows processed. Open a workspace list to review the data.`);
     } catch (e) { setError(message(e)); }
@@ -1086,7 +1087,93 @@ function DataTools({ session }: { session: Session }) {
       <p id="import-retry">Keep this name when retrying an interrupted import. A new name starts a separate import.</p>
       <button disabled={busy} type="submit">Import staged bundle</button>
     </form>
+    <h3>File storage</h3>
+    <p>Choose an operator-configured bucket for new files. Existing files stay in their original store, which must remain available. Files stay sealed under this workspace's keys.</p>
+    <form className="form" aria-label="Attach file bucket" onSubmit={e => {
+      e.preventDefault();
+      const data = new FormData(e.currentTarget);
+      void run('attach', { endpoint: String(data.get('endpoint')), region: String(data.get('region')),
+        bucket: String(data.get('bucket')), credential: String(data.get('credential')), platformSealed: true });
+    }}>
+      <label htmlFor="bucket-endpoint">Storage endpoint (required)</label>
+      <input id="bucket-endpoint" name="endpoint" type="url" required autoComplete="off" />
+      <label htmlFor="bucket-region">Storage region (required)</label>
+      <input id="bucket-region" name="region" required autoComplete="off" />
+      <label htmlFor="bucket-name">Bucket name (required)</label>
+      <input id="bucket-name" name="bucket" required autoComplete="off" />
+      <label htmlFor="bucket-credential">Operator credential label (required)</label>
+      <input id="bucket-credential" name="credential" required autoComplete="off" aria-describedby="bucket-secret-note" />
+      <p id="bucket-secret-note">Use the label supplied by your operator. Never enter an access key or secret here.</p>
+      <button type="submit" disabled={busy}>Attach bucket for new files</button>
+    </form>
+    <button type="button" disabled={busy} onClick={() => void run('detach', {})}>Use deployment storage for new files</button>
     {error && <p role="alert">{error}</p>}
     {done && <p role="status">{done}</p>}
   </section>;
+}
+
+
+function Connections({ session }: { session: Session }) {
+  const [connections, setConnections] = useState<Row[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [done, setDone] = useState('');
+  const [retiring, setRetiring] = useState('');
+  async function run(action: 'list' | 'add' | 'update' | 'retire', params: Params = {}) {
+    setBusy(true); setError(''); setDone('');
+    try {
+      if (action !== 'list') await tenantConnections(session, action, params);
+      setConnections(await tenantConnections(session, 'list'));
+      setDone(action === 'list' ? 'Connections loaded.' : 'Sign-in connection saved.');
+      setRetiring('');
+    } catch (e) { setError(message(e)); }
+    finally { setBusy(false); }
+  }
+  return <details>
+    <summary>Sign-in providers</summary>
+    <p>Owners can connect an OpenID Connect provider for this workspace. Keep an owner who signs in independently of these providers.</p>
+    <button type="button" disabled={busy} onClick={() => void run('list')}>Load sign-in providers</button>
+    <form className="form" aria-label="Add sign-in provider" onSubmit={e => {
+      e.preventDefault();
+      const data = new FormData(e.currentTarget);
+      const params = { name: String(data.get('name')), kind: 'oidc', issuer: String(data.get('issuer')),
+        clientId: String(data.get('clientId')), clientSecret: String(data.get('clientSecret')), role: String(data.get('role')) };
+      e.currentTarget.reset();
+      void run('add', params);
+    }}>
+      <label htmlFor="connection-name">Connection name (required)</label>
+      <input id="connection-name" name="name" required maxLength={32} autoComplete="off" />
+      <label htmlFor="connection-issuer">Issuer URL (required)</label>
+      <input id="connection-issuer" name="issuer" type="url" required autoComplete="off" />
+      <label htmlFor="connection-client">Client ID (required)</label>
+      <input id="connection-client" name="clientId" required autoComplete="off" />
+      <label htmlFor="connection-secret">Client secret (required)</label>
+      <input id="connection-secret" name="clientSecret" type="password" required autoComplete="new-password" />
+      <label htmlFor="connection-role">New member role</label>
+      <select id="connection-role" name="role" defaultValue="viewer"><option>viewer</option><option>editor</option></select>
+      <button type="submit" disabled={busy}>Add sign-in provider</button>
+    </form>
+    <ul aria-label="Sign-in connections">{connections.map(row => <li key={text(row['key'])}>
+      <span>{text(row['name'])} · {text(row['state'])}</span>
+      {row['state'] === 'active' && <>
+        <form aria-label={`Rotate secret for ${text(row['name'])}`} onSubmit={e => {
+          e.preventDefault();
+          const secret = String(new FormData(e.currentTarget).get('secret'));
+          e.currentTarget.reset();
+          void run('update', { name: text(row['name']), clientSecret: secret });
+        }}>
+          <label htmlFor={`rotate-${text(row['key'])}`}>New secret for {text(row['name'])}</label>
+          <input id={`rotate-${text(row['key'])}`} name="secret" type="password" required autoComplete="new-password" />
+          <button type="submit" disabled={busy}>Save new secret for {text(row['name'])}</button>
+        </form>
+        {retiring !== row['name'] ? <button type="button" onClick={() => setRetiring(text(row['name']))}>Retire {text(row['name'])}</button> : <>
+          <p>Retire this provider? New sign-ins and pending callbacks through it will stop.</p>
+          <button type="button" disabled={busy} onClick={() => void run('retire', { name: text(row['name']) })}>Confirm retire {text(row['name'])}</button>
+          <button type="button" disabled={busy} onClick={() => setRetiring('')}>Keep provider</button>
+        </>}
+      </>}
+    </li>)}</ul>
+    {error && <p role="alert">{error}</p>}
+    {done && <p role="status">{done}</p>}
+  </details>;
 }

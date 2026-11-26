@@ -90,3 +90,29 @@ Raw LLVM JSON, toolchain details and source/run provenance accompany LCOV.
 The phase remains `mixed-setup-and-application`; branch instrumentation is not
 enabled. Runtime registration reconciliation, executable-range review and
 setup separation are still required before publishing a web-only percentage.
+
+## Storage extension, awaiting execution
+
+`browser/storage.spec.ts` uses the Data panel and supported attachment APIs
+against a real SeaweedFS S3 service. It requires acknowledged local and S3
+files to remain readable across both replicas, a retry to report unchanged,
+a missing credential to refuse, and object-store outage/recovery to preserve
+files and unrelated application access. A local run without this fixture is
+explicitly skipped; full CI requires it. No hits or outcomes are credited yet.
+
+## Provider configuration extension, awaiting execution
+
+`browser/connections.spec.ts` drives the Team panel's OIDC connection controls.
+It adds, rotates, lists, retires and re-adds a connection, checks secret
+redaction and rejects issuer mutation, duplicate registration, anonymous
+listing, foreign-tenant sign-in and retired-provider sign-in. Its unused issuer
+is not a working provider fixture. Discovery/JWKS, successful consent and
+callback, provider outage and key rotation still need their own real-provider
+journeys. No successful federation outcome is credited by this test.
+
+## Scope direction
+
+Owner clarification, 2026-11-26: subsequent implementation is restricted to
+examples, tests and coverage/CI support. Product defects are recorded in
+`web-findings.md`, not fixed here. The 2 earlier production fixes remain in the
+PR; no further runtime changes are authorized by this work.

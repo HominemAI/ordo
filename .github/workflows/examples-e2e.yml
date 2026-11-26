@@ -191,6 +191,13 @@ jobs:
         working-directory: examples/marketing-site/e2e
         run: npx playwright install --with-deps chromium
 
+      - name: Start the application S3 fixture
+        if: ${{ env.REACHED == 'true' && !inputs.public_only }}
+        run: |
+          bash examples/marketing-site/e2e/s3-fixture.sh start
+          echo "E2E_S3_ENDPOINT=http://127.0.0.1:8333" >> "$GITHUB_ENV"
+          echo "E2E_S3_CONTAINER=ordo-marketing-s3" >> "$GITHUB_ENV"
+
       # Playwright starts the stack (stack.sh) and stops it at the end.
       - name: Run the use cases
         if: env.REACHED == 'true'
@@ -203,6 +210,10 @@ jobs:
           else
             npx playwright test
           fi
+
+      - name: Stop the application S3 fixture
+        if: ${{ always() && env.E2E_S3_CONTAINER != '' }}
+        run: bash examples/marketing-site/e2e/s3-fixture.sh stop
 
       - name: Report example coverage
         if: ${{ always() && inputs.coverage && env.BASH_ENV != '' }}

@@ -547,3 +547,10 @@ across restarts so missing LLVM profiles fail reporting.
 The coverage artifacts now include raw LLVM JSON, toolchain details and source
 provenance. They remain setup-inclusive. See `coverage/web-outcomes.md` for the
 implemented journeys, executed evidence and outstanding outcomes.
+
+Full marketing CI also starts the disposable SeaweedFS profile through
+`examples/marketing-site/e2e/s3-fixture.sh`. `E2E_S3_ENDPOINT` enables the host's
+supported attached-bucket configuration with a private credential directory.
+The default store remains local, allowing one journey to verify both stores
+and retention across attachment changes. The test controls only the container
+named `ordo-marketing-s3`; production services are never fault-injected.

@@ -2633,6 +2633,7 @@ pub fn external_reads(schema: &Schema) -> Option<ir::ExternalReads> {
                     }
                     _ => None,
                 },
+                ty: e.field(field).map_or(ScalarTy::Text, |f| f.ty.value_ty()),
             })
             .collect();
         out.insert(
@@ -2645,6 +2646,8 @@ pub fn external_reads(schema: &Schema) -> Option<ir::ExternalReads> {
                 key_ty: src.key_ty,
                 prefix: e.key.clone(),
                 columns,
+                door: src.peer.as_ref().filter(|p| p.door).map(|p| p.name.clone()),
+                served: None,
             },
         );
     }
@@ -7546,6 +7549,9 @@ fn fn_domain(name: &str, position: usize) -> Option<&'static [ScalarTy]> {
         // describes.
         ("mod", _) => Some(INTEGRAL),
         ("lower" | "trim" | "length", 0) => Some(TEXTUAL),
+        ("before" | "after", _) => Some(TEXTUAL),
+        ("bool", 0) => Some(TEXTUAL),
+        ("date" | "datetime", _) => Some(TEXTUAL),
         ("hash", 0) => Some(HASHABLE),
         _ => None,
     }
@@ -7701,7 +7707,11 @@ fn fn_ty(name: &str, args: &[BExpr]) -> ScalarTy {
         "year" | "dow" | "length" | "hash" => ScalarTy::Int,
         "month" | "week" | "hour" => ScalarTy::Text,
         "day" => ScalarTy::Date,
-        "lower" | "trim" => ScalarTy::Text,
+        "lower" | "trim" | "before" | "after" | "text" => ScalarTy::Text,
+        "int" => ScalarTy::Int,
+        "bool" => ScalarTy::Bool,
+        "date" => ScalarTy::Date,
+        "datetime" => ScalarTy::Datetime,
         _ => args.first().map(|a| a.ty()).unwrap_or(ScalarTy::Int),
     }
 }

@@ -161,7 +161,7 @@ readable, with the same reason.
 language's own refusal, arriving one layer earlier. Nothing is owed until the
 grammar moves.
 
-- `principal`, `client`, `auth`, `policy`, `compliance`, `channel`
+- `principal`, `client`, `policy`, `compliance`, `channel`
   : `definition-language.md` §8's *"All illustrative syntax [lean]: concepts
   settled, file format not final"*. A declaration form **is** the file format.
 - `app` / `page`: `ui-gen.md` §5, whose block set is explicitly still open.
@@ -226,7 +226,7 @@ What the types refuse:
 
 What runs and throws, naming the parser's class: `.column()` on a field that
 is `sealed` or `indexed` (`external_sealed`), `owned` (`external_owned`),
-`unique`, `tree`, `normalize`, has a `default` or is a `blob`
+`unique`, `tree`, `normalize`, `prev`, has a `default` or is a `blob`
 (`external_unsupported`). `synth` refuses a ref from an external to an
 entity, or to a name no external in the call declares (`external_ref_to_native`).
 
@@ -261,6 +261,16 @@ the deployment owner sets `ORDO_READER_NOTE_VIEWER_ROLE`. `synth` refuses a
 table that is not an entity of the file (`reader_unknown_table`) and a reader
 passed twice (`reader_line`).
 
+**Covered: grants** (built at G1, checked on the door since G3).
+`grant('note_viewer', ['std.notes.get', '/add.*/', '!addAdmin'])` prints a
+`grant note_viewer { … }` block, one line each. `{ asItself: true }` adds
+`as itself`, and `grantProvider('hominem', [...])` prints
+`grant provider hominem { … }`. The consumer's id is never in the file: the
+deployment owner sets `ORDO_CONSUMER_NOTE_VIEWER_CLIENT`. What each line
+matches is decided at apply. `grant()` refuses a bad name, an empty list and a
+line that is not an op name, `/regex/` or `*`; `synth` refuses a grant passed
+twice (`grant_block`).
+
 And the routine (12a). Its body is a write op's body, built with the same
 calls. The trigger is `every('15m')`, `daily('09:00Z')` or
 `when('estate.events.created', { debounce: '30s', coalesce: true })`, and the
@@ -288,6 +298,22 @@ And the release rule (27aq): `release.member.open()`, `.locked()` and
 `.when(rel.none('invoices', g.eq('owner', MEMBER)), [rel.remove('drafts.author')])`.
 Inside a release rule the guard's subject prints as `$member`; `MEMBER` and
 `CALLER` are the same node, and the position decides the word.
+
+And the sign-in block (`plan-configuration-in-the-file.md` §2). A method
+that is not built in must be a key of `providers`, or the call does not
+typecheck. A clause left out takes the compiler's secure default:
+
+```ts
+const signIn = auth({
+  methods: ['passkey', 'email', 'google'],
+  providers: { google: { preset: 'google' } },
+  provisioning: { domains: ['example.com'] },
+  guest: { on: true, keep: '7d' },
+  secondFactor: 'optional',
+  session: { token: '1h', max: '12h' },
+});
+synth(domain('hal', '1.0.0'), signIn, ...rest);
+```
 
 ## Divergences from the demo page's sketch
 

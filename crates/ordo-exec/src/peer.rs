@@ -41,8 +41,8 @@
 //! [`grant_readers`] makes the grants that role holds in this deployment's
 //! schema equal what the file says: `USAGE` on the schema, `SELECT` on the
 //! named tables, and `SELECT` on the sign-in columns a `$caller` guard reads
-//! ([`SIGN_IN_COLUMNS`]). It runs at every apply and every start, so a table
-//! taken off the line is revoked, and a table a migration creates is granted
+//! ([`crate::sign_in_contract`], a contract between Ordo releases). It runs
+//! at every apply and every start, so a table taken off the line is revoked, and a table a migration creates is granted
 //! in the same apply. On the reader's side, [`check_access`] refuses a start
 //! whose role lacks a grant, quoting the line to add, and refuses a role that
 //! reads the peer without a grant at all (its owner, a superuser), unless
@@ -60,6 +60,13 @@ use crate::{check_schema_setting, schema_setting, sql_lit, Pool, PoolError, DEFA
 /// lowercase letters and digits in a nickname, so no two share a variable.
 pub fn schema_env(peer: &str) -> String {
     format!("ORDO_PEER_{}_SCHEMA", peer.to_ascii_uppercase())
+}
+
+/// `ORDO_PEER_<NAME>_URL`: where the peer's door answers. Set, the peer's
+/// tables are read through its door and `ORDO_PEER_<NAME>_SCHEMA` is not
+/// read (step G5). The host's `peer_client::url_env` is the same name.
+pub fn door_url_env(peer: &str) -> String {
+    format!("ORDO_PEER_{}_URL", peer.to_ascii_uppercase())
 }
 
 /// The optional setting that swaps a plain external's schema:
@@ -97,29 +104,34 @@ pub fn reader_role_env(reader: &str) -> String {
 /// unless this is on.
 pub const SHARED_ROLE_ENV: &str = "ORDO_PEER_SHARED_ROLE";
 
-/// What a reader's `$caller` guard and [`link`] read in a peer, table by
-/// table: the only columns of the sign-in tables a reader role is granted.
-pub const SIGN_IN_COLUMNS: [(&str, &[&str]); 4] = [
-    ("members", &["id", "principal", "kind", "status"]),
-    ("$principal", &["id", "deleted_at"]),
-    (
-        "$authenticator",
-        &["authenticator", "principal", "retired_case"],
-    ),
-    (
-        CONNECTIONS,
-        &["name", "kind", "fingerprint", "subject_claim"],
-    ),
-];
-
-/// The table that remembers which roles this deployment granted to, so a
-/// reader line removed from the file is revoked on the next apply or start.
+/// The table that remembers which roles this deployment granted to, and
+/// each table or column it granted them (`grants`, a JSON array of
+/// `[table, column]`, the column empty for a whole table). A reader line
+/// removed or narrowed is revoked on the next apply or start, and only
+/// what Ordo granted is revoked (`plan-evolution-federation.md` §3.1). A
+/// row from a release before 2026-11-24 has no `grants`; its role is
+/// revoked every table in the schema, as then.
+///
+/// `usage` says who gave the role `USAGE` on the schema: `ordo` when Ordo
+/// granted it, `held` when the role had it before Ordo's first grant (a
+/// deployment owner's own grant). Ordo revokes it only when it is `ordo`
+/// and the role's line is gone, so a table granted by hand stays readable.
 pub const READER_TABLE: &str = "$readergrant";
 
 const READER_DDL: &str = r#"CREATE TABLE IF NOT EXISTS "$readergrant" (
   "role"   text PRIMARY KEY,
-  "reader" text NOT NULL
+  "reader" text NOT NULL,
+  "grants" text,
+  "usage"  text
 )"#;
+
+/// The columns a table made before 2026-11-24 lacks.
+const READER_GRANTS_COLUMN: &str = r#"ALTER TABLE "$readergrant" ADD COLUMN IF NOT EXISTS "grants" text, ADD COLUMN IF NOT EXISTS "usage" text"#;
+
+/// [`READER_TABLE`]'s `usage` when Ordo granted it.
+const USAGE_ORDO: &str = "ordo";
+/// [`READER_TABLE`]'s `usage` when the role held it before Ordo's grant.
+const USAGE_HELD: &str = "held";
 
 /// Why a program's external schemas cannot be resolved: a peer's setting, or
 /// a plain external's swap. Each names the setting.
@@ -370,6 +382,34 @@ pub fn resolve_with(
     own: &str,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<(), SchemaRefusal> {
+    // A peer with `ORDO_PEER_<NAME>_URL` is read through its door (step G5,
+    // `plan-federation-grants.md` §4): its schema is never read, so its
+    // setting is not asked for, and it leaves `schema.peers`, which every
+    // shared-database check, link and grant walks.
+    let door: Vec<String> = schema
+        .peers
+        .iter()
+        .filter(|p| {
+            lookup(&door_url_env(p))
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    for peer in &door {
+        for e in &mut schema.externals {
+            if let Some(p) = e
+                .external
+                .as_mut()
+                .and_then(|src| src.peer.as_mut())
+                .filter(|p| &p.name == peer)
+            {
+                p.door = true;
+                p.schema = None;
+            }
+        }
+    }
+    schema.peers.retain(|p| !door.contains(p));
     for peer in schema.peers.clone() {
         let var = schema_env(&peer);
         let Some(value) = lookup(&var) else {
@@ -895,7 +935,7 @@ async fn connections(pool: &Pool, pg: Option<&str>) -> Result<Vec<Connection>, S
         None => quote(CONNECTIONS),
     };
     // The subject claim by its column, never through the whole row: a
-    // reader is granted these four columns only (`SIGN_IN_COLUMNS`).
+    // reader is granted the contract's columns only (`sign_in_contract`).
     let has_claim = first_is_true(
         &pool
             .rows(&format!(
@@ -974,27 +1014,13 @@ pub fn shared_role_allowed() -> Result<bool, SchemaRefusal> {
 /// whole table) and the privilege's name.
 type Held = BTreeSet<(String, String, String)>;
 
-/// [`grant_readers_with`] over this process's environment.
-pub async fn grant_readers(pool: &Pool, schema: &Schema) -> Result<Vec<String>, SchemaRefusal> {
-    grant_readers_with(pool, schema, schema_setting).await
-}
-
-/// Make the grants each reader's role holds in this deployment's schema
-/// equal what the `reader` lines say, and revoke everything from a role
-/// whose line is gone. Returns one line per reader for the start log.
-///
-/// Each role gets `USAGE` on the schema, `SELECT` on its tables, and
-/// `SELECT` on the [`SIGN_IN_COLUMNS`] of each sign-in table it does not
-/// name whole. A table not created yet is granted by the apply that creates
-/// it. Nothing is sent when the catalog already agrees, so a start of an
-/// unchanged deployment writes nothing.
-pub async fn grant_readers_with(
-    pool: &Pool,
+/// Each `reader` line's nickname and the role its `ORDO_READER_<NAME>_ROLE`
+/// names, or the refusal naming the variable that is unset.
+fn reader_roles(
     schema: &Schema,
-    lookup: impl Fn(&str) -> Option<String>,
-) -> Result<Vec<String>, SchemaRefusal> {
-    let shared_ok = shared_role_value(lookup(SHARED_ROLE_ENV).as_deref())?;
-    let mut roles: Vec<(String, String)> = Vec::new();
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<Vec<(String, String)>, SchemaRefusal> {
+    let mut roles = Vec::new();
     for r in &schema.readers {
         let var = reader_role_env(&r.name);
         let Some(role) = lookup(&var) else {
@@ -1005,40 +1031,242 @@ pub async fn grant_readers_with(
         };
         roles.push((r.name.clone(), role));
     }
-    let recorded = has_table(pool, None, READER_TABLE).await?;
-    if roles.is_empty() && !recorded {
-        return Ok(Vec::new());
-    }
-    let pg = pool.schema().to_string();
-    let own = pool
+    Ok(roles)
+}
+
+async fn current_role(pool: &Pool) -> Result<String, SchemaRefusal> {
+    Ok(pool
         .rows("SELECT current_user::text")
         .await
         .map_err(SchemaRefusal::Database)?
         .first()
         .and_then(|r| r.first().cloned().flatten())
-        .unwrap_or_default();
+        .unwrap_or_default())
+}
+
+/// One reader's role: it must exist, and must not be this deployment's own
+/// unless [`SHARED_ROLE_ENV`] allows it. `true` when it is the own role and
+/// that is allowed, so no grants are made.
+async fn check_reader_role(
+    pool: &Pool,
+    own: &str,
+    reader: &str,
+    role: &str,
+    shared_ok: bool,
+) -> Result<bool, SchemaRefusal> {
+    let var = reader_role_env(reader);
+    if !role_exists(pool, role).await? {
+        return Err(SchemaRefusal::ReaderRoleMissing {
+            reader: reader.to_string(),
+            var,
+            role: role.to_string(),
+        });
+    }
+    if role == own || is_member(pool, own, role).await? {
+        if !shared_ok {
+            return Err(SchemaRefusal::ReaderOwnRole {
+                reader: reader.to_string(),
+                var,
+                role: role.to_string(),
+            });
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// **The reader check, granting nothing**: what [`grant_readers_with`]
+/// refuses before it changes a grant. Each `reader` line has its role
+/// setting, the role exists, and it is not this deployment's own (unless
+/// [`SHARED_ROLE_ENV`] allows that). The promotion gate runs it on the
+/// target before it stores a version (`plan-versions.md` §3.1).
+pub async fn check_readers_with(
+    pool: &Pool,
+    schema: &Schema,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<(), SchemaRefusal> {
+    if schema.readers.is_empty() {
+        return Ok(());
+    }
+    let shared_ok = shared_role_value(lookup(SHARED_ROLE_ENV).as_deref())?;
+    let roles = reader_roles(schema, &lookup)?;
+    let own = current_role(pool).await?;
+    for (reader, role) in &roles {
+        check_reader_role(pool, &own, reader, role, shared_ok).await?;
+    }
+    Ok(())
+}
+
+/// [`check_readers_with`] over this process's environment.
+pub async fn check_readers(pool: &Pool, schema: &Schema) -> Result<(), SchemaRefusal> {
+    check_readers_with(pool, schema, schema_setting).await
+}
+
+/// **A renamed column, told to the reader** (`plan-evolution-federation.md`
+/// §3.1 and §3.3). The read app cannot see a reader's file, and a reader is
+/// granted nothing but the tables on its line. So the read app writes, on
+/// the old column of each field a table on a `reader` line renames with
+/// `prev`, the comment `ordo: renamed to <new column>`. Every role reads
+/// `pg_description`, so the reader's check reads it
+/// ([`crate::migrate::column_comments`]):
+///
+/// - While the rename is declared, the old column is written and granted.
+///   The reader's check says the column is changing, and holds nothing.
+/// - Once a version stops writing it (`$orphans`), the grant ends and the
+///   comment stays. The reader's `external_changed` names the new column.
+///
+/// A version that declares the old name again clears the comment.
+pub struct Renamed;
+
+impl Renamed {
+    /// What every comment of this protocol starts with.
+    pub const PREFIX: &'static str = "ordo: renamed to ";
+
+    /// The comment for an old column whose field is now `new`.
+    pub fn comment(new: &str) -> String {
+        format!("{}{new}", Self::PREFIX)
+    }
+
+    /// The new column a comment names, when it is one of these.
+    pub fn new_column(comment: &str) -> Option<&str> {
+        comment
+            .strip_prefix(Self::PREFIX)
+            .map(str::trim)
+            .filter(|c| !c.is_empty() && !c.contains(char::is_whitespace))
+    }
+}
+
+/// The comment statements that make each table on a `reader` line carry
+/// [`Renamed`] as `schema` says: set on the old column of each declared
+/// rename, cleared from a column a field declares again. Empty when the
+/// catalog already agrees.
+async fn rename_comments_sql(
+    pool: &Pool,
+    pg: &str,
+    schema: &Schema,
+    present: &std::collections::BTreeMap<String, BTreeSet<String>>,
+) -> Result<String, SchemaRefusal> {
+    let mut tables: BTreeSet<&str> = BTreeSet::new();
+    for r in &schema.readers {
+        tables.extend(r.tables.iter().map(String::as_str));
+    }
+    let mut sql = String::new();
+    for t in tables {
+        let (Some(cols), Some(e)) = (present.get(t), schema.native(t)) else {
+            continue;
+        };
+        let mut want: std::collections::BTreeMap<String, String> = Default::default();
+        for m in schema.prev.iter().filter(|m| m.entity == t) {
+            let (Some(f), [old]) = (m.field.as_deref(), m.prev.as_slice()) else {
+                continue;
+            };
+            let Some(field) = e.field(f) else {
+                continue;
+            };
+            if old.contains('.') || !cols.contains(old) || old.as_str() == field.column() {
+                continue;
+            }
+            want.insert(old.clone(), Renamed::comment(&field.column()));
+        }
+        let have = crate::migrate::column_comments(pool, pg, t)
+            .await
+            .map_err(SchemaRefusal::Database)?;
+        let on = |c: &str| {
+            format!(
+                "COMMENT ON COLUMN {}.{}.{} IS ",
+                quote(pg),
+                quote(t),
+                quote(c)
+            )
+        };
+        for (c, text) in &want {
+            if have.get(c) != Some(text) {
+                sql += &format!("{}{}; ", on(c), sql_lit(text));
+            }
+        }
+        for (c, text) in &have {
+            let declared = e.fields.iter().any(|f| f.column() == *c);
+            if Renamed::new_column(text).is_some() && declared && !want.contains_key(c) {
+                sql += &format!("{}NULL; ", on(c));
+            }
+        }
+    }
+    Ok(sql)
+}
+
+/// [`grant_readers_with`] over this process's environment.
+pub async fn grant_readers(pool: &Pool, schema: &Schema) -> Result<Vec<String>, SchemaRefusal> {
+    grant_readers_with(pool, schema, schema_setting).await
+}
+
+/// Make the grants each reader's role holds in this deployment's schema
+/// equal what the `reader` lines say, and revoke everything from a role
+/// whose line is gone. Returns one line per reader for the start log.
+///
+/// Each role gets `USAGE` on the schema, `SELECT` on its tables, and
+/// `SELECT` on the sign-in contract's columns ([`crate::sign_in_contract`])
+/// of each sign-in table it does not name whole, and on the release this
+/// deployment runs. A table not created yet is granted by the apply that creates
+/// it. Nothing is sent when the catalog already agrees, so a start of an
+/// unchanged deployment writes nothing.
+pub async fn grant_readers_with(
+    pool: &Pool,
+    schema: &Schema,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<String>, SchemaRefusal> {
+    let shared_ok = shared_role_value(lookup(SHARED_ROLE_ENV).as_deref())?;
+    let roles = reader_roles(schema, &lookup)?;
+    let recorded = has_table(pool, None, READER_TABLE).await?;
+    if roles.is_empty() && !recorded {
+        return Ok(Vec::new());
+    }
+    let pg = pool.schema().to_string();
+    let own = current_role(pool).await?;
 
     // What each role should hold.
     let present = tables_in(pool, &pg).await?;
+    // **A reader reads only columns the read app still writes** (owner
+    // ruling 2026-11-23, Q1; `plan-evolution-federation.md` §2). A column
+    // a version left behind (`$orphans`) and `schema` does not declare
+    // again is never written, so a table holding one is granted by column,
+    // without it. The reader's check then names the column it lost.
+    let mut orphaned: std::collections::BTreeMap<String, BTreeSet<String>> = Default::default();
+    for o in crate::orphans::live(pool)
+        .await
+        .map_err(SchemaRefusal::Database)?
+    {
+        let declared = schema
+            .native(&o.entity)
+            .is_some_and(|e| e.field(&o.field).is_some());
+        if !o.is_entity() && !declared {
+            orphaned
+                .entry(o.entity.clone())
+                .or_default()
+                .extend(o.columns.iter().cloned());
+        }
+    }
+    // **An entity rename in progress**: a reader of the new table also
+    // reads the old one until the rename lands, so a read app still on the
+    // old name reads through the soak (Q1). The rename leaves `$renames`
+    // when it lands, and the old table's grant goes then.
+    let renamed_from: std::collections::BTreeMap<String, String> = match pool
+        .rows("SELECT \"entity\", \"from\" FROM \"$renames\" WHERE \"field\" = ''")
+        .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .filter_map(|r| {
+                let mut it = r.into_iter();
+                Some((it.next()??, it.next()??))
+            })
+            .collect(),
+        Err(e) if e.is_missing_table() => Default::default(),
+        Err(e) => return Err(SchemaRefusal::Database(e)),
+    };
     let mut want: std::collections::BTreeMap<String, (String, Held)> = Default::default();
     let mut out = Vec::new();
     for (r, (reader, role)) in schema.readers.iter().zip(&roles) {
-        let var = reader_role_env(reader);
-        if !role_exists(pool, role).await? {
-            return Err(SchemaRefusal::ReaderRoleMissing {
-                reader: reader.clone(),
-                var,
-                role: role.clone(),
-            });
-        }
-        if *role == own || is_member(pool, &own, role).await? {
-            if !shared_ok {
-                return Err(SchemaRefusal::ReaderOwnRole {
-                    reader: reader.clone(),
-                    var,
-                    role: role.clone(),
-                });
-            }
+        if check_reader_role(pool, &own, reader, role, shared_ok).await? {
             out.push(format!(
                 "reader      {reader}: role `{role}` is this deployment's own \
                  ({SHARED_ROLE_ENV}=on); no grants are made"
@@ -1049,17 +1277,39 @@ pub async fn grant_readers_with(
             .entry(role.clone())
             .or_insert_with(|| (reader.clone(), Held::new()));
         for t in r.tables.iter().filter(|t| present.contains_key(*t)) {
-            entry.1.insert((t.clone(), String::new(), "SELECT".into()));
+            match (orphaned.get(t), present.get(t)) {
+                (Some(gone), Some(cols)) => {
+                    for c in cols.iter().filter(|c| !gone.contains(*c)) {
+                        entry.1.insert((t.clone(), c.clone(), "SELECT".into()));
+                    }
+                }
+                _ => {
+                    entry.1.insert((t.clone(), String::new(), "SELECT".into()));
+                }
+            }
+            if let Some(old) = renamed_from.get(t).filter(|o| present.contains_key(*o)) {
+                entry
+                    .1
+                    .insert((old.clone(), String::new(), "SELECT".into()));
+            }
         }
         out.push(format!(
             "reader      {reader}: role `{role}` reads {}",
             r.tables.join(", ")
         ));
     }
+    // The sign-in contract (owner ruling 2026-11-23, Q16): the columns a
+    // `$caller` guard reads, retired ones kept for the load window, and the
+    // release this deployment runs, for the reader's release check.
+    let mut contract = crate::sign_in_contract::columns();
+    contract.push((
+        crate::sign_in_contract::RELEASE_TABLE,
+        vec![crate::sign_in_contract::RELEASE_COLUMN],
+    ));
     for (_, held) in want.values_mut() {
-        for (t, cols) in SIGN_IN_COLUMNS {
+        for (t, cols) in &contract {
             let whole = held.contains(&(t.to_string(), String::new(), "SELECT".into()));
-            let Some(have) = present.get(t) else {
+            let Some(have) = present.get(*t) else {
                 continue;
             };
             if whole {
@@ -1071,61 +1321,104 @@ pub async fn grant_readers_with(
         }
     }
 
-    // Roles granted before whose line is gone.
-    let mut gone: Vec<String> = Vec::new();
+    // What each role was granted, as recorded. `None`: a row from before
+    // grants were recorded, whose role is revoked everything, as then.
+    #[allow(clippy::type_complexity)]
+    let mut recorded_grants: std::collections::BTreeMap<
+        String,
+        (String, Option<Held>, Option<String>),
+    > = Default::default();
     if recorded {
+        pool.rows(READER_GRANTS_COLUMN)
+            .await
+            .map_err(SchemaRefusal::Database)?;
         let rows = pool
-            .rows(r#"SELECT "role" FROM "$readergrant" ORDER BY 1"#)
+            .rows(r#"SELECT "role", "reader", "grants", "usage" FROM "$readergrant" ORDER BY 1"#)
             .await
             .map_err(SchemaRefusal::Database)?;
         for r in rows {
-            let Some(role) = r.into_iter().next().flatten() else {
+            let at = |i: usize| r.get(i).cloned().flatten();
+            let Some(role) = at(0) else {
                 continue;
             };
-            if !want.contains_key(&role) && role != own && role_exists(pool, &role).await? {
-                gone.push(role);
-            }
+            let grants = at(2).map(|g| held_from_json(&g));
+            recorded_grants.insert(role, (at(1).unwrap_or_default(), grants, at(3)));
+        }
+    }
+    // Roles granted before whose line is gone.
+    let mut gone: Vec<String> = Vec::new();
+    for role in recorded_grants.keys() {
+        if !want.contains_key(role) && *role != own && role_exists(pool, role).await? {
+            gone.push(role.clone());
         }
     }
 
     let s = quote(&pg);
-    let mut sql = String::new();
+    // The reader is told of each rename on its tables ([`Renamed`]).
+    let mut sql = rename_comments_sql(pool, &pg, schema, &present).await?;
     for role in &gone {
         let r = quote(role);
-        sql += &format!("REVOKE ALL ON ALL TABLES IN SCHEMA {s} FROM {r}; ");
-        sql += &format!("REVOKE USAGE ON SCHEMA {s} FROM {r}; ");
+        let (_, grants, usage) = &recorded_grants[role];
+        sql += &revoke_sql(&pg, role, grants.as_ref(), &Held::new());
+        // Usage only when Ordo gave it: a role that held it before keeps
+        // it, and with it every table a person granted by hand.
+        if usage.as_deref() == Some(USAGE_ORDO) {
+            sql += &format!("REVOKE USAGE ON SCHEMA {s} FROM {r}; ");
+        }
+    }
+    // Who gave each wanted role its usage: as recorded; for a row from an
+    // earlier release, not known, so never Ordo's to take back; for a role
+    // not recorded yet, Ordo's unless the role already holds it.
+    let mut usage_by: std::collections::BTreeMap<&String, &'static str> = Default::default();
+    for role in want.keys() {
+        let by = match recorded_grants.get(role) {
+            Some((_, _, Some(u))) if u == USAGE_ORDO => USAGE_ORDO,
+            Some(_) => USAGE_HELD,
+            None if has_usage(pool, &pg, role).await? => USAGE_HELD,
+            None => USAGE_ORDO,
+        };
+        usage_by.insert(role, by);
     }
     let mut changed: Vec<&String> = Vec::new();
+    let none_yet = Held::new();
     for (role, (_, held)) in &want {
+        // A role not recorded yet holds nothing Ordo granted.
+        let before = match recorded_grants.get(role) {
+            None => Some(&none_yet),
+            Some((_, g, _)) => g.as_ref(),
+        };
         let now = held_by(pool, &pg, role).await?;
-        if now == *held && has_usage(pool, &pg, role).await? {
+        if before == Some(held) && now.is_superset(held) && has_usage(pool, &pg, role).await? {
             continue;
         }
         changed.push(role);
+        sql += &revoke_sql(&pg, role, before, held);
         sql += &grant_sql(&pg, role, held);
     }
-    let record_changed = if recorded {
-        let rows = pool
-            .rows(r#"SELECT "role", "reader" FROM "$readergrant" ORDER BY 1"#)
-            .await
-            .map_err(SchemaRefusal::Database)?;
-        let now: Vec<(String, String)> = rows
-            .into_iter()
-            .map(|r| {
-                (
-                    r.first().cloned().flatten().unwrap_or_default(),
-                    r.get(1).cloned().flatten().unwrap_or_default(),
-                )
-            })
-            .collect();
-        let then: Vec<(String, String)> = want
-            .iter()
-            .map(|(role, (reader, _))| (role.clone(), reader.clone()))
-            .collect();
-        now != then
-    } else {
-        true
-    };
+    #[allow(clippy::type_complexity)]
+    let then: Vec<(String, String, Option<String>, Option<String>)> = want
+        .iter()
+        .map(|(role, (reader, held))| {
+            (
+                role.clone(),
+                reader.clone(),
+                Some(held_to_json(held)),
+                Some(usage_by[role].to_string()),
+            )
+        })
+        .collect();
+    let record_changed = recorded_grants
+        .iter()
+        .map(|(role, (reader, g, u))| {
+            (
+                role.clone(),
+                reader.clone(),
+                g.as_ref().map(held_to_json),
+                u.clone(),
+            )
+        })
+        .collect::<Vec<_>>()
+        != then;
     if sql.is_empty() && !record_changed {
         return Ok(out);
     }
@@ -1136,13 +1429,23 @@ pub async fn grant_readers_with(
     }
     // The table by its literal name: a platform table, never an entity's.
     sql += r#"DELETE FROM "$readergrant";"#;
-    if !want.is_empty() {
-        let values = want
+    if !then.is_empty() {
+        let values = then
             .iter()
-            .map(|(role, (reader, _))| format!("({}, {})", sql_lit(role), sql_lit(reader)))
+            .map(|(role, reader, grants, usage)| {
+                format!(
+                    "({}, {}, {}, {})",
+                    sql_lit(role),
+                    sql_lit(reader),
+                    sql_lit(grants.as_deref().unwrap_or("[]")),
+                    sql_lit(usage.as_deref().unwrap_or(USAGE_HELD))
+                )
+            })
             .collect::<Vec<_>>()
             .join(", ");
-        sql += &format!(r#" INSERT INTO "$readergrant" ("role", "reader") VALUES {values};"#);
+        sql += &format!(
+            r#" INSERT INTO "$readergrant" ("role", "reader", "grants", "usage") VALUES {values};"#
+        );
     }
     // One implicit transaction. Two replicas starting at once may race on
     // the catalog row; the loser checks the result below, which is what
@@ -1151,7 +1454,7 @@ pub async fn grant_readers_with(
     for role in &changed {
         let (_, held) = &want[*role];
         let now = held_by(pool, &pg, role).await?;
-        if now != *held || !has_usage(pool, &pg, role).await? {
+        if !now.is_superset(held) || !has_usage(pool, &pg, role).await? {
             if let Err(e) = sent {
                 return Err(SchemaRefusal::Database(e));
             }
@@ -1170,13 +1473,55 @@ pub async fn grant_readers_with(
     Ok(out)
 }
 
-/// The statements that set one role's grants in schema `pg` to `held`:
-/// everything revoked, then usage and each grant, in one batch.
+/// `[[table, column], …]`, the column empty for a whole table.
+fn held_to_json(held: &Held) -> String {
+    let list: Vec<[&str; 2]> = held
+        .iter()
+        .map(|(t, c, _)| [t.as_str(), c.as_str()])
+        .collect();
+    serde_json::to_string(&list).unwrap_or_else(|_| "[]".into())
+}
+
+fn held_from_json(text: &str) -> Held {
+    serde_json::from_str::<Vec<[String; 2]>>(text)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|[t, c]| (t, c, "SELECT".to_string()))
+        .collect()
+}
+
+/// The statements that take back what Ordo granted `role` and `keep` does
+/// not hold: each recorded table or column, and nothing a person granted
+/// by hand. With no record (a row from before 2026-11-24), everything in
+/// the schema, as then.
+fn revoke_sql(pg: &str, role: &str, recorded: Option<&Held>, keep: &Held) -> String {
+    let (s, r) = (quote(pg), quote(role));
+    let Some(recorded) = recorded else {
+        return format!("REVOKE ALL ON ALL TABLES IN SCHEMA {s} FROM {r}; ");
+    };
+    let mut sql = String::new();
+    for g in recorded.difference(keep) {
+        let (t, c, _) = g;
+        if c.is_empty() {
+            // A table revoke takes its column grants too, so what `keep`
+            // holds by column there is granted again after it.
+            sql += &format!("REVOKE SELECT ON {s}.{} FROM {r}; ", quote(t));
+        } else {
+            sql += &format!(
+                "REVOKE SELECT ({}) ON {s}.{} FROM {r}; ",
+                quote(c),
+                quote(t)
+            );
+        }
+    }
+    sql
+}
+
+/// The statements that give one role usage and each grant in `held`, in
+/// one batch, after [`revoke_sql`] took back what it no longer holds.
 fn grant_sql(pg: &str, role: &str, held: &Held) -> String {
     let (s, r) = (quote(pg), quote(role));
-    let mut sql = format!(
-        "REVOKE ALL ON ALL TABLES IN SCHEMA {s} FROM {r}; GRANT USAGE ON SCHEMA {s} TO {r}; "
-    );
+    let mut sql = format!("GRANT USAGE ON SCHEMA {s} TO {r}; ");
     let mut columns: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
     for (t, c, _) in held {
         if c.is_empty() {
@@ -1283,6 +1628,87 @@ async fn is_member(pool: &Pool, of: &str, role: &str) -> Result<bool, SchemaRefu
     Ok(first_is_true(&rows))
 }
 
+/// **The reader tells the read app its release** (owner ruling 2026-11-25,
+/// `readers-show-the-read-app-which`). This deployment grants `USAGE` on its
+/// own schema and `SELECT` on the `release` column of its `$ordorelease`,
+/// and nothing else, to the role that owns each peer's schema, so the read
+/// app's `ordo release-check` names this deployment's Ordo release and not
+/// only its role. A peer owned by this deployment's own role (or one it is
+/// a member of) needs no grant. Nothing is sent when the catalog already
+/// agrees. Returns one line per role granted.
+pub async fn grant_release_to_peers(
+    pool: &Pool,
+    schema: &Schema,
+) -> Result<Vec<String>, SchemaRefusal> {
+    let own_schema = pool.schema().to_string();
+    if !has_table(
+        pool,
+        Some(&own_schema),
+        crate::sign_in_contract::RELEASE_TABLE,
+    )
+    .await?
+    {
+        return Ok(Vec::new());
+    }
+    let own = current_role(pool).await?;
+    let mut owners: BTreeSet<String> = BTreeSet::new();
+    for e in &schema.externals {
+        let Some(pg) = e
+            .external
+            .as_ref()
+            .and_then(|x| x.peer.as_ref())
+            .and_then(|p| p.schema.clone())
+        else {
+            continue;
+        };
+        let rows = pool
+            .rows(&format!(
+                "SELECT pg_get_userbyid(nspowner)::text FROM pg_namespace WHERE nspname = {}",
+                sql_lit(&pg)
+            ))
+            .await
+            .map_err(SchemaRefusal::Database)?;
+        if let Some(owner) = rows.first().and_then(|r| r.first().cloned().flatten()) {
+            owners.insert(owner);
+        }
+    }
+    let (s, t, c) = (
+        quote(&own_schema),
+        quote(crate::sign_in_contract::RELEASE_TABLE),
+        quote(crate::sign_in_contract::RELEASE_COLUMN),
+    );
+    let mut out = Vec::new();
+    for owner in owners {
+        if owner == own || is_member(pool, &own, &owner).await? {
+            continue;
+        }
+        let held = pool
+            .rows(&format!(
+                "SELECT has_schema_privilege({o}, {sl}, 'USAGE') \
+                   AND has_column_privilege({o}, {tl}, {cl}, 'SELECT')",
+                o = sql_lit(&owner),
+                sl = sql_lit(&own_schema),
+                tl = sql_lit(&format!("{s}.{t}", s = s, t = t)),
+                cl = sql_lit(crate::sign_in_contract::RELEASE_COLUMN),
+            ))
+            .await
+            .map_err(SchemaRefusal::Database)?;
+        if first_is_true(&held) {
+            continue;
+        }
+        let r = quote(&owner);
+        pool.rows(&format!(
+            "GRANT USAGE ON SCHEMA {s} TO {r}; GRANT SELECT ({c}) ON {s}.{t} TO {r}"
+        ))
+        .await
+        .map_err(SchemaRefusal::Database)?;
+        out.push(format!(
+            "release     role `{owner}` reads this deployment's Ordo release"
+        ));
+    }
+    Ok(out)
+}
+
 /// [`check_access`] with [`SHARED_ROLE_ENV`] read from this process's
 /// environment.
 pub async fn check_access_env(
@@ -1295,7 +1721,7 @@ pub async fn check_access_env(
 
 /// The reader's side, before the peer is read at all: this deployment's
 /// role must hold `USAGE` on each peer schema and `SELECT` on every peer
-/// table an external reads, and on the [`SIGN_IN_COLUMNS`] when `$caller`
+/// table an external reads, and on the sign-in contract's columns when `$caller`
 /// is used on that peer (`callers`, [`callers`]). A missing grant refuses
 /// the start and quotes the `reader` line to add to the peer's file.
 ///
@@ -1388,7 +1814,7 @@ pub async fn check_access(
             }
         }
         if callers.contains(peer) {
-            for (t, cols) in SIGN_IN_COLUMNS {
+            for (t, cols) in crate::sign_in_contract::columns() {
                 let Some(have) = present.get(t) else {
                     continue;
                 };
@@ -1421,7 +1847,11 @@ async fn can_select(
     columns: &[&str],
 ) -> Result<bool, SchemaRefusal> {
     let test = if columns.is_empty() {
-        "has_table_privilege(c.oid, 'SELECT')".to_string()
+        // Granted whole, or by column: a read app grants a table by column
+        // once a column of it is orphaned (`crate::orphans`). Which mapped
+        // columns are readable is the external check's to say, by name.
+        "(has_table_privilege(c.oid, 'SELECT') OR has_any_column_privilege(c.oid, 'SELECT'))"
+            .to_string()
     } else {
         columns
             .iter()

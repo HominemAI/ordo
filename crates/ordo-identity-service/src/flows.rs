@@ -1244,6 +1244,27 @@ impl Service {
         Ok(made)
     }
 
+    /// Set, replace or remove a registered deployment's consumer key
+    /// ([`crate::exchange`]).
+    pub async fn set_consumer_key(
+        &self,
+        by: Actor<'_>,
+        handle: &str,
+        key: Option<&[u8; 32]>,
+    ) -> Result<(), IdentityError> {
+        deployments::set_consumer_key(
+            self.0.store.pool(),
+            self.handle(),
+            &self.0.keys,
+            handle,
+            key,
+            by,
+            self.now(),
+        )
+        .await?;
+        self.refresh_deployments().await
+    }
+
     /// End a registered deployment: no new token for it.
     pub async fn end_deployment(&self, by: Actor<'_>, handle: &str) -> Result<(), IdentityError> {
         deployments::end(

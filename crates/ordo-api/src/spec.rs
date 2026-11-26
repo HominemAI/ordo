@@ -625,6 +625,33 @@ pub trait OpRegistry: Send + Sync {
         let _ = space;
         self.get(name)
     }
+
+    /// The program version that serves `space` now, when the registry
+    /// serves versions per tenant. A live feed records it when it opens and
+    /// ends with `version_changed` when it moves (`plan-versions.md` §1.4).
+    /// `None`: one program for every space, and no feed ever ends for it.
+    fn version_in(&self, space: &str) -> Option<String> {
+        let _ = space;
+        None
+    }
+
+    /// Is `name` declared by a program version this registry serves, while
+    /// the one serving `space` lacks it (`plan-versions.md` §1.9)? The door
+    /// then answers `op_not_in_version` rather than as an unknown op. The
+    /// default, one program everywhere, never says yes.
+    fn declared_elsewhere(&self, space: &str, name: &str) -> bool {
+        let _ = (space, name);
+        false
+    }
+
+    /// The op's version hash in the program version that served `space`
+    /// before its last switch, when this registry knows it. An idempotency
+    /// key sent before the switch is honoured across it (`plan-versions.md`
+    /// §1.9): the retry's fingerprint is also taken with this hash.
+    fn prior_version_hash(&self, space: &str, name: &str) -> Option<String> {
+        let _ = (space, name);
+        None
+    }
 }
 
 /// Parameters that passed type + bounds validation, keyed by declared name.
@@ -978,6 +1005,52 @@ pub trait AccessChecker: Send + Sync {
     /// since presence is not delegable. The default is `false`.
     fn presence_required(&self, _token: &str, _space: &str, _op: &str) -> bool {
         false
+    }
+
+    /// Asked only after [`Self::check`] denied: was this a grant pinned
+    /// under one program version, called in a tenant now on another, where
+    /// the two disagree (`plan-versions.md` §1.7)? The answer is the
+    /// refusal's message, naming both versions and the entity, and the door
+    /// then answers [`crate::ErrorCode::VersionsDisagree`] in place of its
+    /// uniform denial. Only for a verified token whose grant is otherwise
+    /// good in this space: its holder already knows the grant. The default
+    /// is `None`.
+    fn versions_disagree(&self, _token: &str, _space: &str, _op: &str) -> Option<String> {
+        None
+    }
+
+    /// Asked only after [`Self::check`] denied, before
+    /// [`Self::versions_disagree`]: is this a grant a move with dual writes
+    /// killed (`plan-versions.md` §2.5)? It is dead until the person
+    /// consents again, as a revoked share is, so the door answers
+    /// [`crate::ErrorCode::AccessDenied`], the class a client drops that
+    /// share's device copy on, with this message naming both versions and
+    /// the fix. Only for a verified token whose grant this is. The default
+    /// is `None`.
+    fn grant_killed(&self, _token: &str, _space: &str, _op: &str) -> Option<String> {
+        None
+    }
+
+    /// Asked only after [`Self::check`] denied, first: was this another
+    /// deployment's call, with a token the identity service signed, that
+    /// the holder refused for a reason it names
+    /// (`plan-federation-grants.md` 5, step G3)? The answer is the message:
+    /// which consumer, which op, and the grant line or setting that would
+    /// allow it. The door answers [`crate::ErrorCode::AccessDenied`] with
+    /// it. A token whose signature fails keeps the uniform denial. The
+    /// default is `None`.
+    fn peer_refused(&self, _token: &str, _space: &str, _op: &str) -> Option<String> {
+        None
+    }
+
+    /// Asked only after [`Self::check`] allowed the call: the deployments
+    /// another deployment's call has passed through, oldest first, the
+    /// caller last (the `chain` claim of a token the identity service
+    /// signed, step G3). Every peer call the op makes passes it on, so a
+    /// chain that comes back is refused by name at once (step G5b). Empty
+    /// for any other caller, which is the default.
+    fn peer_chain(&self, _token: &str) -> Vec<String> {
+        Vec::new()
     }
 
     /// Asked only after [`Self::check`] allowed `principal` to call `op`:

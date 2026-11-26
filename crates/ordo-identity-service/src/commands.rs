@@ -7,6 +7,7 @@
 //! | `deployment add <handle> [--origin <origin>]... [--return <url>]... [--sign-up invite\|open]` | register a deployment that signs in here (`crate::deployments`): a console's origin with `--origin`, an app's callback with `--return` alone; sign-up is by invite unless `open` |
 //! | `deployment set <handle> [--origin <origin>]... [--no-origins] [--return <url>]...` | replace its client origins, its return URLs, or both |
 //! | `deployment sign-up <handle> invite\|open` | change how people join it |
+//! | `deployment consumer-key <handle> <key>\|--none` | set, replace or remove the public half of its consumer key, which lets it call another deployment (`crate::exchange`); `deployment add` takes it too, as `--consumer-key <key>` |
 //! | `deployment list` | the registered deployments, with their sign-up mode |
 //! | `deployment end <handle>` | no new token for it |
 //! | `member add <handle> <person>`, `member end <handle> <person>`, `member list <handle>` | who may hold a deployment's tokens |
@@ -40,7 +41,8 @@ const USAGE: &str = "usage: ordo-identity-service [invite [--label <text>] [--ro
                      [--deployment <handle>] | break-glass-token [--minutes <1..60>] \
                      | rotate-keys [--now] | audit verify [--key <kid>:<x>]... \
                      | deployment add <handle> [--origin <origin>]... [--return <url>]... \
-                     [--sign-up invite|open] | deployment set <handle> [--origin <origin>]... \
+                     [--sign-up invite|open] [--consumer-key <key>] \
+                     | deployment consumer-key <handle> <key>|--none | deployment set <handle> [--origin <origin>]... \
                      [--no-origins] [--return <url>]... | deployment sign-up <handle> invite|open \
                      | deployment list | deployment end <handle> \
                      | member add|end <handle> <person> | member list <handle> | people]";
@@ -150,6 +152,7 @@ async fn run_inner(svc: &Service, args: &[String], unix_user: &str) -> Result<St
                             crate::deployments::SignUp::parse(w).map_err(|e| e.to_string())?
                         }
                     },
+                    consumer_key: flag(args, "--consumer-key")?.map(str::to_string),
                 };
                 let made = svc
                     .register_deployment(actor, &asked)
@@ -224,11 +227,16 @@ async fn run_inner(svc: &Service, args: &[String], unix_user: &str) -> Result<St
                 let mut out = format!("{} (this service's own)\n", svc.handle());
                 for d in list {
                     out.push_str(&format!(
-                        "{}  clients: {}  returns: {}  sign-up: {}\n",
+                        "{}  clients: {}  returns: {}  sign-up: {}  consumer key: {}\n",
                         d.handle,
                         shown(&d.client_origins),
                         d.return_urls.join(" "),
-                        d.sign_up.as_str()
+                        d.sign_up.as_str(),
+                        if d.consumer_key.is_some() {
+                            "set"
+                        } else {
+                            "none"
+                        }
                     ));
                     let trusted = d.trusted_app_origins();
                     if !trusted.is_empty() {
@@ -260,6 +268,31 @@ async fn run_inner(svc: &Service, args: &[String], unix_user: &str) -> Result<St
                         crate::deployments::SignUp::Invite => "by invite only",
                     }
                 ))
+            }
+            Some("consumer-key") => {
+                let handle = word(args, 2, "the deployment's handle")?;
+                let given = match args.get(3).map(String::as_str) {
+                    Some("--none") => "--none",
+                    _ => word(args, 3, "the public key, or --none")?,
+                };
+                let key = if given == "--none" {
+                    None
+                } else {
+                    Some(crate::deployments::parse_consumer_key(given).map_err(|e| e.to_string())?)
+                };
+                svc.set_consumer_key(actor, handle, key.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(match key {
+                    Some(_) => format!(
+                        "`{handle}` now proves itself with this consumer key. An assertion \
+                         signed with any other is refused from now on.\n"
+                    ),
+                    None => format!(
+                        "`{handle}` has no consumer key: it can no longer call another \
+                         deployment.\n"
+                    ),
+                })
             }
             Some("end") => {
                 let handle = word(args, 2, "the deployment's handle")?;

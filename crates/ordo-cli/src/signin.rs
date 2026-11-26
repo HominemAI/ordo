@@ -1434,6 +1434,30 @@ pub async fn credential(
     })
 }
 
+/// **A token for another deployment, from the same sign-in**: the session
+/// `ordo login` stored asks its identity service for a token whose `aud`
+/// names `handle`. The service gives one only to a member of that
+/// deployment. Nothing is stored: the token is for one request. What
+/// `ordo promote` sends the target, so it reads the step before as you
+/// (owner ruling 2026-11-24, Q11).
+pub async fn token_for_deployment(ctx: &Ctx, handle: &str) -> Result<String, SignInError> {
+    let named = named_origin(ctx, None)?;
+    let file = SessionFile::load(&ctx.dir()?)?;
+    let s = file.pick(named.as_ref().map(|o| o.text.as_str()))?;
+    let client = IdentityClient::new(Origin::parse(&s.origin, true)?);
+    let answer = client
+        .post(
+            "/token",
+            json!({
+                "session": s.session,
+                "aud": ordo_identity::deployment_token::audience(handle),
+            }),
+            None,
+        )
+        .await?;
+    Ok(field(&answer, "token", &client)?.to_string())
+}
+
 /// Ask the service for a token from the session.
 async fn refresh(
     client: &IdentityClient,

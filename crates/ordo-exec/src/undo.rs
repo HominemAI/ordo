@@ -1833,6 +1833,7 @@ pub async fn record_restore(
         actor: Actor::System("restore".into()),
         commands: vec![],
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: Some(RestoreMarker {
             space: space.clone(),
@@ -1974,8 +1975,10 @@ pub enum RevertFailure {
     AlreadyReverted(CorrelationId),
     /// The platform refused, in its own vocabulary: `access_guard`,
     /// `cas_miss`, `not_found`, `has_referrers`, `expected_absent`,
-    /// `blob_integrity`, or one of the two whole-class refusals
-    /// (`unrevertable_sealed`, `unrevertable_tree`).
+    /// `blob_integrity`, one of the two whole-class refusals
+    /// (`unrevertable_sealed`, `unrevertable_tree`), or a migration's
+    /// backfill record (`unrevertable_backfill`), refused before the group
+    /// is read further.
     Refused(String),
     Store(PoolError),
 }
@@ -2128,6 +2131,7 @@ async fn plan_inner(
 ) -> Result<(CommandGroup, i64), RevertFailure> {
     let db = Db::Pool(pool);
     let entry = find_group(db, space, correlation).await?;
+    refuse_backfill(&entry.group)?;
     let idx = group_index(db, space, correlation).await?;
     let inverse = invert_group(&entry.group, &Actor::User(principal.to_string()), now)
         .map_err(RevertFailure::Plan)?;
@@ -2527,6 +2531,33 @@ fn refuse_unreproducible(
     Ok(())
 }
 
+/// **A backfill's audit group is not reverted** (`plan-schema-evolution.md`
+/// §7.2, `plan-versions.md` increment 10b). Reverting one writes the
+/// values from before a migration into a column whose meaning moved on,
+/// for one slice of rows. A summarised group holds no images at all. So a
+/// group with the backfill record (trailer `0x04`, actor
+/// `system:backfill`) is refused by name, naming the migration's step and
+/// field, and what undoes a migration instead.
+fn refuse_backfill(group: &CommandGroup) -> Result<(), RevertFailure> {
+    let Some(rec) = &group.backfill else {
+        return Ok(());
+    };
+    Err(RevertFailure::Refused(format!(
+        "unrevertable_backfill: this group is the {} record of a migration's backfill of \
+         `{}.{}` (step `{}`, mapping `{}`, {} row{}), not a write a person made. A \
+         migration is undone by a new one (`ordo evolve`), or in its soak by a revert of \
+         the move (`ordo evolve --tenant <id> --revert`); a summarised backfill's old \
+         values come back only from a backup",
+        rec.kind.as_str(),
+        rec.entity,
+        rec.field,
+        rec.step,
+        rec.mapping,
+        rec.rows,
+        if rec.rows == 1 { "" } else { "s" },
+    )))
+}
+
 /// Find the group this revert undoes, scoped to its space.
 async fn find_group(
     db: Db<'_>,
@@ -2874,6 +2905,7 @@ async fn apply(
             owner_administration: false,
             restored_unverified,
             restore: None,
+            backfill: None,
         },
         unverified,
     ))

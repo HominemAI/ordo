@@ -79,6 +79,17 @@ fn parse_program_noting(src: &str) -> Result<(Program, Vec<crate::Span>), ParseE
             // `function` is contextual the same way: a declaration head
             // only here, so a field or an expression function keeps it.
             TokenKind::Ident(w) if w == "function" => prog.functions.push(function_decl(&mut p)?),
+            TokenKind::Keyword(Keyword::Auth) => {
+                let a = crate::auth::auth_decl(&mut p)?;
+                if prog.auth.is_some() {
+                    return Err(p.err_class_at(
+                        parser::DUPLICATE_AUTH,
+                        a.span,
+                        "a program has one `auth` block; put every clause in the first",
+                    ));
+                }
+                prog.auth = Some(a);
+            }
             // `external` is contextual the same way (ruled 2026-11-15,
             // `external-entities`): a declaration head only here.
             TokenKind::Ident(w) if w == "external" => prog.externals.push(external_decl(&mut p)?),
@@ -115,6 +126,39 @@ fn parse_program_noting(src: &str) -> Result<(Program, Vec<crate::Span>), ParseE
                     ));
                 }
                 prog.readers.push(reader);
+            }
+            // `grant` is contextual the same way (`plan-federation-grants.md`
+            // §3): a declaration head only at the start of a top-level line.
+            TokenKind::Ident(w) if w == "grant" => {
+                let g = grant_decl(&mut p)?;
+                if prog
+                    .grants
+                    .iter()
+                    .any(|q| q.name.name == g.name.name && q.provider == g.provider)
+                {
+                    return Err(p.err_class_at(
+                        parser::GRANT_BLOCK,
+                        g.span,
+                        format!(
+                            "`{}` is declared twice. Keep one block and put every line in it",
+                            g.header()
+                        ),
+                    ));
+                }
+                prog.grants.push(g);
+            }
+            // `edition` is contextual the same way (`plan-versions.md`
+            // §2.6): a declaration head only here.
+            TokenKind::Ident(w) if w == "edition" => {
+                let e = edition_decl(&mut p)?;
+                if prog.edition.is_some() {
+                    return Err(p.err_class_at(
+                        parser::DUPLICATE_EDITION,
+                        e.span,
+                        "a program has one `edition` line; this is a second",
+                    ));
+                }
+                prog.edition = Some(e);
             }
             TokenKind::Ident(w) if w == "release" => {
                 let r = release_decl(&mut p)?;
@@ -394,7 +438,7 @@ fn skip_newlines(p: &mut Parser) {
     }
 }
 
-fn ident(p: &mut Parser, what: &str) -> Result<Ident, ParseError> {
+pub(crate) fn ident(p: &mut Parser, what: &str) -> Result<Ident, ParseError> {
     match p.peek().clone() {
         TokenKind::Ident(name) => {
             let t = p.bump();
@@ -417,7 +461,7 @@ fn ident(p: &mut Parser, what: &str) -> Result<Ident, ParseError> {
 /// `groupMembers`' refs point at `members`. Refusing the word here made
 /// DL's own settled spelling unwritable. Whether the segment names a real
 /// field stays the binder's question, as for any identifier.
-fn segment(p: &mut Parser, what: &str) -> Result<Ident, ParseError> {
+pub(crate) fn segment(p: &mut Parser, what: &str) -> Result<Ident, ParseError> {
     match p.peek().clone() {
         TokenKind::Ident(name) => {
             let t = p.bump();
@@ -655,7 +699,7 @@ fn function_decl(p: &mut Parser) -> Result<crate::decl::FunctionDecl, ParseError
 
 /// One `egress` host: `api.openai.com` as dotted words, or in quotes for a
 /// name with a hyphen, `"my-model.example.com"`.
-fn function_host(p: &mut Parser) -> Result<crate::decl::FunctionHost, ParseError> {
+pub(crate) fn function_host(p: &mut Parser) -> Result<crate::decl::FunctionHost, ParseError> {
     if let TokenKind::Str(h) = p.peek().clone() {
         let t = p.bump();
         return Ok(crate::decl::FunctionHost {
@@ -1102,20 +1146,82 @@ fn version_text(p: &mut Parser) -> Result<String, ParseError> {
 fn entity_decl(p: &mut Parser) -> Result<EntityDecl, ParseError> {
     let start = p.bump().span; // `entity`
     let name = ident(p, "an entity name")?;
-    // Optional typed-id key override: `(key: proj)`.
-    let mut key = None;
+    // The header's option slot: `(key: proj)`, `(prev: clients)`, or both,
+    // comma-separated, each at most once (`plan-syntax-additions.md` §5).
+    let mut key: Option<Ident> = None;
+    let mut prev: Option<Ident> = None;
+    let mut prev_span = None;
     if matches!(p.peek(), TokenKind::LParen) {
-        p.bump();
-        let kw = ident(p, "`key`")?;
-        if kw.name != "key" {
-            return Err(p.err_at(
-                kw.span,
-                "an entity's parenthesis takes only `key: <prefix>`",
+        let open = p.bump().span;
+        let mut entries: Vec<(String, Span)> = Vec::new();
+        loop {
+            let kw = ident(p, "`key` or `prev`")?;
+            let is_key = match kw.name.as_str() {
+                "key" => true,
+                "prev" => false,
+                _ => {
+                    return Err(p.err_at(
+                        kw.span,
+                        "an entity's parenthesis takes `key: <prefix>` and `prev: <old name>`",
+                    ))
+                }
+            };
+            if (is_key && key.is_some()) || (!is_key && prev.is_some()) {
+                return Err(p.err_at(kw.span, format!("`{}` is written twice", kw.name)));
+            }
+            p.expect(&TokenKind::Colon, "`:` after the option's name")?;
+            let v = ident(
+                p,
+                if is_key {
+                    "the id prefix"
+                } else {
+                    "the entity's name in the version serving now"
+                },
+            )?;
+            entries.push((kw.name.clone(), kw.span.to(v.span)));
+            if is_key {
+                key = Some(v);
+            } else {
+                prev = Some(v);
+            }
+            if matches!(p.peek(), TokenKind::Comma) {
+                p.bump();
+                continue;
+            }
+            break;
+        }
+        let close = p.expect(&TokenKind::RParen, "`)` closing the entity's options")?;
+        if prev.is_some() {
+            // What the offer to remove a landed `prev` cuts: the whole
+            // parenthesis, with the space before it, when `prev` is its one
+            // entry; else the entry and the comma beside it.
+            prev_span = Some(if entries.len() == 1 {
+                let s = open.to(close.span);
+                Span::new(s.start.saturating_sub(1), s.end, s.line, s.col)
+            } else {
+                let at = entries.iter().position(|(n, _)| n == "prev").unwrap_or(0);
+                let mut s = entries[at].1;
+                if at > 0 {
+                    s.start = entries[at - 1].1.end;
+                } else {
+                    s.end = entries[1].1.start;
+                }
+                s
+            });
+        }
+    }
+    if let Some(prev) = &prev {
+        if prev.name == name.name {
+            return Err(p.err_class_at(
+                parser::PREV_SELF,
+                prev.span,
+                format!(
+                    "`{0} (prev: {0})` says nothing: `prev` names the entity's old name. Remove \
+                     it, or write the name `{0}` had in the version serving now",
+                    name.name
+                ),
             ));
         }
-        p.expect(&TokenKind::Colon, "`:` after `key`")?;
-        key = Some(ident(p, "the id prefix")?);
-        p.expect(&TokenKind::RParen, "`)` closing the key")?;
     }
     p.expect(&TokenKind::LBrace, "`{` to open the shape")?;
 
@@ -1251,9 +1357,12 @@ fn entity_decl(p: &mut Parser) -> Result<EntityDecl, ParseError> {
         fields.push(field_decl(p)?);
     }
     let end = p.bump().span; // `}`
+    prev_checks(p, &fields)?;
     Ok(EntityDecl {
         name,
         key,
+        prev,
+        prev_span,
         fields,
         access_read,
         access_write,
@@ -1265,6 +1374,71 @@ fn entity_decl(p: &mut Parser) -> Result<EntityDecl, ParseError> {
         public,
         span: start.to(end),
     })
+}
+
+/// The compile-time checks of `prev` (`plan-syntax-additions.md` §5): the
+/// shape alone. Whether the old name exists is the plan's question, since
+/// the compiler never sees the version serving now.
+fn prev_checks(p: &Parser, fields: &[FieldDecl]) -> Result<(), ParseError> {
+    let mut claimed: Vec<(String, &FieldDecl)> = Vec::new();
+    for f in fields {
+        for n in &f.prev {
+            if n.entity.is_none() && n.field.name == f.name.name {
+                return Err(p.err_class_at(
+                    parser::PREV_SELF,
+                    n.field.span,
+                    format!(
+                        "`{0} prev({0})` says nothing: `prev` names the field's old name. \
+                         Remove it, or write the name `{0}` had in the version serving now",
+                        f.name.name
+                    ),
+                ));
+            }
+            if n.entity.is_none() && fields.iter().any(|g| g.name.name == n.field.name) {
+                return Err(p.err_class_at(
+                    parser::PREV_STILL_DECLARED,
+                    n.field.span,
+                    format!(
+                        "`{0}` still exists, so `{1}` is not its rename. Remove `{0}`, or \
+                         remove `prev({0})`",
+                        n.field.name, f.name.name
+                    ),
+                ));
+            }
+            let text = n.text();
+            // A split: several fields each `prev(name)`, one name alone,
+            // within the entity. A name a merge or a move also claims is
+            // refused: one old field becomes one set of new ones.
+            let split = |g: &FieldDecl| g.prev.len() == 1 && g.prev[0].entity.is_none();
+            if let Some((_, other)) = claimed
+                .iter()
+                .find(|(t, g)| *t == text && g.name.name != f.name.name && !(split(g) && split(f)))
+            {
+                return Err(p.err_class_at(
+                    parser::PREV_DUPLICATE,
+                    n.field.span,
+                    format!(
+                        "both `{}` and `{}` claim `{text}`, and one of them merges or moves it. \
+                         A split is each new field with `prev({text})` alone; a merge is one \
+                         field with `prev(a, b)`",
+                        other.name.name, f.name.name
+                    ),
+                ));
+            }
+            if claimed
+                .iter()
+                .any(|(t, g)| *t == text && g.name.name == f.name.name)
+            {
+                return Err(p.err_class_at(
+                    parser::PREV_DUPLICATE,
+                    n.field.span,
+                    format!("`{}` names `{text}` twice in its `prev`", f.name.name),
+                ));
+            }
+            claimed.push((text, f));
+        }
+    }
+    Ok(())
 }
 
 // ── external entities ────────────────────────────────────────────────────
@@ -1357,15 +1531,113 @@ fn peer_decl(p: &mut Parser) -> Result<PeerDecl, ParseError> {
             ),
         ));
     }
+    if matches!(p.peek(), TokenKind::LBrace) {
+        return peer_block(p, name, start);
+    }
     if !matches!(p.peek(), TokenKind::Newline | TokenKind::Eof) {
         return Err(p.err_here(format!(
-            "`peer {}` is the whole line. The peer's schema is set by \
-             `ORDO_PEER_{}_SCHEMA`, never in the file",
+            "`peer {}` is the whole line, or a block of the ops it calls: `peer {} {{ \
+             std.notes.list }}`. The peer's address is set by `ORDO_PEER_{}_URL` and its \
+             schema by `ORDO_PEER_{}_SCHEMA`, never in the file",
             name.name,
+            name.name,
+            name.name.to_ascii_uppercase(),
             name.name.to_ascii_uppercase()
         )));
     }
-    Ok(PeerDecl { name, span })
+    Ok(PeerDecl {
+        name,
+        uses: None,
+        span,
+    })
+}
+
+/// `peer <name> { op  op … }` (`plan-federation-grants.md` §4, step G4): the
+/// holder's ops this deployment calls through the holder's door, one exact
+/// name per line. The holder grants by pattern; the consumer names what it
+/// uses, so the holder can tell it which change would break it.
+fn peer_block(p: &mut Parser, name: Ident, start: Span) -> Result<PeerDecl, ParseError> {
+    p.bump(); // `{`
+    let header = format!("peer {}", name.name);
+    let mut uses: Vec<PeerUse> = Vec::new();
+    loop {
+        let line_start = p.tok().span;
+        if matches!(p.peek(), TokenKind::RBrace) {
+            break;
+        }
+        if let Some(prev) = uses.last() {
+            if prev.span.line == line_start.line {
+                return Err(p.err_class_at(
+                    parser::PEER_BLOCK,
+                    line_start,
+                    format!(
+                        "`{header}`: one op per line; put {} on a line of its own",
+                        describe(p.peek())
+                    ),
+                ));
+            }
+        }
+        let op = match p.peek().clone() {
+            TokenKind::Ident(first) => {
+                p.bump();
+                let mut op = first;
+                while matches!(p.peek(), TokenKind::Dot) {
+                    p.bump();
+                    let s = segment(p, "the rest of an op name")?;
+                    op.push('.');
+                    op.push_str(&s.name);
+                }
+                op
+            }
+            // The lexer ends an unclosed brace with the line.
+            TokenKind::Eof | TokenKind::Newline => {
+                return Err(p.err_here(format!("`{header}` is not closed; end it with `}}`")))
+            }
+            other => {
+                return Err(p.err_class_at(
+                    parser::PEER_BLOCK,
+                    line_start,
+                    format!(
+                        "expected an op name in `{header}`, found {}. A line is one exact op \
+                         name of the holder (`std.notes.list`, `addComment`); patterns and \
+                         `!` belong in the holder's `grant` block",
+                        describe(&other)
+                    ),
+                ))
+            }
+        };
+        let span = line_start.to(p.prev_span());
+        if uses.iter().any(|u| u.op == op) {
+            return Err(p.err_class_at(
+                parser::PEER_BLOCK,
+                span,
+                format!("`{header}` names `{op}` twice; keep one line"),
+            ));
+        }
+        uses.push(PeerUse { op, span });
+    }
+    let end = p.bump().span; // `}`
+    if uses.is_empty() {
+        return Err(p.err_class_at(
+            parser::PEER_BLOCK,
+            start.to(end),
+            format!(
+                "`{header} {{ }}` names no op. List the holder's ops this deployment calls, \
+                 one per line, or write `{header}` alone"
+            ),
+        ));
+    }
+    if !matches!(p.peek(), TokenKind::Newline | TokenKind::Eof) {
+        return Err(p.err_here(format!(
+            "expected the end of the line after the `}}` of `{header}`, found {}",
+            describe(p.peek())
+        )));
+    }
+    Ok(PeerDecl {
+        name,
+        uses: Some(uses),
+        span: start.to(end),
+    })
 }
 
 /// `reader <name> reads <table>, <table>` (owner, 2026-11-18,
@@ -1472,6 +1744,192 @@ fn reader_decl(p: &mut Parser) -> Result<ReaderDecl, ParseError> {
     Ok(ReaderDecl { name, tables, span })
 }
 
+/// `grant <name> [as itself] { … }` or `grant provider <name> { … }`
+/// (`plan-federation-grants.md` §3).
+///
+/// The block holds op lines only: an exact op name, a `/regex/`, or `*`,
+/// each optionally after `!`. One per source line. What a line matches is
+/// decided at apply, against the program's ops; here it is only read.
+fn grant_decl(p: &mut Parser) -> Result<GrantDecl, ParseError> {
+    let start = p.bump().span; // `grant`
+    let provider = matches!(p.peek(), TokenKind::Ident(w) if w == "provider")
+        && matches!(p.peek_at(1), TokenKind::Ident(_));
+    if provider {
+        p.bump();
+    }
+    let name = ident(
+        p,
+        if provider {
+            "an identity service connection name"
+        } else {
+            "a grant name"
+        },
+    )?;
+    let ok = name
+        .name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase())
+        && name
+            .name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !ok {
+        return Err(p.err_class_at(
+            parser::GRANT_BLOCK,
+            name.span,
+            if provider {
+                format!(
+                    "`grant provider {}`: a connection name is lowercase letters, digits and \
+                     underscores, starting with a letter, as in `ORDO_AUTH_<NAME>_KIND`",
+                    name.name
+                )
+            } else {
+                format!(
+                    "`grant {}`: a grant name is lowercase letters, digits and underscores, \
+                     starting with a letter, such as `grant note_viewer`. It is upper-cased \
+                     into the setting `ORDO_CONSUMER_<NAME>_CLIENT`",
+                    name.name
+                )
+            },
+        ));
+    }
+    let mut as_itself = false;
+    if matches!(p.peek(), TokenKind::Ident(w) if w == "as") {
+        let as_span = p.bump().span;
+        match p.peek().clone() {
+            TokenKind::Ident(w) if w == "itself" => {
+                let end = p.bump().span;
+                if provider {
+                    return Err(p.err_class_at(
+                        parser::GRANT_BLOCK,
+                        as_span.to(end),
+                        format!(
+                            "`grant provider {}` is used on behalf of a person only, never \
+                             as itself: everything registered at the service would be let \
+                             in with no person. Remove `as itself`, or write a grant for \
+                             the one consumer: `grant <name> as itself {{ … }}`",
+                            name.name
+                        ),
+                    ));
+                }
+                as_itself = true;
+            }
+            other => {
+                return Err(p.err_here(format!(
+                    "expected `itself` after `grant {} as`, found {}",
+                    name.name,
+                    describe(&other)
+                )))
+            }
+        }
+    }
+    let header = if provider {
+        format!("grant provider {}", name.name)
+    } else if as_itself {
+        format!("grant {} as itself", name.name)
+    } else {
+        format!("grant {}", name.name)
+    };
+    match p.peek().clone() {
+        TokenKind::LBrace => {
+            p.bump();
+        }
+        other => {
+            return Err(p.err_here(format!(
+                "expected `{{` after `{header}`, found {}; the ops it grants go in a block, \
+                 one per line: `{header} {{ std.notes.get }}`",
+                describe(&other)
+            )))
+        }
+    }
+    let mut lines: Vec<GrantLine> = Vec::new();
+    loop {
+        let line_start = p.tok().span;
+        if matches!(p.peek(), TokenKind::RBrace) {
+            break;
+        }
+        if let Some(prev) = lines.last() {
+            if prev.span.line == line_start.line {
+                return Err(p.err_class_at(
+                    parser::GRANT_BLOCK,
+                    line_start,
+                    format!(
+                        "`{header}`: one pattern per line; put {} on a line of its own",
+                        describe(p.peek())
+                    ),
+                ));
+            }
+        }
+        let negated = matches!(p.peek(), TokenKind::Bang);
+        if negated {
+            p.bump();
+        }
+        let pattern = match p.peek().clone() {
+            TokenKind::Star => {
+                p.bump();
+                GrantPattern::All
+            }
+            TokenKind::Regex(r) => {
+                p.bump();
+                GrantPattern::Regex(r)
+            }
+            TokenKind::Ident(first) => {
+                p.bump();
+                let mut name = first;
+                while matches!(p.peek(), TokenKind::Dot) {
+                    p.bump();
+                    let s = segment(p, "the rest of an op name")?;
+                    name.push('.');
+                    name.push_str(&s.name);
+                }
+                GrantPattern::Op(name)
+            }
+            TokenKind::Eof => {
+                return Err(p.err_here(format!("`{header}` is not closed; end it with `}}`")))
+            }
+            other => {
+                return Err(p.err_here(format!(
+                    "expected an op name, a `/regex/` or `*` in `{header}`, found {}. A \
+                     line is an op name (`std.notes.get`), a pattern matching whole names \
+                     (`/add.*/`) or every op (`*`), and `!` before it takes ops away",
+                    describe(&other)
+                )))
+            }
+        };
+        let span = line_start.to(p.prev_span());
+        lines.push(GrantLine {
+            negated,
+            pattern,
+            span,
+        });
+    }
+    let end = p.bump().span; // `}`
+    if lines.is_empty() {
+        return Err(p.err_class_at(
+            parser::GRANT_BLOCK,
+            start.to(end),
+            format!(
+                "`{header}` has no line, so it grants nothing. Name the ops it opens, one \
+                 per line, or remove the block"
+            ),
+        ));
+    }
+    if !matches!(p.peek(), TokenKind::Newline | TokenKind::Eof) {
+        return Err(p.err_here(format!(
+            "expected the end of the line after the `}}` of `{header}`, found {}",
+            describe(p.peek())
+        )));
+    }
+    Ok(GrantDecl {
+        name,
+        provider,
+        as_itself,
+        lines,
+        span: start.to(end),
+    })
+}
+
 /// `external <name> [(key: k)] from <schema>.<table> shared { … }`
 /// (ruled 2026-11-15, `external-entities`).
 ///
@@ -1499,6 +1957,18 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
     if matches!(p.peek(), TokenKind::LParen) {
         p.bump();
         let kw = ident(p, "`key`")?;
+        if kw.name == "prev" {
+            return Err(p.err_class_at(
+                parser::EXTERNAL_UNSUPPORTED,
+                kw.span,
+                format!(
+                    "`{}`: `prev` is not a clause an external takes: a translation is \
+                     re-imported on every apply. Remove `prev`; to follow a renamed table, \
+                     change the table after `from`",
+                    name.name
+                ),
+            ));
+        }
         if kw.name != "key" {
             return Err(p.err_at(
                 kw.span,
@@ -2177,6 +2647,24 @@ fn guard_atom(p: &mut Parser) -> Result<GuardAtom, ParseError> {
 /// The block, when present, opens on the same line. Inside braces the lexer
 /// emits no line breaks, so each effect is found by its leading word. A rule
 /// longer than one line is written inside parentheses for the same reason.
+fn edition_decl(p: &mut Parser) -> Result<EditionDecl, ParseError> {
+    let start = p.bump().span; // `edition`
+    match p.peek().clone() {
+        TokenKind::Int(n) if n >= 1 && n <= i128::from(u32::MAX) => {
+            let end = p.bump().span;
+            Ok(EditionDecl {
+                number: n as u32,
+                span: start.to(end),
+            })
+        }
+        other => Err(p.err_here(format!(
+            "expected an edition number after `edition`, found {}; write `edition 1`, \
+             `edition 2`, ... (a source with no edition line is edition 1)",
+            describe(&other)
+        ))),
+    }
+}
+
 fn release_decl(p: &mut Parser) -> Result<ReleaseDecl, ParseError> {
     let start = p.bump().span; // `release`
     match p.peek() {
@@ -2452,6 +2940,8 @@ fn field_decl(p: &mut Parser) -> Result<FieldDecl, ParseError> {
         private: false,
         normalize: None,
         public: false,
+        prev: Vec::new(),
+        prev_span: None,
         span: Span::new(0, 0, 0, 0),
     };
     f.span = f.name.span;
@@ -2511,6 +3001,44 @@ fn field_decl(p: &mut Parser) -> Result<FieldDecl, ParseError> {
                 p.expect(&TokenKind::LParen, "`(` after `normalize`")?;
                 f.normalize = Some(ident(p, "a normalizer name")?);
                 p.expect(&TokenKind::RParen, "`)` to close `normalize`")?;
+            }
+            // `prev(name)`: contextual, like `refinable`. Only with its
+            // parenthesis, so a next line's field named `prev` is not taken.
+            TokenKind::Ident(w) if w == "prev" && matches!(p.peek_at(1), TokenKind::LParen) => {
+                let t = p.bump();
+                if !f.prev.is_empty() {
+                    return Err(
+                        p.err_at(t.span, "`prev(…)` is written twice; list every name in one")
+                    );
+                }
+                p.bump(); // `(`
+                loop {
+                    let first = ident(p, "the field's name in the version serving now")?;
+                    let name = if matches!(p.peek(), TokenKind::Dot) {
+                        p.bump();
+                        let field = ident(p, "the field's name in that entity")?;
+                        PrevName {
+                            entity: Some(first),
+                            field,
+                        }
+                    } else {
+                        PrevName {
+                            entity: None,
+                            field: first,
+                        }
+                    };
+                    f.prev.push(name);
+                    if matches!(p.peek(), TokenKind::Comma) {
+                        p.bump();
+                        continue;
+                    }
+                    break;
+                }
+                let close = p.expect(&TokenKind::RParen, "`)` to close `prev`")?;
+                // With the space before it, so removing it leaves the line
+                // as it was before the mark.
+                let s = t.span.to(close.span);
+                f.prev_span = Some(Span::new(s.start.saturating_sub(1), s.end, s.line, s.col));
             }
             // `refinable` is not reserved — it may only appear here.
             TokenKind::Ident(w) if w == "refinable" => {
@@ -5169,7 +5697,7 @@ mod unbuilt_tests {
     /// implement, which would make a working declaration unusable.
     #[test]
     fn nothing_built_is_in_the_unbuilt_table() {
-        for built in ["domain", "entity", "op", "routine", "trigger"] {
+        for built in ["domain", "entity", "op", "routine", "trigger", "auth"] {
             assert!(
                 !UNBUILT_DECLARATIONS.iter().any(|(k, _)| *k == built),
                 "`{built}` parses and must not be refused as unbuilt"

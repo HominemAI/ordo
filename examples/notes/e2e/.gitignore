@@ -5,3 +5,6 @@ test-results/
 report-screenshots/
 test-results-screenshots/
 .stack-screenshots/
+.stack-ordo-upgrade/
+report-ordo-upgrade/
+test-results-ordo-upgrade/

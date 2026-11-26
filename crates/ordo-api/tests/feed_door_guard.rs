@@ -59,7 +59,12 @@ fn every_feed_kind_asks_the_door_on_each_pass_and_on_a_tick() {
         run.matches("door.admit(").count() >= 2,
         "sync asks the door on every pass and on the tick"
     );
-    assert!(run.contains("recheck_ticker("), "sync has an idle tick");
+    // `door.ticker()` is `recheck_ticker` with the host's nudge
+    // (`LiveStreams::recheck_now`, a pin switch).
+    assert!(
+        run.contains("recheck_ticker(") || run.contains("door.ticker()"),
+        "sync has an idle tick"
+    );
 
     // `?live=1`: before every invalidate and on the tick.
     let live_inner = body(ROUTER, "async fn live_inner(");

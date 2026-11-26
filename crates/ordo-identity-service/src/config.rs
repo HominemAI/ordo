@@ -47,6 +47,10 @@ pub const DEPLOYMENT_ENV: &str = "ORDO_IDENTITY_DEPLOYMENT";
 pub const PROVISIONER_KEY_ENV: &str = "ORDO_IDENTITY_PROVISIONER_KEY";
 pub const INVITE_DAYS_ENV: &str = "ORDO_IDENTITY_INVITE_DAYS";
 pub const TOKEN_SECS_ENV: &str = "ORDO_IDENTITY_TOKEN_SECS";
+/// How long a token one deployment holds for another lives (G2).
+pub const PEER_TOKEN_SECS_ENV: &str = "ORDO_IDENTITY_PEER_TOKEN_SECS";
+/// The longest a consumer's client assertion may live (G2).
+pub const CLIENT_ASSERTION_SECS_ENV: &str = "ORDO_IDENTITY_CLIENT_ASSERTION_SECS";
 pub const SESSION_IDLE_ENV: &str = "ORDO_IDENTITY_SESSION_IDLE_HOURS";
 pub const SESSION_MAX_ENV: &str = "ORDO_IDENTITY_SESSION_MAX_HOURS";
 pub const GUESSES_PER_ADDRESS_ENV: &str = "ORDO_IDENTITY_GUESSES_PER_ADDRESS";
@@ -92,6 +96,24 @@ pub const TOKEN_SECS: Range = Range {
     default: 600,
     min: 60,
     max: 3600,
+    unit: "seconds",
+};
+/// A token one deployment holds to call another, on behalf of a person or
+/// as itself (`plan-federation-grants.md` 5). Short: the consumer asks
+/// again for each burst of calls.
+pub const PEER_TOKEN_SECS: Range = Range {
+    default: 300,
+    min: 30,
+    max: 3600,
+    unit: "seconds",
+};
+/// The longest from now a client assertion's `exp` may be. A consumer
+/// signs one just before it asks, so a short window is enough; each `jti`
+/// is kept until then to refuse it a second time.
+pub const CLIENT_ASSERTION_SECS: Range = Range {
+    default: 120,
+    min: 10,
+    max: 600,
     unit: "seconds",
 };
 /// 7 days. The owner expects 24 or 12 to be common, so the unit is hours.
@@ -189,6 +211,10 @@ pub struct IdentityConfig {
     pub provisioner_key: Option<[u8; 32]>,
     pub invite_days: u64,
     pub token_secs: u64,
+    /// [`PEER_TOKEN_SECS_ENV`].
+    pub peer_token_secs: u64,
+    /// [`CLIENT_ASSERTION_SECS_ENV`].
+    pub client_assertion_secs: u64,
     pub session_idle_hours: u64,
     pub session_max_hours: u64,
     pub key_rotate_days: u64,
@@ -423,6 +449,8 @@ impl IdentityConfig {
             provisioner_key,
             invite_days: whole(get, INVITE_DAYS_ENV, INVITE_DAYS)?,
             token_secs: whole(get, TOKEN_SECS_ENV, TOKEN_SECS)?,
+            peer_token_secs: whole(get, PEER_TOKEN_SECS_ENV, PEER_TOKEN_SECS)?,
+            client_assertion_secs: whole(get, CLIENT_ASSERTION_SECS_ENV, CLIENT_ASSERTION_SECS)?,
             session_idle_hours,
             session_max_hours,
             key_rotate_days: whole(get, KEY_ROTATE_DAYS_ENV, KEY_ROTATE_DAYS)?,
@@ -780,6 +808,8 @@ mod tests {
         assert_eq!(c.session_max_hours, 720);
         assert_eq!(c.invite_days, 7);
         assert_eq!(c.token_secs, 600);
+        assert_eq!(c.peer_token_secs, 300);
+        assert_eq!(c.client_assertion_secs, 120);
         assert_eq!(c.key_rotate_days, 90);
         assert_eq!(c.deployment, "main");
         assert_eq!(c.audience(), "ordo-deployment:main");
@@ -802,6 +832,10 @@ mod tests {
             (INVITE_DAYS_ENV, "31"),
             (TOKEN_SECS_ENV, "59"),
             (TOKEN_SECS_ENV, "3601"),
+            (PEER_TOKEN_SECS_ENV, "29"),
+            (PEER_TOKEN_SECS_ENV, "3601"),
+            (CLIENT_ASSERTION_SECS_ENV, "9"),
+            (CLIENT_ASSERTION_SECS_ENV, "601"),
             (KEY_ROTATE_DAYS_ENV, "soon"),
             (LISTEN_ENV, "nowhere"),
             (DEPLOYMENT_ENV, "Main"),

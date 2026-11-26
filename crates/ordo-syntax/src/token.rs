@@ -219,6 +219,12 @@ pub enum TokenKind {
     Slash,
     Question,
     At,
+    /// `!` before a line of a grant block: the line takes ops away
+    /// (`plan-federation-grants.md` §3). Lexed only inside one.
+    Bang,
+    /// `/regex/` in a grant block, the text between the slashes. Lexed only
+    /// inside one; anywhere else `/` is division.
+    Regex(String),
 
     /// Statement separator: end-of-line at delimiter depth zero (G6).
     Newline,

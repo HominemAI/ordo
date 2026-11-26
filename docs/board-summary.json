@@ -1,6 +1,6 @@
 {
- "date": "2026-11-23",
- "text": "2026-11-23 PR 13 (auth block) is reconciled with bleeding and mergeable; its 9 review fixes are pushed. PR 32 brings bleeding to main so the nightly runs on GitHub runners ([[nightly-cancelled-main-pins-cluster-runners]]). 0.5.2 waits on PR 13. The 2026-11-21 audit found no built task missing; 75 tasks corrected.",
+ "date": "2026-11-24",
+ "text": "2026-11-23 Two plans written. [[close-the-coverage-gap-through-the]]: docs/plan-example-tests.md, for Codex, about 25 to 32 sessions; asks 6 to 10 are its questions. The evolution plans were reviewed against all work since 2026-11-02: 2 new plans, increments added, 16 questions in 3 tasks. Evolution is about 20% built.",
  "tiles": [
   [
    "4,060",
@@ -41,20 +41,34 @@
    "up 0.5.1",
    "Live deployment",
    "ok"
+  ],
+  [
+   "87% lines",
+   "Coverage",
+   ""
+  ],
+  [
+   "32 of 413",
+   "Guarantees via examples",
+   "warn"
   ]
  ],
  "look": [
   {
-   "id": "audit-configuration-in-the-syntax",
-   "why": "PR 13 mergeable"
+   "id": "close-the-coverage-gap-through-the",
+   "why": "5 asks on the test plan"
   },
   {
-   "id": "nightly-cancelled-main-pins-cluster-runners",
-   "why": "PR 32 into main"
+   "id": "evolution-review-federation-sign-in-and-devices",
+   "why": "6 asks"
   },
   {
-   "id": "sdk-usability-review-before-release-3",
-   "why": "3 fixes left"
+   "id": "evolution-review-rollouts-records-and-backfills",
+   "why": "6 asks"
+  },
+  {
+   "id": "evolution-review-release-check-promotion-staging",
+   "why": "4 asks"
   }
  ]
 }

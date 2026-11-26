@@ -518,6 +518,12 @@ pub enum ApplyRefused {
     /// leading with its class (`external_missing`, `external_changed`,
     /// `external_no_grant`) and ending with the fix. Nothing was applied.
     External(Vec<String>),
+    /// A `grant` block cannot be expanded as written
+    /// (`plan-federation-grants.md` §3): a pattern that matches nothing, a
+    /// line that changes nothing, a pattern that is not a regex, or a
+    /// `grant provider` that is not Ordo's identity service. One line each,
+    /// leading with its class and ending with the fix. Nothing was applied.
+    Grant(Vec<String>),
     /// Staging comes before this deployment, and the version renames a
     /// field or an entity: a change only a stored plan staging rehearsed
     /// makes here (`crate::rehearsals`, §3.2). The text names the commands.
@@ -543,6 +549,7 @@ impl ApplyRefused {
             ApplyRefused::NotPromoted(_) => "not_promoted",
             ApplyRefused::RolloutOpen(_) => "rollout_open",
             ApplyRefused::External(_) => "external_refused",
+            ApplyRefused::Grant(_) => "grant_refused",
             ApplyRefused::NotRehearsed(_) => "plan_not_rehearsed",
         }
     }
@@ -563,6 +570,7 @@ impl ApplyRefused {
             | ApplyRefused::NotPromoted(_)
             | ApplyRefused::RolloutOpen(_)
             | ApplyRefused::External(_)
+            | ApplyRefused::Grant(_)
             | ApplyRefused::NotRehearsed(_) => ErrorCode::ApplyRefused,
             ApplyRefused::NotActivated { .. } => ErrorCode::NotActivated,
             ApplyRefused::InProgress => ErrorCode::ApplyInProgress,
@@ -632,6 +640,14 @@ impl std::fmt::Display for ApplyRefused {
                  applied:\n{}",
                 lines.len(),
                 if lines.len() == 1 { "y" } else { "ies" },
+                lines.join("\n")
+            ),
+            ApplyRefused::Grant(lines) => write!(
+                f,
+                "grant_refused: {} problem{} in the program's `grant` blocks, so nothing was \
+                 applied:\n{}",
+                lines.len(),
+                if lines.len() == 1 { "" } else { "s" },
                 lines.join("\n")
             ),
             ApplyRefused::Internal(e) => write!(f, "{e}"),
@@ -891,6 +907,18 @@ async fn sequence(
     }
     notes.extend(external.display_notes());
 
+    // **The grants to other deployments, before anything is written**
+    // (`plan-federation-grants.md` §3): each block expanded against this
+    // program's ops, refused by name when a line is wrong, and its list and
+    // its changes against the serving version shown.
+    let grants = crate::consumer_grants::plan(pool, &program.schema, &program.doc)
+        .await
+        .map_err(ApplyRefused::Internal)?;
+    if !grants.refusals.is_empty() {
+        return Err(ApplyRefused::Grant(grants.refusal_lines()));
+    }
+    notes.extend(grants.notes.iter().cloned());
+
     // The schema, before the artifact: a first apply creates it, a match
     // proceeds, and a database that is behind stores but does not activate.
     let mut behind: Vec<(String, String)> = Vec::new();
@@ -1032,6 +1060,11 @@ async fn sequence(
         Ok(versions::Applied::EditionMoved(_)) => Stored::EditionMoved,
         Err(e) => return Err(ApplyRefused::Internal(e.to_string())),
     };
+    // The expanded grants, with the version they were expanded for. The door
+    // reads the active version's (step G3).
+    crate::consumer_grants::store(pool, &program.version, &grants.expanded)
+        .await
+        .map_err(|e| ApplyRefused::Internal(format!("storing the expanded grants: {e}")))?;
     let ordinal = Versions::on(pool)
         .ordinal_of(&program.version)
         .await
@@ -1809,10 +1842,16 @@ pub async fn preview(pool: &Pool, source: &str) -> Result<Preview, ApplyRefused>
         .collect();
     let safe_changes = sa::safe_changes_enabled();
     notes.extend(plan.external.display_notes());
+    let grants = crate::consumer_grants::plan(pool, &program.schema, &program.doc)
+        .await
+        .map_err(ApplyRefused::Internal)?;
+    notes.extend(grants.notes.iter().cloned());
     let would = if !broken.is_empty() {
         Would::Refuse(ApplyRefused::Broken { ops: broken })
     } else if !plan.external.problems.is_empty() {
         Would::Refuse(ApplyRefused::External(plan.external.refusals()))
+    } else if !grants.refusals.is_empty() {
+        Would::Refuse(ApplyRefused::Grant(grants.refusal_lines()))
     } else {
         match sa::schema_state(pool, &program.schema)
             .await
@@ -2494,6 +2533,7 @@ mod tests {
                 next: Some("0.2.1".into()),
             },
             ApplyRefused::Provenance("label".into()),
+            ApplyRefused::Grant(vec!["grant_matches_nothing in `grant v`".into()]),
         ];
         for r in &all {
             assert!(!r.class().is_empty());

@@ -448,6 +448,11 @@ pub struct Schema {
     /// may read this one, and the tables each may read. Each table is one of
     /// this program's own entities.
     pub readers: Vec<Reader>,
+    /// The program's `grant` blocks (`plan-federation-grants.md` §3), as
+    /// written. Expanded against the program's ops at apply
+    /// (`ordo_host::consumer_grants`); the door checks the expansion from
+    /// step G3.
+    pub grants: Vec<ordo_syntax::GrantDecl>,
     /// The program's `prev` marks (`plan-syntax-additions.md` §5), in
     /// declaration order: each entity's, then its fields'. Read by the plan
     /// ([`prev::check`]), never by the DDL or an op.
@@ -1160,6 +1165,7 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
                 tables: r.tables.iter().map(|t| t.name.clone()).collect(),
             })
             .collect(),
+        grants: program.grants.clone(),
         prev: prev_marks(program),
     };
     // Every table a `reader` line names is one of this program's own
@@ -2351,6 +2357,7 @@ pub fn acl_admin_ops(schema: &Schema) -> Program {
         externals: Vec::new(),
         peers: Vec::new(),
         readers: Vec::new(),
+        grants: Vec::new(),
     }
 }
 
@@ -2936,6 +2943,7 @@ pub fn std_ops(schema: &Schema) -> Program {
         externals: Vec::new(),
         peers: Vec::new(),
         readers: Vec::new(),
+        grants: Vec::new(),
     }
 }
 

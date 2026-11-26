@@ -17,6 +17,9 @@ axum = "0.8"
 # A staging clone travels as base64 inside the door's JSON (`clones.rs`).
 base64 = "0.22"
 futures = "0.3"
+# `grant` block patterns (`plan-federation-grants.md` §3): linear time, so a
+# pattern in a definition file cannot stall an apply.
+regex = "1"
 ordo-api = { path = "../ordo-api" }
 ordo-blob = { path = "../ordo-blob" }
 ordo-commandlog = { path = "../ordo-commandlog" }

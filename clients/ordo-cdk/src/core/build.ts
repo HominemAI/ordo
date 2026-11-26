@@ -29,6 +29,7 @@ import type {
   ExternalNode,
   PeerNode,
   ReaderNode,
+  GrantNode,
   FieldKindNode,
   FieldNode,
   GuardClauseNode,
@@ -902,6 +903,80 @@ export function reader(name: string, tables: readonly (string | Entity)[]): Read
   return { kind: 'reader', name, tables: names };
 }
 
+/** What `grant()` and `grantProvider()` take beside the lines. */
+export interface GrantOptions {
+  /** `as itself`: calls carrying no person are allowed too. */
+  readonly asItself?: boolean;
+}
+
+/** One line of a grant: an op name, `'/regex/'`, `'*'`, each optionally after `!`. */
+function grantLine(header: string, line: string | Op): string {
+  const text = typeof line === 'string' ? line.trim() : line.name;
+  const body = text.startsWith('!') ? text.slice(1) : text;
+  const ok =
+    body === '*' ||
+    (body.length > 2 && body.startsWith('/') && body.endsWith('/')) ||
+    /^[a-z][A-Za-z0-9]*(\.[A-Za-z][A-Za-z0-9]*)*$/.test(body);
+  if (!ok) {
+    throw new Error(
+      `grant_block: \`${header}\`: \`${text}\` is not a line. A line is an op name ` +
+        "('std.notes.get'), a pattern matching whole names ('/add.*/') or every op ('*'), " +
+        "and '!' before it takes ops away",
+    );
+  }
+  return text;
+}
+
+function grantNode(
+  name: string,
+  provider: boolean,
+  asItself: boolean,
+  lines: readonly (string | Op)[],
+): GrantNode {
+  const header = provider
+    ? `grant provider ${name}`
+    : asItself
+      ? `grant ${name} as itself`
+      : `grant ${name}`;
+  if (!/^[a-z][a-z0-9_]*$/.test(name)) {
+    throw new Error(
+      `grant_block: \`${header}\`: a grant name is lowercase letters, digits and underscores, ` +
+        'starting with a letter. It is upper-cased into ORDO_CONSUMER_<NAME>_CLIENT',
+    );
+  }
+  if (lines.length === 0) {
+    throw new Error(
+      `grant_block: \`${header}\` has no line, so it grants nothing. Name the ops it opens`,
+    );
+  }
+  return { kind: 'grant', name, provider, asItself, lines: lines.map((l) => grantLine(header, l)) };
+}
+
+/**
+ * `grant note_viewer { … }`: the ops the consumer `note_viewer` may call
+ * through this deployment's door, on behalf of a person (or as itself with
+ * `{ asItself: true }`). The consumer's id is the setting
+ * `ORDO_CONSUMER_NOTE_VIEWER_CLIENT`, never the file. Each line is an op (or
+ * its name), `'/regex/'`, or `'*'`, optionally after `'!'`; the last line
+ * that matches an op decides. Expanded against the ops at apply; the door
+ * checks it from step G3.
+ */
+export function grant(
+  name: string,
+  lines: readonly (string | Op)[],
+  options: GrantOptions = {},
+): GrantNode {
+  return grantNode(name, false, options.asItself === true, lines);
+}
+
+/**
+ * `grant provider hominem { … }`: every deployment registered at the identity
+ * service the sign-in connection `hominem` reaches, on behalf of a person only.
+ */
+export function grantProvider(name: string, lines: readonly (string | Op)[]): GrantNode {
+  return grantNode(name, true, false, lines);
+}
+
 /** The platform's own entities, which a reader line may name without declaring. */
 const PLATFORM_ENTITIES = new Set(['members', 'groupMembers']);
 
@@ -1208,6 +1283,7 @@ export function synth(...decls: Synthesizable[]): string {
   checkExternalRefs(nodes);
   checkPeers(nodes);
   checkReaders(nodes);
+  checkGrants(nodes);
   const out = nodes.map(printDeclaration);
   return out.join('\n\n') + '\n';
 }
@@ -1245,6 +1321,21 @@ function checkPeers(nodes: Declaration[]): void {
           `external(name, fields, { peer: ${p}, table: '…', shared: true })`,
       );
     }
+  }
+}
+
+/** Each grant is passed once. What its lines match is decided at apply. */
+function checkGrants(nodes: Declaration[]): void {
+  const names = new Set<string>();
+  for (const n of nodes) {
+    if (n.kind !== 'grant') continue;
+    const key = `${n.provider ? 'provider ' : ''}${n.name}`;
+    if (names.has(key)) {
+      throw new Error(
+        `grant_block: \`grant ${key}\` is passed twice. Pass one grant with every line`,
+      );
+    }
+    names.add(key);
   }
 }
 

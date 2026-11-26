@@ -67,6 +67,8 @@ const IMPORTABLE: &[&str] = &[
     "external",
     "peer",
     "reader",
+    "grant",
+    "grantProvider",
     "f",
     "fn",
     "g",
@@ -111,6 +113,8 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
     let mut needs_key = false;
     let needs_peer = !program.peers.is_empty();
     let needs_reader = !program.readers.is_empty();
+    let needs_grant = program.grants.iter().any(|g| !g.provider);
+    let needs_grant_provider = program.grants.iter().any(|g| g.provider);
 
     if let Some(d) = &program.domain {
         synth_args.push(match &d.version {
@@ -140,6 +144,24 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
             .collect::<Vec<_>>()
             .join(", ");
         synth_args.push(format!("reader({}, [{tables}])", ts::str_lit(&r.name.name)));
+    }
+    // A grant's lines are strings, as written; what they match is the
+    // apply's question.
+    for g in &program.grants {
+        let lines = g
+            .lines
+            .iter()
+            .map(|l| ts::str_lit(&l.text()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let name = ts::str_lit(&g.name.name);
+        synth_args.push(if g.provider {
+            format!("grantProvider({name}, [{lines}])")
+        } else if g.as_itself {
+            format!("grant({name}, [{lines}], {{ asItself: true }})")
+        } else {
+            format!("grant({name}, [{lines}])")
+        });
     }
     for ent in &program.entities {
         let bind = e.bind(&ent.name.name);
@@ -184,6 +206,10 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
                 needs_peer
             } else if *n == "reader" {
                 needs_reader
+            } else if *n == "grant" {
+                needs_grant
+            } else if *n == "grantProvider" {
+                needs_grant_provider
             } else {
                 mentioned
             }

@@ -127,6 +127,26 @@ fn parse_program_noting(src: &str) -> Result<(Program, Vec<crate::Span>), ParseE
                 }
                 prog.readers.push(reader);
             }
+            // `grant` is contextual the same way (`plan-federation-grants.md`
+            // §3): a declaration head only at the start of a top-level line.
+            TokenKind::Ident(w) if w == "grant" => {
+                let g = grant_decl(&mut p)?;
+                if prog
+                    .grants
+                    .iter()
+                    .any(|q| q.name.name == g.name.name && q.provider == g.provider)
+                {
+                    return Err(p.err_class_at(
+                        parser::GRANT_BLOCK,
+                        g.span,
+                        format!(
+                            "`{}` is declared twice. Keep one block and put every line in it",
+                            g.header()
+                        ),
+                    ));
+                }
+                prog.grants.push(g);
+            }
             // `edition` is contextual the same way (`plan-versions.md`
             // §2.6): a declaration head only here.
             TokenKind::Ident(w) if w == "edition" => {
@@ -1624,6 +1644,192 @@ fn reader_decl(p: &mut Parser) -> Result<ReaderDecl, ParseError> {
     }
     let span = start.to(tables.last().map(|t| t.span).unwrap_or(name.span));
     Ok(ReaderDecl { name, tables, span })
+}
+
+/// `grant <name> [as itself] { … }` or `grant provider <name> { … }`
+/// (`plan-federation-grants.md` §3).
+///
+/// The block holds op lines only: an exact op name, a `/regex/`, or `*`,
+/// each optionally after `!`. One per source line. What a line matches is
+/// decided at apply, against the program's ops; here it is only read.
+fn grant_decl(p: &mut Parser) -> Result<GrantDecl, ParseError> {
+    let start = p.bump().span; // `grant`
+    let provider = matches!(p.peek(), TokenKind::Ident(w) if w == "provider")
+        && matches!(p.peek_at(1), TokenKind::Ident(_));
+    if provider {
+        p.bump();
+    }
+    let name = ident(
+        p,
+        if provider {
+            "an identity service connection name"
+        } else {
+            "a grant name"
+        },
+    )?;
+    let ok = name
+        .name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase())
+        && name
+            .name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !ok {
+        return Err(p.err_class_at(
+            parser::GRANT_BLOCK,
+            name.span,
+            if provider {
+                format!(
+                    "`grant provider {}`: a connection name is lowercase letters, digits and \
+                     underscores, starting with a letter, as in `ORDO_AUTH_<NAME>_KIND`",
+                    name.name
+                )
+            } else {
+                format!(
+                    "`grant {}`: a grant name is lowercase letters, digits and underscores, \
+                     starting with a letter, such as `grant note_viewer`. It is upper-cased \
+                     into the setting `ORDO_CONSUMER_<NAME>_CLIENT`",
+                    name.name
+                )
+            },
+        ));
+    }
+    let mut as_itself = false;
+    if matches!(p.peek(), TokenKind::Ident(w) if w == "as") {
+        let as_span = p.bump().span;
+        match p.peek().clone() {
+            TokenKind::Ident(w) if w == "itself" => {
+                let end = p.bump().span;
+                if provider {
+                    return Err(p.err_class_at(
+                        parser::GRANT_BLOCK,
+                        as_span.to(end),
+                        format!(
+                            "`grant provider {}` is used on behalf of a person only, never \
+                             as itself: everything registered at the service would be let \
+                             in with no person. Remove `as itself`, or write a grant for \
+                             the one consumer: `grant <name> as itself {{ … }}`",
+                            name.name
+                        ),
+                    ));
+                }
+                as_itself = true;
+            }
+            other => {
+                return Err(p.err_here(format!(
+                    "expected `itself` after `grant {} as`, found {}",
+                    name.name,
+                    describe(&other)
+                )))
+            }
+        }
+    }
+    let header = if provider {
+        format!("grant provider {}", name.name)
+    } else if as_itself {
+        format!("grant {} as itself", name.name)
+    } else {
+        format!("grant {}", name.name)
+    };
+    match p.peek().clone() {
+        TokenKind::LBrace => {
+            p.bump();
+        }
+        other => {
+            return Err(p.err_here(format!(
+                "expected `{{` after `{header}`, found {}; the ops it grants go in a block, \
+                 one per line: `{header} {{ std.notes.get }}`",
+                describe(&other)
+            )))
+        }
+    }
+    let mut lines: Vec<GrantLine> = Vec::new();
+    loop {
+        let line_start = p.tok().span;
+        if matches!(p.peek(), TokenKind::RBrace) {
+            break;
+        }
+        if let Some(prev) = lines.last() {
+            if prev.span.line == line_start.line {
+                return Err(p.err_class_at(
+                    parser::GRANT_BLOCK,
+                    line_start,
+                    format!(
+                        "`{header}`: one pattern per line; put {} on a line of its own",
+                        describe(p.peek())
+                    ),
+                ));
+            }
+        }
+        let negated = matches!(p.peek(), TokenKind::Bang);
+        if negated {
+            p.bump();
+        }
+        let pattern = match p.peek().clone() {
+            TokenKind::Star => {
+                p.bump();
+                GrantPattern::All
+            }
+            TokenKind::Regex(r) => {
+                p.bump();
+                GrantPattern::Regex(r)
+            }
+            TokenKind::Ident(first) => {
+                p.bump();
+                let mut name = first;
+                while matches!(p.peek(), TokenKind::Dot) {
+                    p.bump();
+                    let s = segment(p, "the rest of an op name")?;
+                    name.push('.');
+                    name.push_str(&s.name);
+                }
+                GrantPattern::Op(name)
+            }
+            TokenKind::Eof => {
+                return Err(p.err_here(format!("`{header}` is not closed; end it with `}}`")))
+            }
+            other => {
+                return Err(p.err_here(format!(
+                    "expected an op name, a `/regex/` or `*` in `{header}`, found {}. A \
+                     line is an op name (`std.notes.get`), a pattern matching whole names \
+                     (`/add.*/`) or every op (`*`), and `!` before it takes ops away",
+                    describe(&other)
+                )))
+            }
+        };
+        let span = line_start.to(p.prev_span());
+        lines.push(GrantLine {
+            negated,
+            pattern,
+            span,
+        });
+    }
+    let end = p.bump().span; // `}`
+    if lines.is_empty() {
+        return Err(p.err_class_at(
+            parser::GRANT_BLOCK,
+            start.to(end),
+            format!(
+                "`{header}` has no line, so it grants nothing. Name the ops it opens, one \
+                 per line, or remove the block"
+            ),
+        ));
+    }
+    if !matches!(p.peek(), TokenKind::Newline | TokenKind::Eof) {
+        return Err(p.err_here(format!(
+            "expected the end of the line after the `}}` of `{header}`, found {}",
+            describe(p.peek())
+        )));
+    }
+    Ok(GrantDecl {
+        name,
+        provider,
+        as_itself,
+        lines,
+        span: start.to(end),
+    })
 }
 
 /// `external <name> [(key: k)] from <schema>.<table> shared { … }`

@@ -52,6 +52,8 @@ export {
   domain,
   entity,
   external,
+  grant,
+  grantProvider,
   key,
   minus,
   named,
@@ -65,6 +67,7 @@ export {
 } from './core/build.js';
 export type {
   EntityOptions,
+  GrantOptions,
   ExternalFields,
   ExternalOptions,
   ParamsOf,

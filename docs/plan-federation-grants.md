@@ -142,7 +142,7 @@ peer notes {
 
 | Step | What | Size |
 |---|---|---|
-| G1 | `grant` blocks: parser, expansion at apply, plan output, refusals | M |
+| G1 | `grant` blocks: parser, expansion at apply, plan output, refusals. **Built** (branch `fed-g1-grant-blocks`): the parser and the CDK's `grant()` and `grantProvider()`; `ordo_host::consumer_grants` expands each block at plan and apply, stores the lists in `$consumergrant` by version, and shows each list, its changes and `ORDO_CONSUMER_<NAME>_CLIENT`; the 4 refusals are `grant_refused`. A provider is the identity service when its OIDC issuer is `ORDO_IDENTITY_ORIGIN`. Not enforced on the door (G3). Tests: `ordo-syntax/tests/grant.rs`, `ordo-host/tests/consumer_grants.rs` (notes v2 with a `grant note_viewer` block), `ordo-cdk/test/grant.test.ts`, the isomorphism corpus | M |
 | G2 | The identity service: consumer credentials, token exchange with the actor claim | M |
 | G3 | The holder's door: grant check on every call, on behalf or as itself, the loop check, audit | M |
 | G4 | The consumer: `peer` block checked against the holder at apply; the holder records uses and names breaks | M |

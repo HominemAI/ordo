@@ -562,6 +562,8 @@ async fn harness() -> Harness {
         second_step: Default::default(),
         console_home: Default::default(),
         deployment: Default::default(),
+        clones: Default::default(),
+        peer: Default::default(),
     });
 
     // S4: the same recorder the door denies into, drained on a short tick

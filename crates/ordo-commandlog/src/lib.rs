@@ -22,12 +22,13 @@ pub mod value;
 mod tests;
 
 pub use chain::{
-    decode_group, encode_group, hash_group, verify_chain_from, ChainHash, ChainedGroup,
-    DecodeError, TamperAt, TamperKind,
+    backfill_row_hash, decode_group, encode_group, hash_group, verify_chain_from, ChainHash,
+    ChainedGroup, DecodeError, TamperAt, TamperKind,
 };
 pub use command::{
-    Actor, Command, CommandGroup, CommandId, CommandKind, CorrelationId, GroupShapeError,
-    RestoreMarker, RestoreSource, SpaceId, Timestamp, RESTORE_COMPONENT,
+    Actor, BackfillAudit, BackfillRecord, Command, CommandGroup, CommandId, CommandKind,
+    CorrelationId, GroupShapeError, RestoreMarker, RestoreSource, SpaceId, Timestamp,
+    BACKFILL_COMPONENT, RESTORE_COMPONENT,
 };
 pub use sign::{CheckpointVerifier, Ed25519Signer, SignerError};
 pub use store::{

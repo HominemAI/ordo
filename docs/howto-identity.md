@@ -656,12 +656,64 @@ past it the app is sent `temporarily_unavailable`. Spent and expired
 codes are deleted each minute. An ID token is not a deployment token: the
 door, the console and the service's admin routes refuse it.
 
+### Let one deployment call another
+
+One Ordo deployment, the consumer, may call another's door, the holder
+(`plan-federation-grants.md`). The service says who is calling. The
+holder's own grant decides what they may do. Today the service side is
+built; the door's check and the host's side come next.
+
+The consumer proves itself with its **consumer key**. It is Ed25519,
+derived from the consumer's master key and its handle, so nobody makes
+or stores a private key. Register only its public half, 43 base64url
+characters:
+
+```
+ordo-identity-service deployment consumer-key notes <public key>
+```
+
+Or give it at registration, `deployment add notes ... --consumer-key
+<public key>`, or `"consumerKey"` in `POST /deployments`. An admin of the
+deployment may also set it with the deployment token they hold, `POST
+/deployments/notes/consumer-key` with `{"consumerKey": "<public key>"}`.
+Setting a new key rotates it. `--none`, or `null`, removes it, and the
+deployment can then call no one. `deployment list` shows which have one.
+
+At `POST /oidc/token`, with a client assertion
+(`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer`,
+an EdDSA JWT with `iss` and `sub` the handle, `aud` the token endpoint, a
+`jti` used once, and an `exp` at most
+`ORDO_IDENTITY_CLIENT_ASSERTION_SECS` away, 120 by default):
+
+- **On behalf of a person.**
+  `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, the
+  person's ID token the service issued to the consumer as
+  `subject_token`, `subject_token_type=urn:ietf:params:oauth:token-type:id_token`,
+  and `audience=<holder handle>`. The token says `sub` the person, `aud`
+  `ordo-peer:<holder>`, `act.sub` the consumer.
+- **As itself.** `grant_type=client_credentials` and `audience`. The
+  token says `sub` the consumer and `kind` `client`. Its `typ`,
+  `ordo-client+jwt`, is not a person's.
+
+Both live `ORDO_IDENTITY_PEER_TOKEN_SECS`, 300 by default. A token on
+behalf of a person never outlives the person's ID token. Each try by a
+consumer that proved itself is in the audit log, `oidc.exchange` or
+`oidc.client-token`.
+
+| Refusal | Means | Fix |
+|---|---|---|
+| `invalid_client` | no assertion, or not signed by the registered key, expired, used before, for another endpoint, or no key registered | register the key; sign a fresh assertion for each request |
+| `invalid_target` | `audience` is not a live registered deployment, or is the consumer | name the holder by its handle (`deployment list`) |
+| `invalid_grant` | the person's token is expired, foreign, not an ID token, issued to another app, or the person left the consumer | sign the person in again |
+
 ## What it does not do
 
 - Roles beyond `admin`, and `member` for open sign-up, which holds no
   token.
 - Refresh tokens, a userinfo endpoint, or signing out of every app at
-  once. An app keeps its own session after sign-in.
+  once. An app keeps its own session after sign-in. So a consumer acts
+  on behalf of a person only while it holds their ID token, which lives
+  `ORDO_IDENTITY_TOKEN_SECS`.
 - Sign-in through outside providers for deployment people.
 - Sending invite links by mail. You send the link.
 - More than one copy of the service.

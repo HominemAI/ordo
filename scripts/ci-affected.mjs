@@ -62,7 +62,9 @@ export const CLIENT_JOBS = ['ordo-sdk', 'ordo-cdk', 'ordo-react'];
 export const EXAMPLE_JOBS = ['notes', 'notes-v2', 'note-viewer', 'teamspace', 'shopfront'];
 
 // What each e2e suite builds (its `cargo build -p` line).
-const NOTES_E2E_BUILDS = ['ordo-host', 'ordo-cli'];
+// The notes e2e runs the identity service too: its developer signs in with
+// `ordo login` (tests/evolve).
+const NOTES_E2E_BUILDS = ['ordo-host', 'ordo-cli', 'ordo-identity-service'];
 const CONSOLE_E2E_BUILDS = ['ordo-console', 'ordo-cli', 'ordo-identity-service', 'ordo-supervisor'];
 const IDENTITY_E2E_BUILDS = ['ordo-identity-service'];
 // The federation e2e (examples/note-viewer/e2e): two doors, the CLI, and the
@@ -351,9 +353,13 @@ export function affected({ files, packages, readersOf = () => [], io = { read: (
     if ((m = f.match(/^examples\/([^/]+)\//))) {
       const app = m[1];
       if (EXAMPLE_JOBS.includes(app)) examples.add(app);
-      if (app === 'notes' || app === 'notes-v2') flags.notesE2e = true;
+      // notes v3 has no page and no job of its own: both e2e suites apply it
+      // over a running notes v2 (plan-versions.md, increment 7a).
+      if (app === 'notes' || app === 'notes-v2' || app === 'notes-v3') flags.notesE2e = true;
       // The federation e2e runs notes v2 beside note_viewer.
-      if (app === 'notes-v2' || app === 'note-viewer') flags.federationE2e = true;
+      if (app === 'notes-v2' || app === 'notes-v3' || app === 'note-viewer') flags.federationE2e = true;
+      // The developer's sign-in, shared by both suites.
+      if (app === 'e2e-shared') flags.notesE2e = flags.federationE2e = true;
       reader(f);
       continue;
     }

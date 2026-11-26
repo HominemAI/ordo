@@ -152,6 +152,7 @@ impl Ids {
                     client_origins: Vec::new(),
                     return_urls: vec![format!("{PUBLIC}/auth/callback/{connection}")],
                     sign_up: SignUp::Open,
+                    consumer_key: None,
                 },
             )
             .await

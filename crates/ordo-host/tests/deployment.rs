@@ -725,6 +725,8 @@ async fn deep_health_counts_own_tenants() {
         second_step: Default::default(),
         console_home: Default::default(),
         deployment: Default::default(),
+        clones: Default::default(),
+        peer: Default::default(),
     });
     node.platform.access = access.clone();
     node.api.access = access.clone();
@@ -841,6 +843,8 @@ async fn deep_health_reads_back_self_serve_and_no_claim_code() {
         second_step: Default::default(),
         console_home: Default::default(),
         deployment: Default::default(),
+        clones: Default::default(),
+        peer: Default::default(),
     });
     node.platform.access = access.clone();
     node.api.access = access.clone();
@@ -949,6 +953,8 @@ async fn health_deep_is_access_controlled() {
         second_step: Default::default(),
         console_home: Default::default(),
         deployment: Default::default(),
+        clones: Default::default(),
+        peer: Default::default(),
     });
     node.platform.access = access.clone();
     node.api.access = access.clone();
@@ -1228,6 +1234,8 @@ async fn a_platform_op_is_not_authorized_by_a_caller_named_space() {
         second_step: Default::default(),
         console_home: Default::default(),
         deployment: Default::default(),
+        clones: Default::default(),
+        peer: Default::default(),
     });
     node.platform.access = access.clone();
     node.api.access = access;
@@ -1325,6 +1333,8 @@ async fn metrics_denies_an_owner_of_another_space() {
         second_step: Default::default(),
         console_home: Default::default(),
         deployment: Default::default(),
+        clones: Default::default(),
+        peer: Default::default(),
     });
     node.platform.access = access.clone();
     node.api.access = access;
@@ -1393,6 +1403,8 @@ async fn the_alerts_route_answers_the_deployment_owner() {
         second_step: Default::default(),
         console_home: Default::default(),
         deployment: Default::default(),
+        clones: Default::default(),
+        peer: Default::default(),
     });
     node.platform.access = access.clone();
     node.api.access = access;
@@ -2282,6 +2294,7 @@ async fn a_prune_moves_the_pins_floor_though_the_head_stands_still() {
                 at: Timestamp(1_000 + i),
             }],
             owner_administration: false,
+            backfill: None,
             restored_unverified: false,
             restore: None,
         })
@@ -2873,6 +2886,8 @@ async fn the_events_route_answers_a_space_owner_for_their_own_space_only() {
         second_step: Default::default(),
         console_home: Default::default(),
         deployment: Default::default(),
+        clones: Default::default(),
+        peer: Default::default(),
     });
     node.platform.access = access.clone();
     node.api.access = access;
@@ -3013,6 +3028,8 @@ async fn the_events_route_refuses_the_deployment_scope_and_malformed_ids() {
         second_step: Default::default(),
         console_home: Default::default(),
         deployment: Default::default(),
+        clones: Default::default(),
+        peer: Default::default(),
     });
     node.platform.access = access.clone();
     node.api.access = access;
@@ -3115,6 +3132,8 @@ async fn the_events_route_refuses_the_deployment_scope_and_malformed_ids() {
         second_step: Default::default(),
         console_home: Default::default(),
         deployment: Default::default(),
+        clones: Default::default(),
+        peer: Default::default(),
     });
     node.platform.access = access.clone();
     node.api.access = access;
@@ -3191,6 +3210,8 @@ async fn the_events_route_refuses_rather_than_reporting_a_stream_it_cannot_locat
         second_step: Default::default(),
         console_home: Default::default(),
         deployment: Default::default(),
+        clones: Default::default(),
+        peer: Default::default(),
     });
     node.platform.access = access.clone();
     node.api.access = access;

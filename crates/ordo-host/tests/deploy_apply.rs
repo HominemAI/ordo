@@ -193,6 +193,7 @@ async fn harness(db: &str) -> Harness {
     })
     .await
     .expect("target pool");
+    all_at_once(&target).await;
 
     let grants = Arc::new(PgGrantRegistry::new(dir_pool.clone()));
     grants.ensure_table().await.expect("platform table");
@@ -589,7 +590,7 @@ async fn a_gate_blocking_program_is_stored_and_refused_by_name() {
 
     // V3 makes a column required, so the gate would refuse an artifact of
     // it, and it is not a safe change `ordo apply` makes itself.
-    // `ordo migrate --apply` is what moves it.
+    // `ordo evolve --run` is what moves it.
     let (status, body) = call(&h.state, HOME, &token(DEP_OWNER), V3, true).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(code(&body), "not_activated");
@@ -1231,4 +1232,20 @@ async fn an_apply_through_the_door_leaves_a_deploy_event() {
         events[0].1.contains(&format!("by={DEP_OWNER}")),
         "{events:?}"
     );
+}
+
+/// `rollout.strategy` `all` on `pool`. With it unset, a deployment that is
+/// not dev rolls an apply out a batch at a time (ruled 2026-11-25); these
+/// tests apply and expect every tenant on the new version at once.
+async fn all_at_once(pool: &ordo_exec::Pool) {
+    ordo_host::rollouts::Rollouts::on(pool)
+        .set_setting(
+            "rollout.strategy",
+            Some("all"),
+            "test",
+            "every tenant at once",
+            0,
+        )
+        .await
+        .expect("rollout.strategy all");
 }

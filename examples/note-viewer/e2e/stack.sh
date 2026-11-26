@@ -13,7 +13,10 @@
 #   2. HTTPS in front (tls-front.mjs): an OIDC issuer and an app's callback
 #      must be https, and everything here serves plain http on loopback.
 #   3. The identity service, with `notes` and `viewer` registered, each with
-#      open sign-up and its callback as a return URL.
+#      open sign-up and its callback as a return URL. Its own deployment,
+#      `main`, holds the deployment's people: the developer joins by its
+#      first invite and signs the `ordo` command in (tests/developer.ts).
+#      Both doors take their tokens (ORDO_IDENTITY_URL).
 #   4. notes v2 (examples/notes-v2) as role `notes_app` in schema `notes`.
 #      Its people sign in through the identity service (`accounts`). The
 #      deployment's own space admits anyone who signs in, as an editor.
@@ -158,6 +161,7 @@ id_url="host=$pg_host port=$pg_port user=$pg_user dbname=$id_db"
 id_env() {
   exec env ORDO_IDENTITY_DATABASE_URL="$id_url" ORDO_IDENTITY_ORIGIN="$issuer" \
     ORDO_IDENTITY_LISTEN="127.0.0.1:$id_port" ORDO_IDENTITY_DATA_DIR="$state/identity" \
+    ORDO_IDENTITY_DEPLOYMENT=main \
     ORDO_IDENTITY_SIGN_UPS_PER_ADDRESS=100 "$@"
 }
 # Registered before the service starts: a running service reads a new
@@ -176,7 +180,9 @@ wait_for "the identity service" "$issuer/health/ready" "$last"
 # ── 4. and 5. The two doors ────────────────────────────────────────────────
 # What both doors share. Each sets its own role, schema, port and client id.
 # A public answer over an external is held 2 seconds here (60 by default), so
-# a note written in notes v2 shows on note_viewer's public list at once.
+# a note written in notes v2 shows on note_viewer's public list at once. The
+# external check runs every 2 seconds (300 by default), so a column notes
+# stops writing holds the viewer at once (tests/orphans).
 door_env() { # role, schema, port, public, page, client id, then the command
   local role=$1 schema=$2 port=$3 public=$4 page=$5 client=$6
   shift 6
@@ -195,7 +201,9 @@ door_env() { # role, schema, port, public, page, client id, then the command
     ORDO_AUTH_PROVIDER_CA_FILE="$ca" ORDO_EGRESS_PRIVATE_HOSTS=localhost \
     ORDO_BLOB_STORE="fs:$state/blobs-$schema" ORDO_DEV_UNSAFE_BLOB_STORE=1 \
     ORDO_READER_NOTE_VIEWER_ROLE=viewer_app ORDO_PEER_NOTES_SCHEMA=notes \
-    ORDO_PUBLIC_CDN_S_MAXAGE=2 \
+    ORDO_PUBLIC_CDN_S_MAXAGE=2 ORDO_EXTERNAL_WATCH_SECS=2 \
+    ORDO_IDENTITY_URL="http://127.0.0.1:$id_port" ORDO_IDENTITY_ORIGIN="$issuer" \
+    ORDO_IDENTITY_DEPLOYMENT=main \
     RUST_LOG="${RUST_LOG:-info}" "$@"
 }
 notes_env() { door_env notes_app notes "$notes_port" "$notes_public" "$notes_page" notes "$@"; }
@@ -211,6 +219,21 @@ admit() { # schema, role
       ON CONFLICT (\"space\") DO UPDATE SET \"open\" = true, \"default_role\" = '$2';"
 }
 
+# With `rollout.strategy` unset, a deployment that is not dev rolls each
+# apply out a batch at a time (owner, 2026-11-25). These two are
+# production, and a test here applies another version and expects every
+# tenant on it at once, so each sets `all`, as `ordo rollout set
+# rollout.strategy all` does.
+all_at_once() { # schema, its owner
+  as_admin "$db" "SET ROLE $2; SET search_path TO $1;
+    CREATE TABLE IF NOT EXISTS \"\$version_settings\" (\"seq\" bigserial PRIMARY KEY,
+      \"setting\" text NOT NULL, \"value\" text NULL, \"actor\" text NOT NULL,
+      \"reason\" text NOT NULL, \"at\" bigint NOT NULL);
+    INSERT INTO \"\$version_settings\" (\"setting\", \"value\", \"actor\", \"reason\", \"at\")
+      VALUES ('rollout.strategy', 'all', 'fed-e2e', 'the tests apply every tenant at once',
+      extract(epoch from now())::bigint);"
+}
+
 notes_env "$host" >"$state/notes.log" 2>&1 &
 last=$!
 pids="$pids $last"
@@ -218,6 +241,10 @@ wait_for "notes v2" "$notes_door/health/live" "$last"
 (notes_env "$ordo" apply "$repo/examples/notes-v2" --as fed-e2e --direct) >"$state/notes-apply.log" 2>&1 ||
   { cat "$state/notes-apply.log" >&2; echo "stack: ordo apply of notes v2 failed" >&2; exit 1; }
 admit notes editor
+all_at_once notes notes_app
+# notes v2's environment, for a test that applies another notes program over
+# it with the same `--direct` apply (tests/v3, increment 7a). Test values.
+(notes_env env) >"$state/notes.env"
 
 viewer_env "$host" >"$state/viewer.log" 2>&1 &
 last=$!
@@ -226,6 +253,10 @@ wait_for "note_viewer" "$viewer_door/health/live" "$last"
 (viewer_env "$ordo" apply "$repo/examples/note-viewer" --as fed-e2e --direct) >"$state/viewer-apply.log" 2>&1 ||
   { cat "$state/viewer-apply.log" >&2; echo "stack: ordo apply of note_viewer failed" >&2; exit 1; }
 admit viewer viewer
+all_at_once viewer viewer_app
+# note_viewer's environment, for a test that runs `ordo release-check
+# --direct` as the viewer (tests/api/release.spec.ts, increment 7b).
+(viewer_env env) >"$state/viewer.env"
 
 cat >"$state/stack.json" <<EOF
 {
@@ -234,6 +265,13 @@ cat >"$state/stack.json" <<EOF
   "viewerDoor": "$viewer_door",
   "notesPage": "$notes_page/",
   "viewerPage": "$viewer_page/",
+  "ordo": "$ordo",
+  "identity": "http://127.0.0.1:$id_port",
+  "identityData": "$state/identity",
+  "identityBin": "$idsvc",
+  "identityDb": "$id_url",
+  "host": "$host",
+  "programV3": "$repo/examples/notes-v3",
   "pg": { "host": "$pg_host", "port": "$pg_port", "db": "$db", "admin": "$pg_user", "rolePassword": "$role_password" },
   "logs": "$state"
 }

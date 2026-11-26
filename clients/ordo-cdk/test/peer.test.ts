@@ -63,4 +63,16 @@ describe('peer', () => {
       external('x', { id: key.int('i') }, { table: 't', shared: true }),
     ).toThrow(/schema/);
   });
+
+  it('prints a block of the holder ops it calls, read by no external', () => {
+    expect(synth(peer('notes', ['std.notes.list', 'addComment']))).toBe(
+      ['peer notes {', '  std.notes.list', '  addComment', '}', ''].join('\n'),
+    );
+  });
+
+  it('refuses an empty block, a pattern and an op named twice', () => {
+    expect(() => peer('notes', [])).toThrow(/peer_block/);
+    expect(() => peer('notes', ['/add.*/'])).toThrow(/peer_block/);
+    expect(() => peer('notes', ['addComment', 'addComment'])).toThrow(/twice/);
+  });
 });

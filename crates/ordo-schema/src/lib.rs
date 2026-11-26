@@ -32,12 +32,14 @@ use ordo_syntax::decl::{
 use ordo_syntax::span::Span;
 use ordo_syntax::Expr;
 
+pub mod auth;
 pub mod check;
 pub mod ddl;
 pub mod diff;
 pub mod function;
 pub mod image;
 pub mod json;
+pub mod prev;
 pub mod routine;
 
 pub use ddl::{ddl_for, SPACE_COLUMN};
@@ -314,6 +316,15 @@ pub struct PeerSource {
     pub schema: Option<String>,
 }
 
+/// A `peer` block: the holder's nickname and the holder's ops this
+/// deployment calls through its door, in the order written
+/// (`plan-federation-grants.md` §4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerUses {
+    pub name: String,
+    pub ops: Vec<String>,
+}
+
 /// The schema an unresolved peer reads, which no deployment can create: a
 /// program that skipped resolution fails on a missing relation and never
 /// reads a plain schema that happens to share the nickname.
@@ -435,14 +446,56 @@ pub struct Schema {
     /// The program's backend functions, checked by [`function::check`].
     /// Called through `POST /v1/fn/<name>`, never as ops.
     pub functions: Vec<ordo_syntax::FunctionDecl>,
-    /// The nicknames of the program's `peer` lines, in the order written.
-    /// Each is read by at least one external.
+    /// The program's `auth` block, checked by [`auth::check`]. `None`:
+    /// the deployment's settings decide sign-in, as before the block.
+    pub auth: Option<ordo_syntax::AuthDecl>,
+    /// The nicknames of the program's `peer` lines that an external reads,
+    /// in the order written: the shared-database path, which resolves each
+    /// through `ORDO_PEER_<NAME>_SCHEMA`.
     pub peers: Vec<String>,
+    /// The program's `peer` blocks (`plan-federation-grants.md` §4, step
+    /// G4): each holder this deployment calls through its door, and the
+    /// holder's ops it calls. Checked against the holder's grant at apply
+    /// (`ordo_host::peer_check`).
+    pub peer_uses: Vec<PeerUses>,
     /// The program's `reader` lines (owner, 2026-11-18,
     /// `example-apps-notes-v2-plus-note_viewer` ask 17): the deployments that
     /// may read this one, and the tables each may read. Each table is one of
     /// this program's own entities.
     pub readers: Vec<Reader>,
+    /// The program's `grant` blocks (`plan-federation-grants.md` §3), as
+    /// written. Expanded against the program's ops at apply
+    /// (`ordo_host::consumer_grants`); the door checks the expansion from
+    /// step G3.
+    pub grants: Vec<ordo_syntax::GrantDecl>,
+    /// The program's `prev` marks (`plan-syntax-additions.md` §5), in
+    /// declaration order: each entity's, then its fields'. Read by the plan
+    /// ([`prev::check`]), never by the DDL or an op.
+    pub prev: Vec<prev::PrevMark>,
+}
+
+/// Every `prev` mark of the program's native entities.
+fn prev_marks(program: &Program) -> Vec<prev::PrevMark> {
+    let mut out = Vec::new();
+    for e in &program.entities {
+        if let Some(p) = &e.prev {
+            out.push(prev::PrevMark {
+                entity: e.name.name.clone(),
+                field: None,
+                prev: vec![p.name.clone()],
+                line: p.span.line,
+            });
+        }
+        for f in e.fields.iter().filter(|f| !f.prev.is_empty()) {
+            out.push(prev::PrevMark {
+                entity: e.name.name.clone(),
+                field: Some(f.name.name.clone()),
+                prev: f.prev.iter().map(|n| n.text()).collect(),
+                line: f.prev_span.map(|s| s.line).unwrap_or(f.name.span.line),
+            });
+        }
+    }
+    out
 }
 
 /// One `reader <name> reads <table>, …` line.
@@ -939,12 +992,14 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
         entities.push(lowered);
     }
     // A `peer` line no external reads is refused: it would still ask the
-    // deployment owner for a setting that changes nothing.
+    // deployment owner for a setting that changes nothing. A `peer` block
+    // is used by its own ops, through the holder's door (step G4).
     for peer in &program.peers {
-        if !program
-            .externals
-            .iter()
-            .any(|x| x.schema.name == peer.name.name)
+        if peer.uses.is_none()
+            && !program
+                .externals
+                .iter()
+                .any(|x| x.schema.name == peer.name.name)
         {
             return Err(SchemaError {
                 code: "peer_unused",
@@ -1117,7 +1172,28 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
         routines: program.routines.clone(),
         secrets: program.secrets.clone(),
         functions: program.functions.clone(),
-        peers: program.peers.iter().map(|p| p.name.name.clone()).collect(),
+        auth: program.auth.clone(),
+        peers: program
+            .peers
+            .iter()
+            .filter(|p| {
+                program
+                    .externals
+                    .iter()
+                    .any(|x| x.schema.name == p.name.name)
+            })
+            .map(|p| p.name.name.clone())
+            .collect(),
+        peer_uses: program
+            .peers
+            .iter()
+            .filter_map(|p| {
+                Some(PeerUses {
+                    name: p.name.name.clone(),
+                    ops: p.uses.as_ref()?.iter().map(|u| u.op.clone()).collect(),
+                })
+            })
+            .collect(),
         readers: program
             .readers
             .iter()
@@ -1126,6 +1202,8 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
                 tables: r.tables.iter().map(|t| t.name.clone()).collect(),
             })
             .collect(),
+        grants: program.grants.clone(),
+        prev: prev_marks(program),
     };
     // Every table a `reader` line names is one of this program's own
     // entities: an external is another system's table, and Ordo grants
@@ -1157,6 +1235,9 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
                 });
             }
         }
+    }
+    if let Some(a) = &program.auth {
+        auth::check(a)?;
     }
     routine::check(&schema, program)?;
     function::check(&schema, program)?;
@@ -2302,15 +2383,18 @@ pub fn acl_admin_ops(schema: &Schema) -> Program {
     }
     Program {
         domain: None,
+        edition: None,
         entities: Vec::new(),
         ops,
         release: None,
         routines: Vec::new(),
         secrets: Vec::new(),
         functions: Vec::new(),
+        auth: None,
         externals: Vec::new(),
         peers: Vec::new(),
         readers: Vec::new(),
+        grants: Vec::new(),
     }
 }
 
@@ -2885,15 +2969,18 @@ pub fn std_ops(schema: &Schema) -> Program {
 
     Program {
         domain: None,
+        edition: None,
         entities: Vec::new(),
         ops,
         release: None,
         routines: Vec::new(),
         secrets: Vec::new(),
         functions: Vec::new(),
+        auth: None,
         externals: Vec::new(),
         peers: Vec::new(),
         readers: Vec::new(),
+        grants: Vec::new(),
     }
 }
 
@@ -3624,9 +3711,48 @@ pub fn render_release_atom(a: &ordo_syntax::ReleaseAtom) -> String {
     )
 }
 
+/// One `release member` effect as source text: `remove tasks.assignee`,
+/// `reassign tasks.assignee to owner`. What a grant's pin records per field
+/// (`plan-versions.md` §1.7), and one line of [`render_release`].
+pub fn render_release_effect(e: &ordo_syntax::ReleaseEffect) -> String {
+    use ordo_syntax::{ReassignTarget, ReleaseEffect};
+    match e {
+        ReleaseEffect::Remove { entity, field, .. } => {
+            format!("remove {}.{}", entity.name, field.name)
+        }
+        ReleaseEffect::Reassign {
+            entity, field, to, ..
+        } => {
+            let targets: Vec<String> = to
+                .iter()
+                .map(|t| match t {
+                    ReassignTarget::Owner { .. } => "owner".to_string(),
+                    ReassignTarget::Lookup {
+                        entity,
+                        inner,
+                        field,
+                        ..
+                    } => format!(
+                        "{}({}).{}",
+                        entity.name,
+                        render_expr(inner, "", "member"),
+                        field.name
+                    ),
+                })
+                .collect();
+            format!(
+                "reassign {}.{} to {}",
+                entity.name,
+                field.name,
+                targets.join(" or ")
+            )
+        }
+    }
+}
+
 /// A whole `release member` rule as source text, one effect per line.
 pub fn render_release(r: &ordo_syntax::ReleaseDecl) -> String {
-    use ordo_syntax::{ReassignTarget, ReleaseEffect, ReleaseMode};
+    use ordo_syntax::ReleaseMode;
     let mut out = String::from("release member ");
     match &r.mode {
         ReleaseMode::Open { .. } => out.push_str("open"),
@@ -3660,38 +3786,7 @@ pub fn render_release(r: &ordo_syntax::ReleaseDecl) -> String {
         out.push_str(" {");
         for e in &r.effects {
             out.push_str("\n  ");
-            match e {
-                ReleaseEffect::Remove { entity, field, .. } => {
-                    out.push_str(&format!("remove {}.{}", entity.name, field.name))
-                }
-                ReleaseEffect::Reassign {
-                    entity, field, to, ..
-                } => {
-                    let targets: Vec<String> = to
-                        .iter()
-                        .map(|t| match t {
-                            ReassignTarget::Owner { .. } => "owner".to_string(),
-                            ReassignTarget::Lookup {
-                                entity,
-                                inner,
-                                field,
-                                ..
-                            } => format!(
-                                "{}({}).{}",
-                                entity.name,
-                                render_expr(inner, "", "member"),
-                                field.name
-                            ),
-                        })
-                        .collect();
-                    out.push_str(&format!(
-                        "reassign {}.{} to {}",
-                        entity.name,
-                        field.name,
-                        targets.join(" or ")
-                    ))
-                }
-            }
+            out.push_str(&render_release_effect(e));
         }
         out.push_str("\n}");
     }

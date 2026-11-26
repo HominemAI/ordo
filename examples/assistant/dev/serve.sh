@@ -49,6 +49,18 @@ if ! "$pgbin/pg_isready" -h "$socket" -p "$pgport" -q; then
   until "$pgbin/pg_isready" -h "$socket" -p "$pgport" -q; do sleep 0.2; done
 fi
 "$pgbin/createdb" -h "$socket" -p "$pgport" -U ordo assistant 2>/dev/null || true
+# This deployment is dev (owner, 2026-11-25). With `rollout.strategy` unset a
+# deployment that is not dev rolls each apply out a batch at a time, and a
+# script that applies again over an existing database expects every tenant
+# on the new version at once. Declared only when no environment is declared,
+# so a chain the deployment owner made is left as it is, and a second run
+# changes nothing. `ordo environments set-own` changes it later.
+"$pgbin/psql" -h "$socket" -p "$pgport" -U ordo -d assistant -qc \
+  "CREATE TABLE IF NOT EXISTS \"\$environments\" (\"name\" text PRIMARY KEY, \"pos\" integer NOT NULL, \
+     \"own\" boolean NOT NULL, \"actor\" text NOT NULL, \"reason\" text NOT NULL, \"at\" bigint NOT NULL); \
+   INSERT INTO \"\$environments\" (\"name\", \"pos\", \"own\", \"actor\", \"reason\", \"at\") \
+     SELECT 'dev', 1, true, 'assistant-dev', 'this deployment is dev', extract(epoch from now())::bigint \
+     WHERE NOT EXISTS (SELECT 1 FROM \"\$environments\")"
 
 # ── The settings ───────────────────────────────────────────────────────────
 export ORDO_PG_HOST="$socket" ORDO_PG_PORT="$pgport" ORDO_PG_USER=ordo ORDO_PG_DB=assistant

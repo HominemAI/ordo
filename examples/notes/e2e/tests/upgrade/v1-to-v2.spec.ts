@@ -344,7 +344,7 @@ test('a reminder set a moment ahead fires once: a notice in the page with no rel
 });
 
 /**
- * The 0.2.1 program as `ordo apply` reads it: the fixture as `notes.ordo`,
+ * The 0.2.2 program as `ordo apply` reads it: the fixture as `notes.ordo`,
  * beside a copy of notes v2's `fn` code, in a folder of its own.
  */
 function compatibleUpdate(): string {
@@ -356,12 +356,12 @@ function compatibleUpdate(): string {
 
 /**
  * A compatible update with the page open (plan-versions.md §1.4; owner
- * ruling Q7, 2026-11-23). Ada has notes v2 open in 2 tabs. 0.2.1, notes v2
+ * ruling Q7, 2026-11-23). Ada has notes v2 open in 2 tabs. 0.2.2, notes v2
  * with one optional field added (`fixtures/notes-v2-1`), is applied under
  * them. The deploy moves her tenant, so each live feed ends with
  * `version_changed`; the page reconnects and refills its device copy. A
  * note added in one tab then appears in the other, with no reload and no
- * error shown. Runs last: it moves the stack to 0.2.1.
+ * error shown. Runs last: it moves the stack to 0.2.2.
  */
 test('a compatible update with the page open in 2 tabs: a note added in one still appears in the other', async ({}, testInfo) => {
   testInfo.setTimeout(300_000);
@@ -374,7 +374,7 @@ test('a compatible update with the page open in 2 tabs: a note added in one stil
     const two = await ada.context.newPage();
     await openV2(two);
     const before = unique('before-update-');
-    await addNote(one, before, 'Written under 0.2.0.');
+    await addNote(one, before, 'Written under 0.2.1.');
     await expect(noteInList(two, before)).toBeVisible({ timeout: 30_000 });
 
     // The deploy, with both tabs open. Neither is reloaded from here on.
@@ -387,7 +387,7 @@ test('a compatible update with the page open in 2 tabs: a note added in one stil
     applyProgram(compatibleUpdate());
 
     const after = unique('after-update-');
-    await addNote(one, after, 'Written under 0.2.1.');
+    await addNote(one, after, 'Written under 0.2.2.');
     await expect(noteInList(two, after)).toBeVisible({ timeout: 60_000 });
     // What both tabs held is still there, refilled.
     await expect(noteInList(two, before)).toBeVisible();

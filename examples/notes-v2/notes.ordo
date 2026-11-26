@@ -22,16 +22,23 @@
 # All four are additive, so `ordo apply` makes them itself
 # (ORDO_APPLY_SAFE_CHANGES, on by default) and no v1 row is touched.
 
-domain notes @ 0.2.0
+domain notes @ 0.2.1
 
 # note_viewer (examples/note-viewer) is a second deployment that reads these
-# notes. This line is notes v2's consent: its database role, named by
-# ORDO_READER_NOTE_VIEWER_ROLE, gets SELECT on these two tables and the
-# sign-in columns, and nothing else. Postgres refuses it every other table.
-# Which rows a viewer's user sees is the viewer's own guard. It follows this
-# file's acl: a person sees a note they hold a level on. A note tagged
-# `public` is shown to anyone there.
-reader note_viewer reads notes, notesAccess
+# notes through this deployment's door, never its tables. This block is
+# notes' consent: the ops note_viewer may call, and nothing else. The tie to
+# note_viewer's id at the identity service is the setting
+# ORDO_CONSUMER_NOTE_VIEWER_CLIENT.
+#
+# - On behalf of a person, `std.notes.list` answers the notes that person
+#   may read here: this file's acl decides, as it does for this app's page.
+# - As itself, with nobody signed in there, `publicNotes` answers the notes
+#   tagged `public`. `std.notes.list` answers nothing as itself: no acl row
+#   names a deployment.
+grant note_viewer as itself {
+  std.notes.list
+  publicNotes
+}
 
 entity notes {
   title: text
@@ -143,6 +150,14 @@ op myNotes unbounded =
 op allNotes unbounded download =
   notes[id, rev, title, body, tags, created, pinned, archived]
   sort -created
+
+# The notes tagged `public`, for anyone. `unguarded` because no acl row names
+# a visitor; the condition is what decides, and it is in the op, where it is
+# read. note_viewer shows them to people who are signed out.
+op publicNotes unguarded =
+  notes(tags contains "public")[id, title, body, created]
+  sort -created
+  take 100
 
 # The notes that carry one tag. `contains` on a JSON array matches an
 # element equal to `$tag`.

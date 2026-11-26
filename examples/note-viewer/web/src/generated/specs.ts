@@ -19,12 +19,12 @@ import type { OpSpec } from '@hominemai/ordo-sdk/core/spec.js';
 export const DESCRIPTOR = {
   schemaVersion: 'ordo.interface/2',
   domain: 'noteviewer',
-  digest: '893323dbcf89c4e1',
+  digest: '9984a56cd435979f',
 } as const;
 
 export const spec_myNotes = {
     op: 'myNotes',
-    version: 'e378212ae36588dd',
+    version: '244e050d70959442',
     method: 'GET',
     kind: 'read',
     terminal: ['fetch', 'live', 'pages'],
@@ -42,7 +42,7 @@ export const spec_myNotes = {
 
 export const spec_publicNotes = {
     op: 'publicNotes',
-    version: '256df79f92babaee',
+    version: '341fdfbe30b4b28b',
     method: 'GET',
     kind: 'read',
     terminal: ['fetch', 'live', 'pages'],
@@ -61,7 +61,7 @@ export const spec_publicNotes = {
 
 export const spec_std$entries$count = {
     op: 'std.entries.count',
-    version: '60b61aef3a569c45',
+    version: '43b34b065c7f0d61',
     method: 'GET',
     kind: 'read',
     terminal: ['fetch', 'live'],
@@ -79,7 +79,7 @@ export const spec_std$entries$count = {
 
 export const spec_std$entries$get = {
     op: 'std.entries.get',
-    version: '714f491b9f4b9489',
+    version: '02cae9e329798482',
     method: 'GET',
     kind: 'read',
     terminal: ['fetch', 'live', 'pages'],
@@ -98,7 +98,7 @@ export const spec_std$entries$get = {
 
 export const spec_std$entries$list = {
     op: 'std.entries.list',
-    version: '97a25094f8eceb99',
+    version: '2611f4bbd5a97fed',
     method: 'GET',
     kind: 'read',
     terminal: ['fetch', 'live', 'pages'],
@@ -114,64 +114,9 @@ export const spec_std$entries$list = {
     standingError: null,
 } as const satisfies OpSpec;
 
-export const spec_std$entryAccess$count = {
-    op: 'std.entryAccess.count',
-    version: 'a985027120d1e5d1',
-    method: 'GET',
-    kind: 'read',
-    terminal: ['fetch', 'live'],
-    paged: false,
-    singleRow: true,
-    sync: null,
-    order: { keys: [{ path: 'id', desc: false }], stated: false },
-    refine: { tier: 'basic', fields: ['id', 'entry', 'member'], decimals: [], types: { n: 'int' }, sealed: [], limits: { conditions: 16, inValues: 200 } },
-    casParam: null,
-    params: [
-    ],
-    refusals: ['access_denied', 'invalid_cursor', 'invalid_refinement', 'method_mismatch', 'refinement_unbounded', 'unknown_param', 'version_skew'],
-    standingError: null,
-} as const satisfies OpSpec;
-
-export const spec_std$entryAccess$get = {
-    op: 'std.entryAccess.get',
-    version: '42c7aea4752c5cda',
-    method: 'GET',
-    kind: 'read',
-    terminal: ['fetch', 'live', 'pages'],
-    paged: true,
-    singleRow: false,
-    sync: { entity: 'entryAccess', key: 'id' },
-    order: { keys: [{ path: 'id', desc: false }], stated: true },
-    refine: { tier: 'basic', fields: ['id', 'entry', 'member'], decimals: [], types: { id: 'id', entry: 'id', member: 'text' }, sealed: [], limits: { conditions: 16, inValues: 200 } },
-    casParam: null,
-    params: [
-      { name: 'id', type: 'id', required: true, idEntity: 'entryAccess', enumValues: null, min: null, max: null, places: null },
-    ],
-    refusals: ['access_denied', 'invalid_cursor', 'invalid_param', 'invalid_refinement', 'method_mismatch', 'missing_param', 'refinement_unbounded', 'unknown_param', 'version_skew'],
-    standingError: null,
-} as const satisfies OpSpec;
-
-export const spec_std$entryAccess$list = {
-    op: 'std.entryAccess.list',
-    version: '596685d72c11472f',
-    method: 'GET',
-    kind: 'read',
-    terminal: ['fetch', 'live', 'pages'],
-    paged: true,
-    singleRow: false,
-    sync: { entity: 'entryAccess', key: 'id' },
-    order: { keys: [{ path: 'id', desc: true }], stated: true },
-    refine: { tier: 'basic', fields: ['id', 'entry', 'member'], decimals: [], types: { id: 'id', entry: 'id', member: 'text' }, sealed: [], limits: { conditions: 16, inValues: 200 } },
-    casParam: null,
-    params: [
-    ],
-    refusals: ['access_denied', 'invalid_cursor', 'invalid_refinement', 'method_mismatch', 'refinement_unbounded', 'unknown_param', 'version_skew'],
-    standingError: null,
-} as const satisfies OpSpec;
-
 export const spec_std$published$count = {
     op: 'std.published.count',
-    version: 'a93d543d26868491',
+    version: 'bdc68d1a76c97d6d',
     method: 'GET',
     kind: 'read',
     terminal: ['fetch', 'live'],
@@ -189,7 +134,7 @@ export const spec_std$published$count = {
 
 export const spec_std$published$get = {
     op: 'std.published.get',
-    version: '66d5c19055269e1f',
+    version: 'cf7da7eee07fe00e',
     method: 'GET',
     kind: 'read',
     terminal: ['fetch', 'live', 'pages'],
@@ -197,7 +142,7 @@ export const spec_std$published$get = {
     singleRow: false,
     sync: { entity: 'published', key: 'id' },
     order: { keys: [{ path: 'id', desc: false }], stated: true },
-    refine: { tier: 'basic', fields: ['id', 'title', 'body', 'created'], decimals: [], types: { id: 'id', title: 'text', body: 'text', tags: 'json', created: 'datetime' }, sealed: [], limits: { conditions: 16, inValues: 200 } },
+    refine: { tier: 'basic', fields: ['id', 'title', 'body', 'created'], decimals: [], types: { id: 'id', title: 'text', body: 'text', created: 'datetime' }, sealed: [], limits: { conditions: 16, inValues: 200 } },
     casParam: null,
     params: [
       { name: 'id', type: 'id', required: true, idEntity: 'published', enumValues: null, min: null, max: null, places: null },
@@ -208,7 +153,7 @@ export const spec_std$published$get = {
 
 export const spec_std$published$list = {
     op: 'std.published.list',
-    version: '67d17e55f822abea',
+    version: 'f758d57d89d97aa2',
     method: 'GET',
     kind: 'read',
     terminal: ['fetch', 'live', 'pages'],
@@ -216,7 +161,7 @@ export const spec_std$published$list = {
     singleRow: false,
     sync: { entity: 'published', key: 'id' },
     order: { keys: [{ path: 'id', desc: true }], stated: true },
-    refine: { tier: 'basic', fields: ['id', 'title', 'body', 'created'], decimals: [], types: { id: 'id', title: 'text', body: 'text', tags: 'json', created: 'datetime' }, sealed: [], limits: { conditions: 16, inValues: 200 } },
+    refine: { tier: 'basic', fields: ['id', 'title', 'body', 'created'], decimals: [], types: { id: 'id', title: 'text', body: 'text', created: 'datetime' }, sealed: [], limits: { conditions: 16, inValues: 200 } },
     casParam: null,
     params: [
     ],
@@ -230,9 +175,6 @@ export const SPECS = {
   'std.entries.count': spec_std$entries$count,
   'std.entries.get': spec_std$entries$get,
   'std.entries.list': spec_std$entries$list,
-  'std.entryAccess.count': spec_std$entryAccess$count,
-  'std.entryAccess.get': spec_std$entryAccess$get,
-  'std.entryAccess.list': spec_std$entryAccess$list,
   'std.published.count': spec_std$published$count,
   'std.published.get': spec_std$published$get,
   'std.published.list': spec_std$published$list,

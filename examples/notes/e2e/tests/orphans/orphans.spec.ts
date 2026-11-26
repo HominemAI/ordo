@@ -12,7 +12,7 @@
  *    orphaned size under `orphans/`.
  * 3. Ada erases her notes (`std.space.delete`): the answer names the orphan
  *    it reached, and the rows holding a size drop by hers.
- * 4. The prune is refused while 0.2.0, which declares the size, is a
+ * 4. The prune is refused while 0.2.1, which declares the size, is a
  *    version a restore may still need (increment 17): the restore window
  *    is unset, and the refusal names `ordo versions set restore-window`.
  *    The developer sets it to `0`.
@@ -196,7 +196,7 @@ test('attachments.size is orphaned by v3: exported and erased with Ada, then pru
     expect(turnedOn.code, `${turnedOn.out}\n${turnedOn.err}`).toBe(0);
 
     await test.step('a version a restore may need holds the column until the restore window is set', () => {
-      // 0.2.0 declares the size and served a moment ago. With
+      // 0.2.1 declares the size and served a moment ago. With
       // `versions.restore_window` unset, a backup or bundle at it could
       // still need the column, so the prune names the setting.
       const held = dev.ordo(['evolve', '--prune', 'attachments.size', ...door()]);

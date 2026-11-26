@@ -26,10 +26,3 @@ export type PublishedId = Branded<string, 'published'>;
  */
 export type EntriesId = Branded<string, 'entries'>;
 
-/**
- * An id addressing `entryAccess`.
- *
- * Typed-id prefix `entr-acce`, so a value looks like `entr-acce_…`. The brand is compile-time only; the wire sees the string.
- */
-export type EntryAccessId = Branded<string, 'entryAccess'>;
-

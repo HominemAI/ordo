@@ -1,54 +1,48 @@
-# note_viewer. Reads the notes notes v2 (examples/notes-v2) holds, as a
-# second deployment in the same database. Read-only: nothing here writes
-# into notes v2.
+# note_viewer. Reads the notes notes v2 (examples/notes-v2) holds, through
+# notes v2's door. Read-only: nothing here writes into notes v2, and no row
+# of it is kept here.
 #
-# `peer notes` is a local nickname for notes v2. Its schema is the setting
-# ORDO_PEER_NOTES_SCHEMA. notes v2 grants this deployment's role its two
-# tables with `reader note_viewer reads notes, notesAccess`; Postgres
-# refuses every other one.
+# `peer notes` is a local nickname for notes v2. Its door is the setting
+# ORDO_PEER_NOTES_URL. The block lists the ops of notes v2 this deployment
+# calls; notes v2's `grant note_viewer` must open each, and the apply checks
+# it there. notes v2 refuses every other op.
 #
 # Both apps sign people in through the identity service, so one person is
-# one subject in both. On a peer's table `$caller` is notes v2's member for
-# the person signed in here.
+# one subject in both. A read made for a person signed in here is made for
+# the same person there, and notes v2's own acl decides what they see.
 
-domain noteviewer @ 0.1.0
+domain noteviewer @ 0.2.0
 
-peer notes
+peer notes {
+  std.notes.list
+  publicNotes
+}
 
-# The public list. No guard, so a public op may read it, and the op below
-# answers only the notes tagged `public`. A condition reads a field, so
-# `tags` is public too.
-external published from notes.notes shared {
+# The public list: notes v2's `publicNotes`, the notes tagged `public`. A
+# table named like an op of the block is read by that op. No guard, so a
+# public op may read it; called with nobody signed in, it is asked as this
+# deployment itself.
+external published from notes.publicNotes shared {
   public
   id: text <- id
   title: text <- title
   body: text <- body
-  tags: json <- tags
   created: datetime <- created
 }
 
-# The same table for a signed-in person, guarded by notes v2's own acl: a
-# note is read by whoever holds a level on it there.
+# Every note the signed-in person may read in notes v2: `std.notes.list`,
+# asked for that person. notes v2's acl decides which.
 external entries from notes.notes shared {
   id: text <- id
   title: text <- title
   body: text <- body
   tags: json <- tags
   created: datetime <- created
-  access read entryAccess(member == $caller)
-}
-
-# notes v2's acl rows: who holds which level on which note.
-external entryAccess from notes.notesAccess shared {
-  id: text <- id
-  entry -> entries <- note
-  member: text <- member
-  access read member == $caller
 }
 
 # Anyone, with no token.
 op publicNotes public =
-  published(tags contains "public")[id, title, body, created]
+  published[id, title, body, created]
   sort -created
   take 100
 

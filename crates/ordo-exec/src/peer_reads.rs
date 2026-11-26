@@ -350,15 +350,43 @@ where
 /// Does `q` read a peer through its door? What [`serve`] would ask a
 /// holder for; `false` costs nothing to the many reads that do not.
 pub fn reads_a_door(q: &Query) -> bool {
+    !doors_read(q).is_empty()
+}
+
+/// The peers `q` reads through their doors, by nickname, sorted.
+pub fn doors_read(q: &Query) -> Vec<String> {
     let Some(externals) = externals_of(q) else {
-        return false;
+        return Vec::new();
     };
     if !externals.values().any(|r| r.door.is_some()) {
-        return false;
+        return Vec::new();
     }
     let mut sites = Vec::new();
     collect(q, &externals, true, &mut sites);
-    !sites.is_empty()
+    let names: BTreeSet<String> = sites.iter().filter_map(|s| s.read.door.clone()).collect();
+    names.into_iter().collect()
+}
+
+/// Refuse, by name, a read of a peer that a path with no client to other
+/// deployments' doors was asked to run (`None` from [`doors_read`]'s
+/// caller): without the holder's rows the statement cannot run, and it
+/// would fail on the database as an internal error.
+pub fn refuse_unserved(q: &Query, what: &str) -> Result<(), PeerReadFail> {
+    let doors = doors_read(q);
+    if doors.is_empty() {
+        return Ok(());
+    }
+    let names = doors
+        .iter()
+        .map(|d| format!("`{d}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(PeerReadFail::refused(format!(
+        "{what} reads peer {names} through its door, and this path has no client to another \
+         deployment's door. Fix: call it through this deployment's door, with \
+         ORDO_IDENTITY_URL and ORDO_IDENTITY_ORIGIN set so the door can ask the identity \
+         service for a token"
+    )))
 }
 
 /// The member id an anonymous call carries (`ordo_api::ANONYMOUS`).

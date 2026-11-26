@@ -2,9 +2,11 @@
  * Sealing a field on live data (plan-versions.md increment 13).
  *
  * The versions are notes v3 rewritten here (`v3As`). Ada, on v3, writes a
- * note from the page. 0.3.2 seals `notes.body`, which note-viewer reads
- * (the `reader` line): its plan is refused, naming the reader. 0.3.3 takes
- * `notes` off the reader line and is applied. 0.3.4 seals `notes.body`.
+ * note from the page. 0.3.3 takes `notes` off the grant to note_viewer and
+ * is applied, as the versions after this spec expect. 0.3.4 seals
+ * `notes.body`. A grant would not stop it: note_viewer reads through this
+ * deployment's door, which opens a sealed field in its own answers
+ * (`plan-federation-grants.md` §6; examples/note-viewer/e2e/tests/seal).
  * The developer runs the step from 0.3.3 through the door. The backfill
  * worker seals every note's body under its tenant's key, verifies each
  * tenant's count and hash and that every sealed value opens to its
@@ -20,8 +22,7 @@
  * notes as last written, and a note written after the seal, and the table
  * holds no plaintext.
  *
- * A regression looks like a seal under a reader that is not refused, a plan
- * with no sealed backfill, a refused run, a write during the seal that is
+ * A regression looks like a plan with no sealed backfill, a refused run, a write during the seal that is
  * refused or lands unsealed, a page that shows ciphertext, nothing or an
  * old body, or a body readable in the table.
  *
@@ -39,15 +40,15 @@ import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
 import { door, developer } from '../developer.js';
 import { owner } from '../people.js';
-import { addNote, applyProgram, ensureServing, noteInList, servingVersion, signIn, signedIn, stack, unique } from '../support.js';
+import { addNote, applyProgram, ensureServing, noteInList, servingVersion, signIn, signedIn, stack, unique, OFF_THE_GRANT } from '../support.js';
 
 test.describe.configure({ mode: 'serial' });
 
 /**
  * Notes v3 at `version`, beside its `fn` code. `sealed` makes `notes.body`
- * sealed; `noReader` takes `notes` off the `reader note_viewer` line.
+ * sealed; `offGrant` takes `notes` off the grant to note_viewer.
  */
-function v3As(version: string, sealed: boolean, noReader: boolean): string {
+function v3As(version: string, sealed: boolean, offGrant: boolean): string {
   let src = readFileSync(join(stack().programV3, 'notes.ordo'), 'utf8');
   const swap = (from: string, to: string) => {
     expect(src, `notes v3 still holds ${from}`).toContain(from);
@@ -55,7 +56,7 @@ function v3As(version: string, sealed: boolean, noReader: boolean): string {
   };
   swap('domain notes @ 0.3.0', `domain notes @ ${version}`);
   if (sealed) swap('  body:  text = ""\n', '  body:  text sealed\n');
-  if (noReader) swap('reader note_viewer reads notes, notesAccess', 'reader note_viewer reads notesAccess');
+  if (offGrant) for (const [from, to] of OFF_THE_GRANT) swap(from, to);
   const dir = mkdtempSync(join(tmpdir(), `notes-${version}-`));
   writeFileSync(join(dir, 'notes.ordo'), src);
   cpSync(join(stack().programV3, 'fn'), join(dir, 'fn'), { recursive: true });
@@ -91,7 +92,7 @@ test('a field sealed on live data: the page reads it, and the table holds no pla
   // v3 serves after `clone`. Run alone (`--no-deps`), v2 and v3 are
   // applied here.
   if (servingVersion() !== '0.3.0') {
-    ensureServing(stack().programV2, '0.2.0');
+    ensureServing(stack().programV2, '0.2.1');
     applyProgram(stack().programV3);
   }
   const ada = await owner('Ada');
@@ -120,20 +121,7 @@ test('a field sealed on live data: the page reads it, and the table holds no pla
     expect(adaDb, `Ada's note is in one of ${dbs.length} tenant database(s)`).not.toBe('');
     expect(sql(adaDb, `SELECT count(*) FROM notes WHERE body = '${marker} and more'`), 'the body is plaintext before').toBe('1');
 
-    await test.step('a seal of a field note-viewer reads is refused, naming it', () => {
-      const dir = v3As('0.3.2', true, false);
-      const stored = dev.ordo(['apply', dir, '--no-activate', ...door()]);
-      expect(stored.code, `${stored.out}\n${stored.err}`).toBe(0);
-      const plan = dev.ordo(['evolve', '--from', '0.3.0', '--to', '0.3.2', ...door()]);
-      expect(plan.code, plan.out).not.toBe(0);
-      const said = `${plan.out}${plan.err}`;
-      expect(said).toContain('seal_read_by_reader');
-      expect(said).toContain('note_viewer');
-      // The fix names the door, which opens the field in its own answers.
-      expect(said).toContain('ORDO_PEER_<NAME>_URL');
-    });
-
-    await test.step('0.3.3 takes notes off the reader line', () => {
+    await test.step('0.3.3 takes notes off the grant to note_viewer', () => {
       applyProgram(v3As('0.3.3', false, true));
       expect(servingVersion()).toBe('0.3.3');
     });

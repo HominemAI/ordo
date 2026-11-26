@@ -8,12 +8,12 @@ import { cpSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, type Page } from '@playwright/test';
-import { noteInList, signIn, signedIn, stack } from '../support.js';
+import { noteInList, signIn, signedIn, stack, OFF_THE_GRANT } from '../support.js';
 
 /**
  * The program the move goes to: notes v3 at `version`, as `seal` and
  * `rehearsal` write it when `sealed` (notes.body sealed), always off the
- * reader line, with `title` renamed to `heading`. Made from notes v3's own
+ * grant to note_viewer, with `title` renamed to `heading`. Made from notes v3's own
  * file so the two never drift, beside v3's `fn` code. With `refused`, the
  * new version also adds `check heading != "<refused>"` (11b part 4).
  */
@@ -21,7 +21,7 @@ export function renamedTitle(version: string, sealed: boolean, refused?: string)
   const v3 = readFileSync(join(stack().programV3, 'notes.ordo'), 'utf8');
   const swaps: [string, string][] = [
     ['domain notes @ 0.3.0', `domain notes @ ${version}`],
-    ['reader note_viewer reads notes, notesAccess', 'reader note_viewer reads notesAccess'],
+    ...OFF_THE_GRANT,
     [
       '  title: text\n',
       `  heading: text = "" prev(title)\n${refused ? `  check heading != "${refused}"\n` : ''}`,
@@ -46,7 +46,7 @@ export function renamedTitle(version: string, sealed: boolean, refused?: string)
 /**
  * The program a `--fill` step goes to (plan-versions.md increment 10b):
  * notes v3 at `version`, as `seal` and `rehearsal` write it when `sealed`,
- * always off the reader line, with `excerpt`, a new required field with no
+ * always off the grant to note_viewer, with `excerpt`, a new required field with no
  * default. The step fills it with `--fill notes.excerpt=title`. Its ops set
  * `excerpt` with the title and answer `title` from `excerpt`, so once a
  * tenant serves it the v2 page shows each note's title only if its row was
@@ -56,7 +56,7 @@ export function filledExcerpt(version: string, sealed: boolean): string {
   const v3 = readFileSync(join(stack().programV3, 'notes.ordo'), 'utf8');
   const swaps: [string, string][] = [
     ['domain notes @ 0.3.0', `domain notes @ ${version}`],
-    ['reader note_viewer reads notes, notesAccess', 'reader note_viewer reads notesAccess'],
+    ...OFF_THE_GRANT,
     ['  title: text\n', '  title: text\n  excerpt: text\n'],
     ['set notes { title: $title,', 'set notes { title: $title, excerpt: $title,'],
     [

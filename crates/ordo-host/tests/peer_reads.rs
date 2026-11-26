@@ -621,6 +621,9 @@ impl Holder {
 struct Consumer {
     exec: FixtureExecutor,
     specs: Vec<OpSpec>,
+    /// The same program and database through `Executor::read_as`, which
+    /// has no client to another deployment's door.
+    plain: ordo_exec::Executor,
     /// The deployment's own database, held for as long as the consumer.
     _pg: Pg,
 }
@@ -780,6 +783,7 @@ impl Consumer {
                 page_size: 100,
             },
             specs: ordo_host::build_specs(&f),
+            plain: executor_for(&f, &pool),
             _pg: pg,
         }
     }
@@ -989,6 +993,43 @@ async fn a_holder_that_does_not_answer_refuses_the_op_after_the_timeout() {
         e.message
     );
     assert!(e.message.contains("peer `notes`"), "{}", e.message);
+}
+
+/// G8 (G5 left it): `Executor::read_as` has no client to another
+/// deployment's door. A read of a peer there is refused by name,
+/// `peer_refused`, naming the op, the peer and the fix. Before, the
+/// statement ran without the holder's rows and failed on the database as a
+/// 500 that named a relation.
+#[tokio::test(flavor = "multi_thread")]
+async fn read_as_refuses_a_peer_read_by_name_and_never_runs_it() {
+    let (_ids, holder, viewer) = stage("readas").await;
+    let e = viewer
+        .plain
+        .read_as("topEntries", Some("mem_ann"))
+        .await
+        .expect_err("no client to the holder's door");
+    let ordo_exec::ExecFail::Peer { code, message } = &e else {
+        panic!("not a named refusal: {e:?}");
+    };
+    assert_eq!(*code, "peer_refused", "{message}");
+    for want in [
+        "`topEntries` reads peer `notes` through its door",
+        "ORDO_IDENTITY_URL",
+    ] {
+        assert!(message.contains(want), "{want}: {message}");
+    }
+    assert!(!message.contains("relation"), "{message}");
+    assert_eq!(holder.calls(), 0, "the holder was never asked");
+    // A read of this deployment's own rows on the same path still answers.
+    let own = viewer
+        .plain
+        .read_as("bookmark[label]\nsort label\ntake 2", Some("mem_ann"))
+        .await
+        .expect("a native read");
+    assert_eq!(own.len(), 2, "{own:?}");
+    // And the same op through the door answers.
+    let rows = viewer.read("topEntries", "mem_ann").await.expect("served");
+    assert_eq!(rows.len(), 3, "{rows:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

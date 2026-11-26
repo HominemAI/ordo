@@ -2157,6 +2157,10 @@ impl std::fmt::Display for ExecFail {
 
 impl Executor {
     /// Run a read as a caller. `None` is anonymous — every guard false.
+    ///
+    /// This path has no client to other deployments' doors: a read of a
+    /// peer is refused by name (`peer_refused`), never run without the
+    /// holder's rows. [`Executor::read_page_served`] serves one.
     pub async fn read_as(
         &self,
         call: &str,
@@ -2182,6 +2186,7 @@ impl Executor {
         // the whole result at once, so only a bound proven from the plan
         // itself (`take n`, a unique address) bounds its host work.
         self.venue(&q, call, caller, Read::Whole)?;
+        peer_reads::refuse_unserved(&q, &format!("`{call}`"))?;
         let mut q = q;
         ordo_plan::blind::resolve(&mut q, self.keys.as_ref(), &self.space, &[])
             .map_err(|e| ExecFail::Compile(e.to_string()))?;
@@ -3753,7 +3758,11 @@ impl Executor {
         // `syncability` gives the door.
         let _ = ordo_plan::artifact::project_row_key(&mut q);
         // A peer read through its door: the holder's rows for this call,
-        // asked before the plan and served to it (step G5).
+        // asked before the plan and served to it (step G5). With no client,
+        // refused by name.
+        if peers.is_none() {
+            peer_reads::refuse_unserved(&q, &format!("`{call}`"))?;
+        }
         if let Some(peers) = peers {
             let space = self.plan_space();
             peer_reads::serve(

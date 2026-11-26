@@ -30,7 +30,7 @@ import { join } from 'node:path';
 import { expect, test } from '@playwright/test';
 import { door, developer } from '../developer.js';
 import { owner } from '../people.js';
-import { addNote, applyProgram, ensureServing, servingVersion, signedIn, stack } from '../support.js';
+import { addNote, applyProgram, ensureServing, servingVersion, signedIn, stack, OFF_THE_GRANT } from '../support.js';
 import { holds, openV2, watchTenant } from './moves.js';
 
 test.describe.configure({ mode: 'serial' });
@@ -42,7 +42,7 @@ function splitTitle(sealed: boolean): string {
   const v3 = readFileSync(join(stack().programV3, 'notes.ordo'), 'utf8');
   const swaps: [string, string][] = [
     ['domain notes @ 0.3.0', `domain notes @ ${TO}`],
-    ['reader note_viewer reads notes, notesAccess', 'reader note_viewer reads notesAccess'],
+    ...OFF_THE_GRANT,
     ['  title: text\n', '  heading: text = "" prev(title)\n  subtitle: text? prev(title)\n'],
     ['set notes { title: $title,', 'set notes { heading: $title, subtitle: null,'],
     [
@@ -72,7 +72,7 @@ test('notes v3 splits a field: the mapping is asked for, every note reads, and a
   testInfo.setTimeout(420_000);
   // After `fill`, production serves 0.3.4. Run alone, v3 is applied.
   if (!['0.3.0', '0.3.4'].includes(servingVersion() ?? '')) {
-    ensureServing(stack().programV2, '0.2.0');
+    ensureServing(stack().programV2, '0.2.1');
     applyProgram(stack().programV3);
   }
   const from = servingVersion() ?? '';

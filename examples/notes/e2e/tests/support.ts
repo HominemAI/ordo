@@ -52,6 +52,18 @@ export function stack(): Stack {
 }
 
 /** A name no other test or run uses. */
+/**
+ * The swaps that take `notes` off notes v3's grant to note_viewer, as each
+ * version made from v3's own file writes it after `seal`: the grant opens
+ * the acl rows only, and the public op it opened goes. What a step that
+ * renames, seals or moves a field of `notes` starts from. Read from the
+ * file, so a changed grant fails here, by name.
+ */
+export const OFF_THE_GRANT: readonly (readonly [string, string])[] = [
+  ["# note_viewer (examples/note-viewer) is a second deployment that reads these\n# notes through this deployment's door, never its tables. v3 changes nothing\n# it reads, so it reads through the move. This block is\n# notes' consent: the ops note_viewer may call, and nothing else. The tie to\n# note_viewer's id at the identity service is the setting\n# ORDO_CONSUMER_NOTE_VIEWER_CLIENT.\n#\n# - On behalf of a person, `std.notes.list` answers the notes that person\n#   may read here: this file's acl decides, as it does for this app's page.\n# - As itself, with nobody signed in there, `publicNotes` answers the notes\n#   tagged `public`. `std.notes.list` answers nothing as itself: no acl row\n#   names a deployment.\ngrant note_viewer as itself {\n  std.notes.list\n  publicNotes\n}\n", "# notes is off note_viewer's grant here: it may read only the acl rows.\ngrant note_viewer as itself {\n  std.notesAccess.list\n}\n"],
+  ["\n# The notes tagged `public`, for anyone. `unguarded` because no acl row names\n# a visitor; the condition is what decides, and it is in the op, where it is\n# read. note_viewer shows them to people who are signed out.\nop publicNotes unguarded =\n  notes(tags contains \"public\")[id, title, body, created]\n  sort -created\n  take 100\n", ''],
+];
+
 export function unique(word: string): string {
   return `${word}${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
 }
@@ -266,8 +278,6 @@ export function ordoEnv(): NodeJS.ProcessEnv {
     ORDO_DEV_UNSAFE_TEST_KEYS: '1',
     ORDO_TOKEN_KEY: '1'.repeat(64),
     ORDO_PAGE_KEY: '2'.repeat(64),
-    // v2's `reader note_viewer` line: the role stack.sh made.
-    ORDO_READER_NOTE_VIEWER_ROLE: 'note_viewer',
     // The editions the stack's server knows (stack.sh).
     ORDO_TEST_EDITION_2_SINCE: EDITION_2_SINCE,
   };

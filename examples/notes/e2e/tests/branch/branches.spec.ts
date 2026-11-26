@@ -33,13 +33,13 @@ import { join } from 'node:path';
 import { expect, test } from '@playwright/test';
 import { door, freshDeveloper, type Developer, type FreshDeveloper } from '../developer.js';
 import { owner } from '../people.js';
-import { addNote, applyProgram, ensureServing, noteInList, servingVersion, stack, unique } from '../support.js';
+import { addNote, applyProgram, ensureServing, noteInList, servingVersion, stack, unique, OFF_THE_GRANT } from '../support.js';
 
 test.describe.configure({ mode: 'serial' });
 
 /**
  * Notes v3 at `version`, as the stack serves it after `seal` when `sealed`
- * (body sealed, `notes` off the reader line), beside its `fn` code. `extra`
+ * (body sealed, `notes` off the grant to note_viewer), beside its `fn` code. `extra`
  * adds the branch's own op.
  */
 function program(version: string, sealed: boolean, extra: boolean): string {
@@ -51,7 +51,7 @@ function program(version: string, sealed: boolean, extra: boolean): string {
   swap('domain notes @ 0.3.0', `domain notes @ ${version}`);
   if (sealed) {
     swap('  body:  text = ""\n', '  body:  text sealed\n');
-    swap('reader note_viewer reads notes, notesAccess', 'reader note_viewer reads notesAccess');
+    for (const [from, to] of OFF_THE_GRANT) swap(from, to);
   }
   if (extra) src += '\n# Branch B only.\nop branchTitles unbounded =\n  notes[id, title]\n  sort -created\n';
   const dir = mkdtempSync(join(tmpdir(), `notes-branch-${version}-`));
@@ -87,7 +87,7 @@ test('2 branches are served side by side in dev, each on its own version', async
   // The stack serves 0.3.4 after `seal`. Run alone, v2 then v3 are applied.
   let serving = servingVersion();
   if (serving !== '0.3.4' && serving !== '0.3.0') {
-    ensureServing(stack().programV2, '0.2.0');
+    ensureServing(stack().programV2, '0.2.1');
     applyProgram(stack().programV3);
     serving = '0.3.0';
   }

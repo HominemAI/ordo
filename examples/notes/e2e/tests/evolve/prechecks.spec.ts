@@ -54,7 +54,7 @@ test('a duplicate title in a tenant: ordo evolve lists it with its fix and refus
   // are applied here. v2 is never applied over v3's schema: v3 renames a
   // column v2 requires, so that is refused.
   if (servingVersion() !== '0.3.0') {
-    ensureServing(stack().programV2, '0.2.0');
+    ensureServing(stack().programV2, '0.2.1');
     applyProgram(stack().programV3);
   }
   const ada = await owner('Ada');

@@ -92,11 +92,20 @@ pub fn resolve_with(
     schema: &mut Schema,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<(), SchemaRefusal> {
-    for peer in &schema.peer_uses {
-        let var = door_url_env(&peer.name);
+    // A peer whose tables an external reads is read on every call, so its
+    // door is needed before anything serves. A block that only lists ops
+    // is checked at the apply, which refuses an unset door by name.
+    let read: std::collections::BTreeSet<&str> = schema
+        .externals
+        .iter()
+        .filter_map(|e| e.external.as_ref()?.peer.as_ref())
+        .map(|p| p.name.as_str())
+        .collect();
+    for peer in read {
+        let var = door_url_env(peer);
         if lookup(&var).is_none_or(|v| v.trim().is_empty()) {
             return Err(SchemaRefusal::Unset {
-                peer: peer.name.clone(),
+                peer: peer.to_string(),
                 var,
             });
         }

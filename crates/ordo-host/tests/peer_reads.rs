@@ -97,9 +97,15 @@ entity diary {
 op addDiary($body: text) =
   set diary { body: $body }
 
+op rankedMemos =
+  memo(rank >= 5)[id, title, owner, rank]
+  sort -rank
+  take 50
+
 grant note_viewer {
   std.memo.list
   std.diary.list
+  rankedMemos
 }
 "#;
 
@@ -107,6 +113,7 @@ grant note_viewer {
 const CONSUMER: &str = r#"
 peer notes {
   std.memo.list
+  rankedMemos
 }
 
 external entries from notes.memo shared {
@@ -166,6 +173,17 @@ op allDiaries =
   diaries[id, body]
   sort id
   take 10
+
+external ranked from notes.rankedMemos shared {
+  id: text <- id
+  title: text <- title
+  rank: int <- rank
+}
+
+op topRanked =
+  ranked[id, title, rank]
+  sort title
+  take 5
 "#;
 
 fn key_of(handle: &str) -> SigningKey {
@@ -393,7 +411,8 @@ async fn count_memo(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    if req.uri().path().ends_with("/op/std.memo.list") {
+    let path = req.uri().path();
+    if path.ends_with("/op/std.memo.list") || path.ends_with("/op/rankedMemos") {
         let refine = req
             .uri()
             .query()
@@ -1030,6 +1049,35 @@ async fn read_as_refuses_a_peer_read_by_name_and_never_runs_it() {
     // And the same op through the door answers.
     let rows = viewer.read("topEntries", "mem_ann").await.expect("served");
     assert_eq!(rows.len(), 3, "{rows:?}");
+}
+
+/// G8: an external named like an op of the `peer` block reads that op, not
+/// `std.<table>.list`: the holder's own read, under its own conditions,
+/// refined and sorted there. What note_viewer's public list reads
+/// (`publicNotes`, examples/notes-v2).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_external_named_like_an_op_of_the_block_reads_that_op() {
+    let (_ids, holder, viewer) = stage("namedop").await;
+    let rows = viewer
+        .read("topRanked", "mem_ann")
+        .await
+        .expect("read through the holder's op");
+    assert_eq!(
+        titles(&rows, "title"),
+        ["memo 005", "memo 006", "memo 012", "memo 013", "memo 019"],
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().all(|r| r["rank"].as_i64() >= Some(5)),
+        "{rows:?}"
+    );
+    assert_eq!(holder.calls(), 1, "one call to the op");
+    let sent = &holder.refines()[0];
+    assert_eq!(sent["limit"], 5, "the take was sent: {sent}");
+    assert_eq!(
+        sent["sort"][0]["field"], "title",
+        "the sort was sent: {sent}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -51,7 +51,7 @@ use ordo_api::{ErrorCode, ExecError};
 use ordo_identity::federation::form_encode;
 use ordo_identity::peer_token::{
     self, ASSERTION_TYPE, CHAIN_PARAM, GRANT_CLIENT_CREDENTIALS, GRANT_TOKEN_EXCHANGE,
-    TOKEN_TYPE_ID_TOKEN,
+    TOKEN_TYPE_ID_TOKEN, TOKEN_TYPE_JWT,
 };
 use serde_json::{json, Value};
 
@@ -63,8 +63,13 @@ use crate::identity_keys::{
 /// `on` lets a holder's door be plain `http://` to a host that is not
 /// loopback.
 pub const PLAIN_HTTP_ENV: &str = "ORDO_PEER_PLAIN_HTTP";
-/// How long one request may take, connect to last byte.
-pub const REQUEST_SECS: u64 = 30;
+/// How long one request to a holder or the identity service may take,
+/// connect to last byte: `ORDO_PEER_TIMEOUT_SECS`, a whole number of
+/// seconds from 1. A holder slower than this refuses the op touching it
+/// (step G5).
+pub const TIMEOUT_ENV: &str = "ORDO_PEER_TIMEOUT_SECS";
+/// [`TIMEOUT_ENV`]'s default.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 10;
 /// The largest answer read from a holder or the identity service.
 pub const MAX_ANSWER_BYTES: usize = 4 * 1024 * 1024;
 /// How long a client assertion lives. The service takes at most
@@ -328,6 +333,11 @@ pub enum Acting<'a> {
     /// A person, by the ID token the identity service issued this
     /// deployment for them: the holder applies its own rules for them.
     OnBehalf { id_token: &'a str },
+    /// A person, by their id at the identity service (`sub`), on the
+    /// strength of this deployment's own session for them: a session
+    /// statement signed with the consumer key (step G5). It holds as long
+    /// as the person is a member here, past their ID token's 10 minutes.
+    ForPerson { subject: &'a str },
 }
 
 /// An op's kind decides the method the door takes: `GET`, `POST` or
@@ -340,6 +350,7 @@ pub use ordo_api::OpKind as Method;
 /// The client. One per deployment; share it as an `Arc`.
 pub struct PeerClient {
     service: Result<ServiceSettings, PeerClientError>,
+    timeout: Result<Duration, PeerClientError>,
     key: SigningKey,
     var: Settings,
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
@@ -363,6 +374,7 @@ impl PeerClient {
     ) -> PeerClient {
         PeerClient {
             service: ServiceSettings::from_vars(&*var),
+            timeout: timeout_from(&*var),
             key,
             var,
             now,
@@ -371,6 +383,11 @@ impl PeerClient {
 
     fn service(&self) -> Result<&ServiceSettings, PeerClientError> {
         self.service.as_ref().map_err(Clone::clone)
+    }
+
+    /// How long one request may take ([`TIMEOUT_ENV`]).
+    pub fn timeout(&self) -> Result<Duration, PeerClientError> {
+        self.timeout.clone()
     }
 
     /// This deployment's handle at the identity service.
@@ -453,6 +470,7 @@ impl PeerClient {
         let path = format!("{}/deployments/{}/consumer-key", s.url.prefix, s.handle);
         let body = json!({ "consumerKey": self.public_key() }).to_string();
         let (status, answer) = send(
+            self.timeout(),
             &s.url,
             "POST",
             &path,
@@ -500,6 +518,7 @@ impl PeerClient {
             &ordo_identity::webauthn::b64url_encode(&jti),
         );
         let chain_text = chain.join(" ");
+        let session: String;
         let mut form: Vec<(&str, &str)> = vec![
             ("client_assertion_type", ASSERTION_TYPE),
             ("client_assertion", &assertion),
@@ -512,11 +531,25 @@ impl PeerClient {
                 form.push(("subject_token", id_token));
                 form.push(("subject_token_type", TOKEN_TYPE_ID_TOKEN));
             }
+            Acting::ForPerson { subject } => {
+                session = peer_token::session_subject(
+                    &s.handle,
+                    &s.issuer,
+                    subject,
+                    &self.key,
+                    now,
+                    now + ASSERTION_SECS,
+                );
+                form.push(("grant_type", GRANT_TOKEN_EXCHANGE));
+                form.push(("subject_token", &session));
+                form.push(("subject_token_type", TOKEN_TYPE_JWT));
+            }
         }
         if !chain.is_empty() {
             form.push((CHAIN_PARAM, &chain_text));
         }
         let (status, answer) = send(
+            self.timeout(),
             &s.url,
             "POST",
             &format!("{}{TOKEN_PATH}", s.url.prefix),
@@ -624,7 +657,16 @@ impl PeerClient {
             }
         };
         let what = format!("peer `{}` at {}", holder.peer, holder.address());
-        let (status, answer) = send(&holder.url, verb, &path, headers, body, &what).await?;
+        let (status, answer) = send(
+            self.timeout(),
+            &holder.url,
+            verb,
+            &path,
+            headers,
+            body,
+            &what,
+        )
+        .await?;
         let v: Value = serde_json::from_slice(&answer).map_err(|_| PeerClientError::Answer {
             what: what.clone(),
             why: format!("{status} with something that is not JSON"),
@@ -770,6 +812,25 @@ impl HolderGrant {
     }
 }
 
+/// [`TIMEOUT_ENV`], or the default when unset. Anything but a whole number
+/// of seconds from 1 is a setting error naming it.
+fn timeout_from(var: &dyn Fn(&str) -> Option<String>) -> Result<Duration, PeerClientError> {
+    match var(TIMEOUT_ENV).map(|v| v.trim().to_string()) {
+        None => Ok(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
+        Some(v) if v.is_empty() => Ok(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
+        Some(v) => match v.parse::<u64>() {
+            Ok(n) if n >= 1 => Ok(Duration::from_secs(n)),
+            _ => Err(PeerClientError::Setting {
+                setting: TIMEOUT_ENV.into(),
+                why: format!(
+                    "is `{v}`: it is a whole number of seconds, 1 or more. Set \
+                     {TIMEOUT_ENV}={DEFAULT_TIMEOUT_SECS}, the default, or unset it"
+                ),
+            }),
+        },
+    }
+}
+
 /// The message of an error answer, whichever shape it has.
 fn message_of(body: &[u8]) -> String {
     let v: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
@@ -782,8 +843,9 @@ fn message_of(body: &[u8]) -> String {
 }
 
 /// One HTTP exchange: the status and the body, at most
-/// [`MAX_ANSWER_BYTES`], in at most [`REQUEST_SECS`].
+/// [`MAX_ANSWER_BYTES`], in at most `timeout` ([`TIMEOUT_ENV`]).
 async fn send(
+    timeout: Result<Duration, PeerClientError>,
     url: &ServiceUrl,
     method: &'static str,
     path: &str,
@@ -791,6 +853,7 @@ async fn send(
     body: Option<Vec<u8>>,
     what: &str,
 ) -> Result<(u16, Vec<u8>), PeerClientError> {
+    let timeout = timeout?;
     use futures::StreamExt;
     let shown = format!("{what} at {}", url.display());
     let unreachable = |cause: String| PeerClientError::Unreachable {
@@ -835,9 +898,12 @@ async fn send(
         }
         Ok((status, out))
     };
-    match tokio::time::timeout(Duration::from_secs(REQUEST_SECS), exchange).await {
+    match tokio::time::timeout(timeout, exchange).await {
         Ok(r) => r,
-        Err(_) => Err(unreachable(format!("no answer in {REQUEST_SECS} seconds"))),
+        Err(_) => Err(unreachable(format!(
+            "no answer in {} seconds, the setting {TIMEOUT_ENV}",
+            timeout.as_secs()
+        ))),
     }
 }
 

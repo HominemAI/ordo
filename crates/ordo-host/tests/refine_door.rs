@@ -567,6 +567,7 @@ async fn a_refinement_that_fails_to_bind_is_refused_with_its_class_not_500() {
             value: json!("K-1"),
         }],
         pick: None,
+        ..Default::default()
     };
     let bound = BoundParams(
         json!({"$caller": "member:mem_1"})

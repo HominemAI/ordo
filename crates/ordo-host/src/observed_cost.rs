@@ -554,6 +554,7 @@ mod tests {
                 value: json!("x"),
             }],
             pick: None,
+            ..Default::default()
         };
         exec.execute(&op, "t1", BoundParams::default(), None, None, None)
             .await
@@ -590,6 +591,7 @@ mod tests {
                 value: json!("x"),
             }],
             pick: None,
+            ..Default::default()
         };
 
         exec.execute(&op, "t1", BoundParams::default(), None, None, None)

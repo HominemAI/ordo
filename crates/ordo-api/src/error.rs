@@ -445,6 +445,18 @@ pub enum ErrorCode {
     /// and the fix. Like `schema_drift`, it is not `internal`, so nobody goes
     /// looking for a panic.
     ExternalChanged,
+    /// Another Ordo deployment this op reads through its door did not
+    /// answer: unreachable, slower than `ORDO_PEER_TIMEOUT_SECS`, or busy
+    /// (`plan-federation-grants.md` §4, step G5). **503**: nothing ran here,
+    /// and the identical call lands once the holder answers. The message
+    /// names the peer, its address and the setting.
+    PeerUnavailable,
+    /// Another Ordo deployment this op reads through its door refused the
+    /// read, or the read cannot be sent to it as written (step G5).
+    /// **403**: the holder decides what this deployment and the person may
+    /// read. The message names the peer, the holder's op and the line or
+    /// setting that would allow it.
+    PeerRefused,
     /// An irreversible act was refused because the space still owes
     /// something: an archive that has not received the history it is the
     /// copy of record for, a client-first device that is the authoritative
@@ -811,6 +823,8 @@ impl ErrorCode {
             ErrorCode::SealedUnsupported => "sealed_unsupported",
             ErrorCode::SchemaDrift => "schema_drift",
             ErrorCode::ExternalChanged => "external_changed",
+            ErrorCode::PeerUnavailable => "peer_unavailable",
+            ErrorCode::PeerRefused => "peer_refused",
             ErrorCode::SpacePinned => "space_pinned",
             ErrorCode::NotConfirmed => "not_confirmed",
             ErrorCode::EgressRefused => "egress_refused",
@@ -892,6 +906,8 @@ impl ErrorCode {
         ErrorCode::SealedUnsupported,
         ErrorCode::SchemaDrift,
         ErrorCode::ExternalChanged,
+        ErrorCode::PeerUnavailable,
+        ErrorCode::PeerRefused,
         ErrorCode::SpacePinned,
         ErrorCode::NotConfirmed,
         ErrorCode::EgressRefused,
@@ -1015,6 +1031,10 @@ impl ErrorCode {
             | ErrorCode::SealedUnsupported
             | ErrorCode::SchemaDrift
             | ErrorCode::ExternalChanged
+            // A read through another deployment's door (step G5): only the
+            // executor's call to the holder knows how it went.
+            | ErrorCode::PeerUnavailable
+            | ErrorCode::PeerRefused
             | ErrorCode::SpacePinned
             | ErrorCode::NotConfirmed
             // Both are a platform op's, and a platform op runs as an
@@ -1170,7 +1190,9 @@ impl ErrorCode {
             ErrorCode::StatementTimeout
             | ErrorCode::SpaceUnavailable
             | ErrorCode::ServerBusy
+            | ErrorCode::PeerUnavailable
             | ErrorCode::TenantNotReady => StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::PeerRefused => StatusCode::FORBIDDEN,
             ErrorCode::UnknownSource
             | ErrorCode::SealedOpenFailed
             | ErrorCode::SealedUnreadable

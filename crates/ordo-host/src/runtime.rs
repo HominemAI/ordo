@@ -1380,6 +1380,7 @@ impl RuntimeConfig {
                 "ORDO_REFINE_MAX_IN_VALUES",
                 ordo_api::refine::DEFAULT_MAX_IN_VALUES,
             ),
+            ("ORDO_REFINE_MAX_LIMIT", ordo_api::refine::DEFAULT_MAX_LIMIT),
         ] {
             refine_limit(var, std::env::var(var).ok().as_deref(), default)?;
         }
@@ -5322,6 +5323,12 @@ async fn assemble_program(
                     Arc::new(now_secs),
                 ));
                 let _ = peer_ops.client.set(client.clone());
+                // Step G5: a peer with `ORDO_PEER_<NAME>_URL` is read
+                // through its door with the same client.
+                deployment.set_peer_reads(Arc::new(crate::peer_reads::DoorReads::new(
+                    client.clone(),
+                    Arc::new(|k: &str| std::env::var(k).ok()),
+                )));
                 if let Some(apply) = &apply_for_backfills {
                     let _ = apply.peer_client.set(client);
                 }

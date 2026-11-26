@@ -60,6 +60,7 @@ pub mod nodes;
 pub mod orphans;
 pub mod overlay;
 pub mod peer;
+pub mod peer_reads;
 pub mod pick;
 mod pool_error;
 pub mod prune;
@@ -2114,6 +2115,13 @@ pub enum ExecFail {
     /// The message names the sealed field.
     Venue(String),
     Pool(PoolError),
+    /// A peer read through its door was not answered (step G5): `code` is
+    /// the door's class (`peer_unavailable`, `peer_refused`), the message
+    /// names the peer and the fix.
+    Peer {
+        code: &'static str,
+        message: String,
+    },
 }
 
 impl ExecFail {
@@ -2121,7 +2129,7 @@ impl ExecFail {
     pub fn pool_error(&self) -> Option<&PoolError> {
         match self {
             ExecFail::Pool(e) => Some(e),
-            ExecFail::Compile(_) | ExecFail::Venue(_) => None,
+            ExecFail::Compile(_) | ExecFail::Venue(_) | ExecFail::Peer { .. } => None,
         }
     }
 
@@ -2142,6 +2150,7 @@ impl std::fmt::Display for ExecFail {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ExecFail::Compile(m) | ExecFail::Venue(m) => f.write_str(m),
+            ExecFail::Peer { code, message } => write!(f, "{code}: {message}"),
             ExecFail::Pool(e) => write!(f, "{e}"),
         }
     }
@@ -3591,6 +3600,35 @@ impl Executor {
         after: Option<&[Option<String>]>,
         correlation: &str,
     ) -> Result<Page, ExecFail> {
+        self.read_page_served(
+            pl,
+            row_key,
+            label,
+            caller,
+            page_size,
+            after,
+            correlation,
+            None,
+        )
+        .await
+    }
+
+    /// [`Executor::read_page_pipeline`], with the client that serves a
+    /// peer read through its door (step G5, [`peer_reads`]). `None` reads
+    /// no peer through a door: a statement that needs one names why it
+    /// cannot run.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn read_page_served(
+        &self,
+        pl: &ordo_syntax::Pipeline,
+        row_key: &[ordo_plan::artifact::RowKeyCond],
+        label: &str,
+        caller: Option<&str>,
+        page_size: i64,
+        after: Option<&[Option<String>]>,
+        correlation: &str,
+        peers: Option<&dyn peer_reads::PeerFetch>,
+    ) -> Result<Page, ExecFail> {
         let call = label;
         let q = ordo_sema::bind_as(
             &self.schema,
@@ -3628,6 +3666,37 @@ impl Executor {
         // many-side join) gets nothing, which is the same answer
         // `syncability` gives the door.
         let _ = ordo_plan::artifact::project_row_key(&mut q);
+        // A peer read through its door: the holder's rows for this call,
+        // asked before the plan and served to it (step G5).
+        if let Some(fetcher) = peers {
+            let space = self.plan_space();
+            peer_reads::serve(
+                &mut q,
+                fetcher,
+                &self.pool,
+                caller,
+                Some(peer_reads::Paging { page_size, after }),
+                |probe, whole| async move {
+                    let sql = if whole {
+                        ordo_plan::plan(&probe, &space)
+                            .map_err(|e| ExecFail::Compile(format!("plan: {e}")))?
+                            .sql
+                    } else {
+                        match ordo_plan::plan_paged(&probe, &space, page_size, after) {
+                            Ok(p) => p.sql,
+                            Err(e) if e.code == "unpageable" => {
+                                ordo_plan::plan(&probe, &space)
+                                    .map_err(|e| ExecFail::Compile(format!("plan: {e}")))?
+                                    .sql
+                            }
+                            Err(e) => return Err(ExecFail::Compile(format!("plan: {e}"))),
+                        }
+                    };
+                    self.pool.rows(&sql).await.map_err(ExecFail::Pool)
+                },
+            )
+            .await?;
+        }
         let paged = match ordo_plan::plan_paged(&q, &self.plan_space(), page_size, after) {
             Ok(p) => p,
             Err(e) if e.code == "unpageable" => {

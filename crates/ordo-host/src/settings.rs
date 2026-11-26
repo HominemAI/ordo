@@ -1835,6 +1835,12 @@ pub static REGISTRY: &[Setting] = &[
         r#""#,
     ),
     s(
+        "ORDO_REFINE_MAX_LIMIT",
+        "CORS and the door",
+        r#"200"#,
+        r#""#,
+    ),
+    s(
         "ORDO_JSON_MAX_BYTES",
         "CORS and the door",
         r#"262144 (256 KiB)"#,

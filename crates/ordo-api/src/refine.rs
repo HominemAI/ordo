@@ -13,6 +13,8 @@ use crate::spec::{CostClass, FieldSpec, FieldTy, OpSpec, RefineTier};
 pub const DEFAULT_MAX_CONDITIONS: usize = 16;
 /// The shipped default for [`RefineLimits::max_in_values`].
 pub const DEFAULT_MAX_IN_VALUES: usize = 200;
+/// The shipped default for [`RefineLimits::max_limit`].
+pub const DEFAULT_MAX_LIMIT: usize = 200;
 
 /// How large one refinement may be (owner, 2026-10-05, `refinement-default`
 /// ask 6). Settings with shipped defaults, never fixed values: an unbounded
@@ -29,6 +31,9 @@ pub struct RefineLimits {
     /// The most values one `in` condition carries.
     /// `ORDO_REFINE_MAX_IN_VALUES`, default 200.
     pub max_in_values: usize,
+    /// The largest `limit` one refinement may ask: the rows of its one
+    /// answer. `ORDO_REFINE_MAX_LIMIT`, default 200.
+    pub max_limit: usize,
 }
 
 impl Default for RefineLimits {
@@ -36,6 +41,7 @@ impl Default for RefineLimits {
         RefineLimits {
             max_conditions: DEFAULT_MAX_CONDITIONS,
             max_in_values: DEFAULT_MAX_IN_VALUES,
+            max_limit: DEFAULT_MAX_LIMIT,
         }
     }
 }
@@ -54,6 +60,17 @@ impl RefineLimits {
             var("ORDO_REFINE_MAX_CONDITIONS").as_deref(),
             var("ORDO_REFINE_MAX_IN_VALUES").as_deref(),
         )
+        .with_max_limit(var("ORDO_REFINE_MAX_LIMIT").as_deref())
+    }
+
+    /// `max_limit` from its setting's value: the default when unset, not a
+    /// number, or zero.
+    pub fn with_max_limit(mut self, max_limit: Option<&str>) -> RefineLimits {
+        self.max_limit = max_limit
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_MAX_LIMIT);
+        self
     }
 
     /// [`RefineLimits::from_env`] over given values, testable without
@@ -67,6 +84,7 @@ impl RefineLimits {
         RefineLimits {
             max_conditions: num(max_conditions, DEFAULT_MAX_CONDITIONS),
             max_in_values: num(max_in_values, DEFAULT_MAX_IN_VALUES),
+            max_limit: DEFAULT_MAX_LIMIT,
         }
     }
 }
@@ -83,6 +101,11 @@ pub enum RefineOp {
     Ge,
     In,
     IsNull,
+    /// `field == $caller`, decided by the deployment answering: the field
+    /// holds the member id of the person the call is made for. It takes no
+    /// value. Another deployment sends it, so the holder alone says who
+    /// `$caller` is (`plan-federation-grants.md` §4, step G5).
+    Caller,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -93,14 +116,34 @@ pub struct RefineCond {
     pub value: Value,
 }
 
-/// `{ where: [conds…], pick: [fields…] }` — conditions combine as AND;
-/// `pick` (when present) selects a non-empty subset of output fields.
+/// One order key of a refinement's `sort`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefineSort {
+    pub field: String,
+    #[serde(default)]
+    pub desc: bool,
+}
+
+/// `{ where: [conds…], pick: [fields…], sort: [keys…], limit: n }` —
+/// conditions combine as AND; `pick` (when present) selects a non-empty
+/// subset of output fields.
+///
+/// `sort` and `limit` (step G5, `plan-federation-grants.md` §4) let another
+/// deployment send a read whole. `limit` is the rows of one answer, up to
+/// `ORDO_REFINE_MAX_LIMIT`. `sort` replaces the op's order, and a sorted
+/// read is never paged: `$page` with it is refused and its answer carries
+/// no `next`, because a cursor's keys are the op's own order (`page.rs`,
+/// point 2).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Refinement {
     #[serde(rename = "where", default)]
     pub where_: Vec<RefineCond>,
     #[serde(default)]
     pub pick: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<Vec<RefineSort>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 /// Parse the `$refine` body value. Shape errors are `invalid_refinement`
@@ -284,6 +327,21 @@ pub fn validate(
                     return shape_err(format!("`is_null` on `{}` takes no value", cond.field));
                 }
             }
+            RefineOp::Caller => {
+                if !cond.value.is_null() {
+                    return shape_err(format!(
+                        "`caller` on `{}` takes no value: the deployment answering decides who \
+                         the caller is",
+                        cond.field
+                    ));
+                }
+                if !matches!(field.ty, FieldTy::Text | FieldTy::Id) {
+                    return shape_err(format!(
+                        "`caller` compares a member id, and `{}` is not a text or id field",
+                        cond.field
+                    ));
+                }
+            }
             _ => {
                 if cond.value.is_null() || cond.value.is_array() || cond.value.is_object() {
                     return shape_err(format!(
@@ -295,6 +353,45 @@ pub fn validate(
                     return shape_err(format!("the value of `{}` must be {expected}", cond.field));
                 }
             }
+        }
+    }
+
+    if let Some(sort) = &refinement.sort {
+        if sort.is_empty() {
+            return Err(ApiError::for_op(
+                ErrorCode::InvalidRefinement,
+                op,
+                "sort must name at least one field (omit it to keep the op's order)",
+            ));
+        }
+        for key in sort {
+            let field = check_condition_field(op, &key.field)?;
+            if field.sealed || matches!(field.ty, FieldTy::Json | FieldTy::Blob) {
+                return Err(ApiError::for_op(
+                    ErrorCode::InvalidRefinement,
+                    op,
+                    format!(
+                        "`{}` cannot be a sort key: a sealed, json or blob field has no order \
+                         the database can read",
+                        key.field
+                    ),
+                )
+                .with_param(key.field.clone()));
+            }
+        }
+    }
+    if let Some(limit) = refinement.limit {
+        if limit == 0 || limit > limits.max_limit {
+            return Err(ApiError::for_op(
+                ErrorCode::InvalidRefinement,
+                op,
+                format!(
+                    "`limit` is {limit}, and it must be from 1 to {}. The most is the \
+                     deployment setting `ORDO_REFINE_MAX_LIMIT` (default {DEFAULT_MAX_LIMIT}); \
+                     ask the deployment owner to raise it, or read in pages",
+                    limits.max_limit
+                ),
+            ));
         }
     }
 

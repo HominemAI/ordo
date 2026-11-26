@@ -160,6 +160,24 @@ pub(crate) fn build(
         }
     };
 
+    // A refinement's `sort` replaces the op's order (R-C4: a declared sort
+    // replaces an inherited one). The door has checked each key names a
+    // field a condition may name.
+    let steps = match refine.and_then(|r| r.sort.as_ref()) {
+        None => Vec::new(),
+        Some(keys) => vec![Step::Sort {
+            keys: keys
+                .iter()
+                .map(|k| ordo_syntax::decl::SortKey {
+                    expr: path(&k.field),
+                    desc: k.desc,
+                    span: span(),
+                })
+                .collect(),
+            span: span(),
+        }],
+    };
+
     Ok(RefinedCall {
         pipeline: Pipeline {
             lets: Vec::new(),
@@ -169,7 +187,7 @@ pub(crate) fn build(
                 projection,
                 span: span(),
             }],
-            steps: Vec::new(),
+            steps,
             span: span(),
         },
         keep_only,
@@ -236,6 +254,7 @@ fn row_key_condition(c: &RefineCond) -> Result<RowKeyCond, ExecError> {
         RefineOp::Gt => cmp(CmpOp::Gt),
         RefineOp::Ge => cmp(CmpOp::Ge),
         RefineOp::IsNull => Ok(RowKeyCond::IsNull),
+        RefineOp::Caller => Err(bad(format!("`caller` on {ROW_KEY}"))),
         RefineOp::In => c
             .value
             .as_array()
@@ -276,6 +295,17 @@ fn condition(op: &OpSpec, c: &RefineCond) -> Result<Condition, ExecError> {
         RefineOp::IsNull => Ok(Condition::IsNull {
             expr: lhs,
             negated: false,
+            span: span(),
+        }),
+        // `field == $caller`: this deployment's own `$caller`, the member
+        // the door resolved for the person the call is made for.
+        RefineOp::Caller => Ok(Condition::Compare {
+            op: CmpOp::Eq,
+            lhs,
+            rhs: Expr::Param {
+                name: "caller".into(),
+                span: span(),
+            },
             span: span(),
         }),
         RefineOp::In => {

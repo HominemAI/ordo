@@ -241,6 +241,11 @@ async fn check_one(
     let Some(src) = &e.external else {
         return Ok(());
     };
+    // A peer read through its door (step G5): its tables are its own, and
+    // the holder answers for them on every call.
+    if src.peer.as_ref().is_some_and(|p| p.door) {
+        return Ok(());
+    }
     // The schema this environment reads: a peer's resolved schema, or a
     // plain external's swap (`ordo_exec::peer`).
     let pg = src.pg_schema();

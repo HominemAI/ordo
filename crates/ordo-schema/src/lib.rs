@@ -314,6 +314,10 @@ pub struct PeerSource {
     /// until the deployment resolves it (`ordo_exec::peer`): a compiled
     /// program is the same in every environment, and the schema is not.
     pub schema: Option<String>,
+    /// Set when `ORDO_PEER_<NAME>_URL` is: the peer's tables are read
+    /// through its door, never its schema (`plan-federation-grants.md` §4,
+    /// step G5). `schema` then stays `None`.
+    pub door: bool,
 }
 
 /// A `peer` block: the holder's nickname and the holder's ops this
@@ -342,7 +346,9 @@ impl ExternalSource {
             Some(PeerSource {
                 schema: Some(s), ..
             }) => s.clone(),
-            Some(PeerSource { name, schema: None }) => unresolved_peer_schema(name),
+            Some(PeerSource {
+                name, schema: None, ..
+            }) => unresolved_peer_schema(name),
         }
     }
 
@@ -986,6 +992,7 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
                 src.peer = Some(PeerSource {
                     name: decl.schema.name.clone(),
                     schema: None,
+                    door: false,
                 });
             }
         }

@@ -46,6 +46,36 @@ pub const TYP_AS_ITSELF: &str = "ordo-client+jwt";
 /// The `kind` claim of each.
 pub const KIND_PERSON: &str = "person";
 pub const KIND_CLIENT: &str = "client";
+/// The subject token type of a consumer's own session statement (RFC 8693,
+/// a JWT): what the consumer exchanges once the person's ID token has
+/// expired (step G5, board `federation-build-5-choices-from-steps` ask 2).
+pub const TOKEN_TYPE_JWT: &str = "urn:ietf:params:oauth:token-type:jwt";
+/// The header `typ` of that statement.
+pub const TYP_SESSION: &str = "ordo-session+jwt";
+
+/// A consumer's statement that it holds a live session for `person`: `iss`
+/// the consumer, `sub` the person (their id at the identity service), `aud`
+/// the service's issuer, signed with the consumer key. The service takes it
+/// as the subject of a token exchange from that consumer only, for a person
+/// still a member of it, so the consumer keeps acting for a person past
+/// their 10-minute ID token without holding any token of theirs.
+pub fn session_subject(
+    client_id: &str,
+    issuer: &str,
+    person: &str,
+    key: &SigningKey,
+    iat: u64,
+    exp: u64,
+) -> String {
+    let claims = json!({
+        "iss": client_id,
+        "sub": person,
+        "aud": issuer,
+        "iat": iat,
+        "exp": exp,
+    });
+    sign_jwt(&json!({ "alg": "EdDSA", "typ": TYP_SESSION }), &claims, key)
+}
 
 /// The `aud` a holder's tokens carry: `ordo-peer:<handle>`. Distinct from
 /// a deployment token's and an ID token's, so neither is ever taken for

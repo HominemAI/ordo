@@ -2633,6 +2633,7 @@ pub fn external_reads(schema: &Schema) -> Option<ir::ExternalReads> {
                     }
                     _ => None,
                 },
+                ty: e.field(field).map_or(ScalarTy::Text, |f| f.ty.value_ty()),
             })
             .collect();
         out.insert(
@@ -2645,6 +2646,8 @@ pub fn external_reads(schema: &Schema) -> Option<ir::ExternalReads> {
                 key_ty: src.key_ty,
                 prefix: e.key.clone(),
                 columns,
+                door: src.peer.as_ref().filter(|p| p.door).map(|p| p.name.clone()),
+                served: None,
             },
         );
     }

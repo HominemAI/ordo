@@ -133,3 +133,85 @@ pub fn resolve_with(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VIEWER: &str = r#"
+peer journal {
+  std.notes.list
+}
+
+external entries from journal.notes shared {
+  id: text <- id
+  title: text <- title
+}
+
+external tags from crm.tags shared {
+  id: text <- id
+}
+"#;
+
+    fn compiled() -> Schema {
+        ordo_schema::build(&ordo_syntax::parse_program(VIEWER).expect("parses")).expect("builds")
+    }
+
+    fn pg(s: &Schema, e: &str) -> String {
+        s.entity(e).unwrap().external.as_ref().unwrap().pg_schema()
+    }
+
+    #[test]
+    fn a_peer_needs_its_door_and_never_reads_a_schema() {
+        let e = resolve_with(&mut compiled(), |_| None).expect_err("unset");
+        assert!(matches!(e, SchemaRefusal::Unset { .. }), "{e}");
+        assert_eq!(e.var(), Some("ORDO_PEER_JOURNAL_URL"));
+        assert!(e.to_string().contains("Set ORDO_PEER_JOURNAL_URL"), "{e}");
+        // A blank value is unset.
+        let e = resolve_with(&mut compiled(), |v| {
+            (v == "ORDO_PEER_JOURNAL_URL").then(|| " ".to_string())
+        })
+        .expect_err("blank");
+        assert!(matches!(e, SchemaRefusal::Unset { .. }), "{e}");
+        // Set: the peer's table is read through the door, whatever a schema
+        // setting says.
+        let mut s = compiled();
+        resolve_with(&mut s, |v| match v {
+            "ORDO_PEER_JOURNAL_URL" => Some("https://journal.example.com".into()),
+            "ORDO_PEER_JOURNAL_SCHEMA" | "ORDO_EXTERNAL_JOURNAL_SCHEMA" => Some("alpha".into()),
+            _ => None,
+        })
+        .expect("resolves");
+        assert_eq!(pg(&s, "entries"), ordo_schema::peer_door_schema("journal"));
+    }
+
+    #[test]
+    fn a_plain_external_may_swap_its_schema() {
+        let door = |v: &str| (v == "ORDO_PEER_JOURNAL_URL").then(|| "https://j".to_string());
+        // Unset: as written.
+        let mut s = compiled();
+        resolve_with(&mut s, door).expect("resolves");
+        assert_eq!(pg(&s, "tags"), "crm");
+        // Set: swapped.
+        let mut s = compiled();
+        resolve_with(&mut s, |v| match v {
+            "ORDO_EXTERNAL_CRM_SCHEMA" => Some("crm_dev".into()),
+            other => door(other),
+        })
+        .expect("resolves");
+        assert_eq!(pg(&s, "tags"), "crm_dev");
+        // Bad: refused naming the variable.
+        let e = resolve_with(&mut compiled(), |v| match v {
+            "ORDO_EXTERNAL_CRM_SCHEMA" => Some("Crm Dev".into()),
+            other => door(other),
+        })
+        .expect_err("bad");
+        assert!(e.to_string().contains("ORDO_EXTERNAL_CRM_SCHEMA"), "{e}");
+        // A quoted schema with no clean variable name is never swapped.
+        assert_eq!(external_schema_env("Legacy"), None);
+        assert_eq!(
+            external_schema_env("crm").as_deref(),
+            Some("ORDO_EXTERNAL_CRM_SCHEMA")
+        );
+    }
+}

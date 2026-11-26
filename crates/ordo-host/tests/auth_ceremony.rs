@@ -151,24 +151,12 @@ async fn a_connection_keeps_its_endpoints_for_life_under_its_name() {
     let _ = pool.rows("DELETE FROM \"$authconnection\"").await;
     let fake = FakeDiscord::start().await;
     let conn = fake.connection("discord");
-    ordo_host::federation::ensure_fingerprint(
-        &pool,
-        "discord",
-        "oauth2",
-        &conn.fingerprint(),
-        NOW,
-    )
-    .await
-    .expect("first boot records it");
-    ordo_host::federation::ensure_fingerprint(
-        &pool,
-        "discord",
-        "oauth2",
-        &conn.fingerprint(),
-        NOW,
-    )
-    .await
-    .expect("the same endpoints boot again");
+    ordo_host::federation::ensure_fingerprint(&pool, "discord", "oauth2", &conn.fingerprint(), NOW)
+        .await
+        .expect("first boot records it");
+    ordo_host::federation::ensure_fingerprint(&pool, "discord", "oauth2", &conn.fingerprint(), NOW)
+        .await
+        .expect("the same endpoints boot again");
     let mut moved = fake.connection("discord");
     moved.userinfo_url = "https://evil.example/api/users/@me".into();
     let refused = ordo_host::federation::ensure_fingerprint(

@@ -297,9 +297,7 @@ pub fn tables_read(schema: &ordo_schema::Schema) -> BTreeMap<String, BTreeSet<St
                 format!("std.{}.get", e.name),
             ];
             if !decide(&matchers, &negated, &ops, None).is_empty() {
-                out.entry(g.header())
-                    .or_default()
-                    .insert(e.name.clone());
+                out.entry(g.header()).or_default().insert(e.name.clone());
             }
         }
     }

@@ -662,37 +662,6 @@ async fn an_external_entity_that_does_not_check_out_on_the_target_is_refused() {
     assert!(stored(&staging).await.is_empty());
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_reader_line_with_no_role_on_the_target_is_refused_naming_the_setting() {
-    const VAR: &str = "ORDO_READER_PROMOVIEW_ROLE";
-    const ROLE: &str = "ordo_promo_reader";
-    let issuer = Issuer::start().await;
-    let dev_pool = deployment("ordo_promo_d7", &["dev"], "dev").await;
-    dev_pool
-        .rows(&format!(
-            "DO $$ BEGIN CREATE ROLE {ROLE} NOLOGIN; \
-             EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$;"
-        ))
-        .await
-        .expect("role");
-    // Dev grants the reader: its role is set there.
-    std::env::set_var(VAR, ROLE);
-    apply_with(&dev_pool, "0.1.0", "\nreader promoview reads task\n", true)
-        .await
-        .expect("dev applies it");
-    let (dev_address, _) = serve(&dev_pool, "dev", &issuer).await;
-    let staging = staging("ordo_promo_s7", &dev_address).await;
-    set_secret(&staging, "hookKey").await;
-    // Staging has no such setting.
-    std::env::remove_var(VAR);
-    let e = promote_as(&staging, "0.1.0", ADA, issuer.token(ADA, "dev"))
-        .await
-        .unwrap_err();
-    assert!(matches!(e, PromotionRefusal::Readers(_)), "{e}");
-    assert!(e.to_string().contains(VAR), "{e}");
-    assert!(stored(&staging).await.is_empty());
-}
-
 // ── what arrives through the gate ────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]

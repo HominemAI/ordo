@@ -487,50 +487,9 @@ async fn the_apply_path_and_a_sealed_index_are_refused_by_name() {
     assert!(text.contains("seal_then_index"), "{text}");
 }
 
-/// **A field a reader app reads is not sealed**: the render is refused as
-/// `seal_read_by_reader`, naming the reader and what lets it through, and
-/// no step is stored.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_seal_of_a_field_a_reader_reads_is_refused_naming_the_reader() {
-    let with_reader = |src: String| {
-        src.replace(
-            "\nentity note",
-            "\nreader note_viewer reads note\n\nentity note",
-        )
-    };
-    let (_rpg, registry) = empty("ordo_seal_reader_reg").await;
-    store(&registry, &with_reader(v1())).await;
-    store(&registry, &with_reader(v2())).await;
-    let err = evolve::evolve(
-        &registry,
-        "1.0.0",
-        "1.1.0",
-        &Choices::default(),
-        None,
-        OWNER,
-        1,
-    )
-    .await
-    .expect_err("refused");
-    let text = format!("{err:?}");
-    assert!(text.contains("seal_read_by_reader"), "{text}");
-    assert!(text.contains("note_viewer"), "names the reader: {text}");
-    assert!(
-        text.contains("this deployment's door") && text.contains("ORDO_PEER_<NAME>_URL"),
-        "names what lets it through: {text}"
-    );
-    assert!(
-        evolve::path(&registry, "1.0.0", "1.1.0")
-            .await
-            .map_or(true, |p| p.is_empty()),
-        "no step is stored"
-    );
-}
-
 /// **A consumer reading through the door does not stop a seal** (step G7
-/// of `plan-federation-grants.md`): a `grant` opening the table to it is
-/// not a `reader` line. The door opens the field in its own answers, so
-/// the seal's plan stores its step.
+/// of `plan-federation-grants.md`): the door opens the field in its own
+/// answers, so the seal's plan stores its step.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_seal_of_a_field_a_door_consumer_reads_is_not_refused() {
     let with_grant = |src: String| src + "\ngrant note_viewer {\n  std.note.list\n}\n";
@@ -547,7 +506,7 @@ async fn a_seal_of_a_field_a_door_consumer_reads_is_not_refused() {
         1,
     )
     .await
-    .expect("a grant is not a reader line");
+    .expect("a grant does not stop a seal");
     assert!(
         !evolve::path(&registry, "1.0.0", "1.1.0")
             .await
@@ -863,7 +822,6 @@ async fn keep_plaintext_keeps_the_column_as_an_orphan_and_says_why_not_to() {
         &Versions::on(&registry).get("1.0.0").await.unwrap().unwrap(),
         &Versions::on(&registry).get("1.1.0").await.unwrap().unwrap(),
         &Choices::default(),
-        1,
     )
     .await
     .expect("renders");

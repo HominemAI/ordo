@@ -83,8 +83,7 @@ const DDL: &str = r#"CREATE TABLE IF NOT EXISTS "$peeruses" (
 )"#;
 
 /// The consumer's Ordo release, added after the table.
-const RELEASE_COLUMN: &str =
-    r#"ALTER TABLE "$peeruses" ADD COLUMN IF NOT EXISTS "release" text"#;
+const RELEASE_COLUMN: &str = r#"ALTER TABLE "$peeruses" ADD COLUMN IF NOT EXISTS "release" text"#;
 
 /// On the consumer: what each holder answered at the last apply that
 /// recorded a use there, one row per `peer` block.
@@ -194,7 +193,11 @@ pub async fn record(pool: &Pool, used: &RecordedUse) -> Result<(), PoolError> {
         c = sql_lit(&used.consumer),
         v = sql_lit(&used.version),
         o = sql_lit(&text),
-        r = used.release.as_deref().map(sql_lit).unwrap_or_else(|| "NULL".into()),
+        r = used
+            .release
+            .as_deref()
+            .map(sql_lit)
+            .unwrap_or_else(|| "NULL".into()),
         at = used.recorded_at,
     ))
     .await

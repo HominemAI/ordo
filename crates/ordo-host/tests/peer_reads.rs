@@ -25,7 +25,6 @@
 //!   op with `peer_unavailable`, naming the setting;
 //! - a read the holder does not grant is refused with `peer_refused`,
 //!   naming the grant line;
-//! - with no `ORDO_PEER_NOTES_URL`, the shared-database path is unchanged.
 //!
 //! A regression looks like one call per row, a filter run here over every
 //! holder row, a `$caller` read through the peer's system tables, or a
@@ -106,7 +105,9 @@ grant note_viewer {
 
 /// The consumer's program, after the conformance fixture.
 const CONSUMER: &str = r#"
-peer notes
+peer notes {
+  std.memo.list
+}
 
 external entries from notes.memo shared {
   id: text <- id
@@ -620,8 +621,8 @@ impl Holder {
 struct Consumer {
     exec: FixtureExecutor,
     specs: Vec<OpSpec>,
-    /// The deployment's own database.
-    pg: Pg,
+    /// The deployment's own database, held for as long as the consumer.
+    _pg: Pg,
 }
 
 /// A tenant of `viewer` kept in a database of its own (step G7), Ada its
@@ -666,16 +667,15 @@ impl Consumer {
     /// member as `mem_ann` and 100 bookmarks, one on each of `m001` to
     /// `m100`.
     async fn start(name: &str, ids: &Ids, door: &str, ada: &str, extra: &[(&str, &str)]) -> Self {
-        Consumer::start_with(name, ids, Some(door), ada, extra, false).await
+        Consumer::start_with(name, ids, door, ada, extra, false).await
     }
 
-    /// [`Consumer::start`], reading `notes` through its door when `door`
-    /// is set and through the shared database (`notes_home`) when not, and
-    /// with [`TWIN`] in a database of its own when `twin` is set.
+    /// [`Consumer::start`], with [`TWIN`] in a database of its own when
+    /// `twin` is set.
     async fn start_with(
         name: &str,
         ids: &Ids,
-        door: Option<&str>,
+        door: &str,
         ada: &str,
         extra: &[(&str, &str)],
         twin: bool,
@@ -690,16 +690,13 @@ impl Consumer {
             ("ORDO_AUTH_IDS_KIND".into(), "oidc".into()),
             ("ORDO_AUTH_IDS_ISSUER".into(), ids.issuer.clone()),
             ("ORDO_PEER_NOTES_SPACE".into(), DEFAULT_SPACE.into()),
+            ("ORDO_PEER_NOTES_URL".into(), door.into()),
         ]);
-        match door {
-            Some(d) => vars.insert("ORDO_PEER_NOTES_URL".into(), d.into()),
-            None => vars.insert("ORDO_PEER_NOTES_SCHEMA".into(), "notes_home".into()),
-        };
         for (k, v) in extra {
             vars.insert(k.to_string(), v.to_string());
         }
         let lookup = vars.clone();
-        ordo_exec::peer::resolve_with(&mut f.schema, "public", |k| lookup.get(k).cloned())
+        ordo_exec::peer::resolve_with(&mut f.schema, |k| lookup.get(k).cloned())
             .expect("the peer resolves");
         let f = Arc::new(f);
         let pg = Pg::scoped(&format!("ordo_peerr_viewer_{name}"));
@@ -783,7 +780,7 @@ impl Consumer {
                 page_size: 100,
             },
             specs: ordo_host::build_specs(&f),
-            pg,
+            _pg: pg,
         }
     }
 
@@ -995,28 +992,6 @@ async fn a_holder_that_does_not_answer_refuses_the_op_after_the_timeout() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn without_a_url_the_peer_stays_on_the_shared_database_path() {
-    let source = format!("{FIXTURE}\n{CONSUMER}");
-    let mut f = Fixture::from_source(&source, SEED).expect("compiles");
-    let vars: HashMap<&str, &str> = HashMap::from([("ORDO_PEER_NOTES_SCHEMA", "notes_home")]);
-    ordo_exec::peer::resolve_with(&mut f.schema, "public", |k| {
-        vars.get(k).map(|v| v.to_string())
-    })
-    .expect("resolved by schema");
-    assert_eq!(f.schema.peers, ["notes"]);
-    let src = f
-        .schema
-        .externals
-        .iter()
-        .find(|e| e.name == "entries")
-        .and_then(|e| e.external.clone())
-        .expect("entries");
-    let p = src.peer.expect("a peer");
-    assert!(!p.door);
-    assert_eq!(p.schema.as_deref(), Some("notes_home"));
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn a_sealed_field_is_opened_by_the_holder_and_never_stored_plain() {
     let (_ids, holder, viewer) = stage("sealed").await;
     holder
@@ -1055,8 +1030,7 @@ async fn a_tenant_in_its_own_database_reaches_the_peer_through_the_door() {
     let ada = ids.sign_up("viewer", "Ada", 94).await;
     let bob = ids.sign_up("notes", "Bob", 95).await;
     let holder = Holder::start("tenantdb", &ids, &ada, &bob).await;
-    let viewer =
-        Consumer::start_with("tenantdb", &ids, Some(&holder.address), &ada, &[], true).await;
+    let viewer = Consumer::start_with("tenantdb", &ids, &holder.address, &ada, &[], true).await;
 
     // From the tenant's own database: the holder decides `$caller` for
     // Ada, whose sign-in link is in the deployment's database.
@@ -1074,49 +1048,4 @@ async fn a_tenant_in_its_own_database_reaches_the_peer_through_the_door() {
         .expect("the own space reads");
     assert_eq!(rows.len(), 3, "{rows:?}");
     assert_eq!(holder.calls(), 2);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_tenant_in_its_own_database_is_refused_the_shared_database_path_by_name() {
-    let ids = Ids::start("tenantshared").await;
-    let ada = ids.sign_up("viewer", "Ada", 96).await;
-    let viewer = Consumer::start_with("tenantshared", &ids, None, &ada, &[], true).await;
-    // The peer's table, in the deployment's own database, as the shared
-    // path reads it.
-    viewer
-        .pg
-        .exec(
-            "CREATE SCHEMA notes_home; \
-             CREATE TABLE notes_home.memo (id text PRIMARY KEY, title text, owner text, \
-             rank int); \
-             INSERT INTO notes_home.memo VALUES ('m006', 'memo 006', 'mem_ada', 6);",
-        )
-        .expect("the peer's table");
-
-    // The deployment's own space reads it.
-    let rows = viewer
-        .read("topEntries", "mem_ann")
-        .await
-        .expect("the own space reads the shared table");
-    assert_eq!(titles(&rows, "title"), ["memo 006"], "{rows:?}");
-
-    // The tenant in its own database: a named refusal, never an empty or
-    // a wrong answer.
-    let e = viewer
-        .read_in("topEntries", TWIN, "mem_twin")
-        .await
-        .expect_err("no peer table in the tenant's database");
-    assert_eq!(e.code, ErrorCode::PeerRefused, "{e:?}");
-    assert!(
-        e.message.starts_with("peer_tenant_database:"),
-        "{}",
-        e.message
-    );
-    assert!(e.message.contains("peer `notes`"), "{}", e.message);
-    assert!(
-        e.message.contains(&format!("space `{TWIN}`")),
-        "{}",
-        e.message
-    );
-    assert!(e.message.contains("ORDO_PEER_NOTES_URL"), "{}", e.message);
 }

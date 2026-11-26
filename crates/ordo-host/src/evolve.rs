@@ -2197,8 +2197,7 @@ pub(crate) async fn expand_step(
     // renders it.
     options.renames_backfill = true;
     // The stored digest against this release's rendering (D3).
-    let again = Box::pin(render_stored(registry, &a, &b, &options))
-    .await?;
+    let again = Box::pin(render_stored(registry, &a, &b, &options)).await?;
     if again.digest != plan.digest {
         return Err(EvolveRefusal::DigestMismatch {
             from: plan.from.clone(),

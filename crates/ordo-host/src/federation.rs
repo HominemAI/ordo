@@ -321,9 +321,7 @@ pub const CONNECTION_DDL: &str = r#"CREATE TABLE IF NOT EXISTS "$authconnection"
 /// removed shared-database peer path read; nothing reads it now.
 async fn ensure_connection_table(pool: &Pool) -> Result<(), String> {
     if pool.rows(CONNECTION_DDL).await.is_err() {
-        pool.rows(CONNECTION_DDL)
-            .await
-            .map_err(|e| e.to_string())?;
+        pool.rows(CONNECTION_DDL).await.map_err(|e| e.to_string())?;
     }
     Ok(())
 }

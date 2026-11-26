@@ -416,12 +416,14 @@ pub async fn neighbours(
     for u in crate::peer_ops::recorded(pool).await? {
         out.push(Neighbour {
             kind: "consumer",
-            name: tied.get(&u.consumer).cloned().unwrap_or_else(|| u.consumer.clone()),
+            name: tied
+                .get(&u.consumer)
+                .cloned()
+                .unwrap_or_else(|| u.consumer.clone()),
             at: u.consumer.clone(),
             release: u.release.clone(),
             recorded_at: u.recorded_at,
-            unknown: "it recorded its use under an Ordo release that did not send its own"
-                .into(),
+            unknown: "it recorded its use under an Ordo release that did not send its own".into(),
         });
     }
     Ok(out)
@@ -1148,16 +1150,18 @@ mod tests {
                 Neighbour {
                     kind: "peer",
                     name: "journal".into(),
-                    at: "journal_db".into(),
+                    at: "journal".into(),
                     release: Some("9.8.0".into()),
+                    recorded_at: 1_800_000_000,
                     unknown: String::new(),
                 },
                 Neighbour {
-                    kind: "reader",
-                    name: "viewer".into(),
-                    at: "viewer_app".into(),
+                    kind: "consumer",
+                    name: "note_viewer".into(),
+                    at: "viewer".into(),
                     release: None,
-                    unknown: "not visible".into(),
+                    recorded_at: 1_800_000_000,
+                    unknown: "not sent".into(),
                 },
             ],
         };
@@ -1167,16 +1171,18 @@ mod tests {
         assert!(text.contains("spc_a (Acme)"), "{text}");
         assert!(text.contains("--override --reason"), "{text}");
         assert!(text.contains("ok    0.2.0"), "{text}");
-        // Peers and readers are named, and never fail the check.
+        // Peers and consumers are named, and never fail the check.
         assert!(
-            text.contains("peer journal (schema `journal_db`): Ordo 9.8.0, ANOTHER RELEASE"),
+            text.contains(
+                "peer journal (`journal`, as of 2027-01-15 08:00): Ordo 9.8.0, ANOTHER RELEASE"
+            ),
             "{text}"
         );
         assert!(
-            text.contains("reader viewer (role `viewer_app`): not visible"),
+            text.contains("consumer note_viewer (`viewer`, as of 2027-01-15 08:00): not sent"),
             "{text}"
         );
-        assert!(text.contains("`editions.load_window`"), "{text}");
+        assert!(text.contains("only through its door"), "{text}");
         assert_eq!(r.to_json()["result"], "fail");
         assert_eq!(r.to_json()["neighbours"][0]["otherRelease"], true);
     }

@@ -563,7 +563,7 @@ async fn the_render_refuses_a_fill_it_cannot_run() {
     store(&pool, &v2()).await;
     let render = |c: Choices| {
         let pool = pool.clone();
-        async move { evolve::render(&pool, "1.0.0", "1.1.0", &c, 1).await }
+        async move { evolve::render(&pool, "1.0.0", "1.1.0", &c).await }
     };
     // No fill: the field cannot be required, and the fix is `--fill`.
     let err = render(Choices::default()).await.expect_err("no fill");
@@ -578,12 +578,12 @@ async fn the_render_refuses_a_fill_it_cannot_run() {
         let (_pg, pool) = empty("ordo_backfill_render_type").await;
         store(&pool, &v1()).await;
         store(&pool, &v2().replace("heading: text", "heading: int")).await;
-        let err = evolve::render(&pool, "1.0.0", "1.1.0", &fills("note.heading=title", ""), 1)
+        let err = evolve::render(&pool, "1.0.0", "1.1.0", &fills("note.heading=title", ""))
             .await
             .expect_err("wrong type");
         assert!(err.to_string().contains("mapping_invalid"), "{err}");
         assert!(err.to_string().contains("bigint"), "names the type: {err}");
-        evolve::render(&pool, "1.0.0", "1.1.0", &fills("note.heading=1 + 2", ""), 1)
+        evolve::render(&pool, "1.0.0", "1.1.0", &fills("note.heading=1 + 2", ""))
             .await
             .expect("an int is an int");
     }
@@ -661,7 +661,6 @@ async fn a_backfill_function_runs_per_chunk_with_only_what_the_plan_declares() {
         "1.0.0",
         "1.1.0",
         &fills("note.heading=fn headline hosts evil.example.com", ""),
-        1,
     )
     .await
     .expect_err("a host the function does not declare");
@@ -671,7 +670,6 @@ async fn a_backfill_function_runs_per_chunk_with_only_what_the_plan_declares() {
         "1.0.0",
         "1.1.0",
         &fills("note.heading=fn headline secrets other", ""),
-        1,
     )
     .await
     .expect_err("a secret the function does not declare");

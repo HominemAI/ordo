@@ -4060,11 +4060,11 @@ async fn assemble_program(
             );
         for (name, kind, fingerprint) in fingerprints {
             crate::federation::ensure_fingerprint(&pool, &name, kind, &fingerprint, now_secs())
-            .await
-            .map_err(|detail| BootRefusal::Invalid {
-                var: "ORDO_AUTH_METHODS",
-                detail,
-            })?;
+                .await
+                .map_err(|detail| BootRefusal::Invalid {
+                    var: "ORDO_AUTH_METHODS",
+                    detail,
+                })?;
         }
     }
 

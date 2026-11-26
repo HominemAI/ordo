@@ -272,7 +272,7 @@ async fn a_plan_with_errors_is_never_stored() {
         "the rescale is in the receipt: {receipt}"
     );
     // A different option is a different plan.
-    let keep = evolve::render(&pool, "1.0.0", "1.1.0", &places("invoice.total=keep"), 1)
+    let keep = evolve::render(&pool, "1.0.0", "1.1.0", &places("invoice.total=keep"))
         .await
         .expect("renders");
     assert_ne!(keep.digest, stated.rendered.digest);
@@ -287,7 +287,7 @@ async fn the_receipt_lists_forward_and_reverse() {
     store(&pool, &c[0]).await;
     store(&pool, &c[1]).await;
     store(&pool, &notes("1.4.0", "")).await;
-    let r = evolve::render(&pool, "1.0.0", "1.1.0", &Choices::default(), 1)
+    let r = evolve::render(&pool, "1.0.0", "1.1.0", &Choices::default())
         .await
         .expect("renders");
     let lines = evolve::receipt_lines(&r.receipt).join("\n");
@@ -301,7 +301,7 @@ async fn the_receipt_lists_forward_and_reverse() {
         "{lines}"
     );
 
-    let removed = evolve::render(&pool, "1.1.0", "1.4.0", &Choices::default(), 1)
+    let removed = evolve::render(&pool, "1.1.0", "1.4.0", &Choices::default())
         .await
         .expect("a removed field renders");
     let change = &removed.receipt["changes"][0];
@@ -671,33 +671,41 @@ async fn the_door_stores_lists_and_replays() {
     assert_eq!(err.code, ErrorCode::NotFound, "{err:?}");
 }
 
-/// **F1: the readers of a changed table are listed** with the date their
-/// grant can end, and the date is outside the digest.
+/// **F1: a grant that opens a changed table is listed**, outside the digest:
+/// another deployment reads it through this one's door
+/// (`consumer_grants::tables_read`).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_removed_field_lists_the_tables_readers() {
+async fn a_removed_field_lists_the_grants_that_open_its_table() {
     let (_pg, pool) = empty("ordo_plans_readers").await;
     let with = |v: &str, fields: &str| {
         format!(
-            "domain notes @ {v}\n\nreader viewer reads note\n\nentity note {{\n{fields}}}\n\n\
+            "domain notes @ {v}\n\ngrant viewer {{\n  std.note.list\n}}\n\n\
+             entity note {{\n{fields}}}\n\n\
              op allNotes unbounded =\n  note[title]\n"
         )
     };
     store(&pool, &with("1.0.0", "  title: text\n  body: text?\n")).await;
     store(&pool, &with("1.1.0", "  title: text\n")).await;
-    let day = 86_400;
-    let a = evolve::render(&pool, "1.0.0", "1.1.0", &Choices::default(), 10 * day)
+    let a = evolve::render(&pool, "1.0.0", "1.1.0", &Choices::default())
         .await
         .expect("renders");
-    let b = evolve::render(&pool, "1.0.0", "1.1.0", &Choices::default(), 20 * day)
-        .await
-        .expect("renders");
-    assert_eq!(a.digest, b.digest, "the date moved the digest");
     assert_eq!(a.readers.len(), 1, "{:?}", a.readers);
     let n = &a.readers[0];
-    assert_eq!(n.reader, "viewer");
+    assert_eq!(n.grant, "grant viewer");
+    assert_eq!(n.table, "note");
     assert_eq!(n.field.as_deref(), Some("body"));
-    assert_eq!(n.grant_ends_not_before, 17 * day);
-    assert!(n.line().contains("reader `viewer`"), "{}", n.line());
+    assert!(
+        n.line()
+            .contains("`grant viewer` opens `note` to another deployment"),
+        "{}",
+        n.line()
+    );
+    assert!(
+        n.line()
+            .contains("the consumer changes its `external` first"),
+        "{}",
+        n.line()
+    );
 }
 
 /// **F4: `ordo rollback --dry-run` checks the version it would return to**

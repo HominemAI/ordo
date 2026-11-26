@@ -68,7 +68,9 @@ const MASTER: [u8; 32] = [45; 32];
 
 /// Both deployments' program, after the conformance fixture.
 const PROGRAM: &str = r#"
-peer other
+peer other {
+  std.widget.list
+}
 
 external mate from other.widget shared {
   id: text <- id
@@ -405,7 +407,7 @@ impl Node {
             ("ORDO_PEER_OTHER_SPACE".into(), DEFAULT_SPACE.into()),
         ]);
         let lookup = vars.clone();
-        ordo_exec::peer::resolve_with(&mut f.schema, "public", |k| lookup.get(k).cloned())
+        ordo_exec::peer::resolve_with(&mut f.schema, |k| lookup.get(k).cloned())
             .expect("a door peer needs no schema setting");
         let mate = f
             .schema

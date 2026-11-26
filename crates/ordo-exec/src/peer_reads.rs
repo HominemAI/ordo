@@ -204,7 +204,15 @@ where
 
     // The outermost read's own rows, when they are the peer's: its order
     // and `take` are sent too, so the holder answers exactly the page.
-    let root_whole = root_is_whole(q, &sites, paging);
+    let (level, wrapped) = root_level(q);
+    // Past a wrapper, the level's own `take` settles its rows whatever
+    // page the wrapper reads; with none, the page and the cursor do.
+    let paging = if wrapped { None } else { paging };
+    let root_whole = root_is_whole(level, &sites, paging);
+    let window = sites
+        .iter()
+        .find(|s| s.place == Place::Root)
+        .and_then(|s| root_window(level, s, paging));
     let keyed: Vec<Site> = sites
         .iter()
         .filter(|s| matches!(s.place, Place::Joined { .. }))
@@ -222,7 +230,7 @@ where
         }
         let mut f = base_fetch(s);
         if s.place == Place::Root && !root_whole {
-            if let Some((sort, limit)) = root_window(q, s, paging) {
+            if let Some((sort, limit)) = window.clone() {
                 f.sort = sort;
                 f.limit = Some(limit);
                 f.whole = false;
@@ -237,7 +245,16 @@ where
         // which leaves the native rows as they are, and their refs out.
         let mut probe = q.clone();
         let keyed_aliases: BTreeSet<String> = keyed.iter().map(|s| s.alias.clone()).collect();
-        let dropped = drop_filters_on(&mut probe, &keyed_aliases);
+        let dropped = {
+            let level = root_level_mut(&mut probe);
+            let dropped = drop_filters_on(level, &keyed_aliases);
+            if dropped {
+                // A filter that read the peer no longer narrows the probe,
+                // so its `take` no longer bounds it either.
+                level.limit = None;
+            }
+            dropped
+        };
         let mut probe_served = served.clone();
         for s in &keyed {
             probe_served.insert(s.alias.clone(), Vec::new());
@@ -252,19 +269,15 @@ where
             else {
                 continue;
             };
-            probe.outputs.push(ordo_sema::ir::OutField {
-                name: format!("$peerref_{}", s.alias),
-                expr: BExpr::Col {
+            push_output(
+                &mut probe,
+                &format!("$peerref_{}", s.alias),
+                BExpr::Col {
                     alias: from_alias.clone(),
                     column: from_column.clone(),
                     ty: ScalarTy::Text,
                 },
-            });
-        }
-        if dropped {
-            // A filter that read the peer no longer narrows the probe, so
-            // its `take` no longer bounds it either.
-            probe.limit = None;
+            );
         }
         set_served(&mut probe, &externals, probe_served);
         let rows = run(probe, dropped).await?;
@@ -373,7 +386,9 @@ fn collect(
                 out.push(site(alias, r, place, None));
             }
         }
-        Src::Sub { query, .. } => collect(query, externals, false, out),
+        // A call the binder wrapped (its `take` settles its rows first) is
+        // still the read's own level when the wrapper only pages it.
+        Src::Sub { query, .. } => collect(query, externals, outermost && passes(q), out),
         Src::Union { arms, .. } => arms.iter().for_each(|a| collect(a, externals, false, out)),
         Src::CteRef { .. } => {}
     }
@@ -414,6 +429,68 @@ fn collect(
     for c in &q.ctes {
         collect(&c.query, externals, false, out);
     }
+}
+
+/// Does `q` only page and project the sub-select it reads? Then the read's
+/// rows are that sub-select's, and its window is the read's.
+fn passes(q: &Query) -> bool {
+    matches!(q.from, Src::Sub { .. })
+        && q.joins.is_empty()
+        && q.filters.is_empty()
+        && q.having.is_empty()
+        && q.group.is_none()
+        && !q.distinct
+        && q.source_joins.is_empty()
+        && q.limit.is_none()
+}
+
+/// The level whose rows are the read's: `q`, or the sub-select a pass-
+/// through wrapper reads, and whether a wrapper was crossed.
+fn root_level(q: &Query) -> (&Query, bool) {
+    let mut at = q;
+    let mut wrapped = false;
+    while passes(at) {
+        let Src::Sub { query, .. } = &at.from else {
+            break;
+        };
+        at = query;
+        wrapped = true;
+    }
+    (at, wrapped)
+}
+
+fn root_level_mut(q: &mut Query) -> &mut Query {
+    if !passes(q) {
+        return q;
+    }
+    match &mut q.from {
+        Src::Sub { query, .. } => root_level_mut(query),
+        _ => unreachable!("a pass-through wrapper reads a sub-select"),
+    }
+}
+
+/// Add `expr` (over an alias of the root level) to the read's outputs as
+/// `name`, through each pass-through wrapper.
+fn push_output(q: &mut Query, name: &str, expr: BExpr) {
+    if passes(q) {
+        if let Src::Sub { query, alias } = &mut q.from {
+            let alias = alias.clone();
+            push_output(query, name, expr);
+            q.outputs.push(ordo_sema::ir::OutField {
+                name: name.to_string(),
+                expr: BExpr::Col {
+                    alias,
+                    column: name.to_string(),
+                    ty: ScalarTy::Text,
+                },
+            });
+            return;
+        }
+    }
+    q.outputs.push(ordo_sema::ir::OutField {
+        name: name.to_string(),
+        expr,
+    });
 }
 
 fn nested_in_cond(c: &BCond, externals: &ordo_sema::ir::ExternalReads, out: &mut Vec<Site>) {

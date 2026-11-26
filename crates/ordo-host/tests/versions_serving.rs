@@ -27,7 +27,6 @@ use ordo_api::{router, ApiState, MemoryBus, MemoryReplayCache, PageKey};
 use ordo_conformance::{Fixture, Pg, FIXTURE, SEED};
 use ordo_exec::route::SinglePool;
 use ordo_exec::{Pool, PoolConfig};
-use ordo_host::apply_op;
 use ordo_host::deploy::{self, Deployment, PinMap, Swapped};
 use ordo_host::schema_apply::Program;
 use ordo_host::spaces::Spaces;
@@ -159,6 +158,7 @@ async fn harness(db: &str) -> Harness {
         second_step: Default::default(),
         console_home: Default::default(),
         deployment: Default::default(),
+        clones: Default::default(),
     });
     let spaces = Spaces::routed(
         deployment.clone(),
@@ -684,7 +684,7 @@ async fn registry_db(stem: &str) -> (Pool, PoolConfig) {
 
 async fn apply(pool: &Pool, source: &str) {
     let program = Program::compile(source).expect("compiles");
-    apply_op::run_program(
+    run_all_at_once(
         pool,
         &SinglePool::new(pool.clone()),
         &program,
@@ -716,6 +716,18 @@ async fn node(
         .expect("loads");
     let d = Deployment::boot(active);
     let s = ordo_host::pin_stream::PinStream::new(d.clone(), pool.clone(), c.clone(), keys, space);
+    // These tests watch a version drop the moment no pin names it, so
+    // `versions.min_residency` is 0 here (its default keeps it 10 minutes).
+    Versions::on(pool)
+        .set_setting(
+            ordo_host::versions::VersionSetting::MinResidency,
+            Some("0"),
+            "dev:ada",
+            "tests drop a version at once",
+            12,
+        )
+        .await
+        .expect("min_residency 0");
     (d, s)
 }
 
@@ -909,4 +921,235 @@ async fn no_move_waits_for_a_window_yet_and_a_revoked_versions_tenant_stays() {
         Some("0.1.0".into()),
         "a tenant on a revoked version stays until its move lands (session 2)"
     );
+}
+
+/// Store one version setting, as `ordo versions set` does.
+async fn set_version_setting(
+    pool: &Pool,
+    setting: ordo_host::versions::VersionSetting,
+    value: &str,
+) {
+    Versions::on(pool)
+        .set_setting(setting, Some(value), "dev:ada", "the test", 90)
+        .await
+        .expect("set");
+}
+
+/// A node with a status, so a refused load is said with why.
+fn stream_of(
+    d: &Arc<Deployment>,
+    pool: &Pool,
+    c: &PoolConfig,
+) -> Arc<ordo_host::pin_stream::PinStream> {
+    let keys = Fixture::from_source("", "").expect("empty").keys.clone();
+    let status = ordo_host::node_status::NodeStatus::new(
+        pool.clone(),
+        "max-loaded-node".into(),
+        std::time::Duration::from_secs(5),
+    );
+    ordo_host::pin_stream::PinStream::with_status(
+        d.clone(),
+        pool.clone(),
+        c.clone(),
+        keys,
+        ordo_conformance::fixture_space(),
+        status,
+    )
+}
+
+/// **`versions.max_loaded` at 1, with nothing idle to push out**
+/// (owner, 2026-11-25): the node holds only the active version, so the
+/// next load is refused, naming the setting and the command, and the
+/// tenant pinned to it stays closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_load_past_max_loaded_with_none_idle_is_refused_naming_the_setting() {
+    use ordo_host::versions::VersionSetting;
+    let (pool, c) = registry_db("ordo_vserve_max_loaded").await;
+    tenant(&pool, "spc_a").await;
+    apply(&pool, V010).await;
+    apply(&pool, V020).await;
+    let (d, _) = node(&pool, &c).await;
+    let stream = stream_of(&d, &pool, &c);
+    set_version_setting(&pool, VersionSetting::MaxLoaded, "1").await;
+    Versions::on(&pool)
+        .pin("spc_a", "0.1.0", "deployment-owner:ada", 50)
+        .await
+        .expect("pinned");
+    let read = stream.tail().await.expect("tail");
+    assert!(read.loaded.is_empty(), "{read:?}");
+    let (version, why) = read.refused.first().expect("refused");
+    assert_eq!(version, "0.1.0");
+    assert!(
+        why.contains("versions.max_loaded")
+            && why.contains("ordo versions set max-loaded")
+            && why.contains("none beside the active one is idle"),
+        "{why}"
+    );
+    assert!(d.for_space("spc_a").is_err(), "closed, not served another");
+}
+
+/// **`versions.at_capacity`** (owner, 2026-11-25): at `versions.max_loaded`
+/// 2, a third version pushes out the least used idle one by default. The
+/// tenant on the version pushed out is closed on this node until a
+/// signed-in request wakes it; nothing loads it again by itself. With
+/// `refuse`, the third is refused instead, naming both settings, and the
+/// loaded one stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn at_max_loaded_the_least_used_idle_version_is_pushed_out_unless_set_to_refuse() {
+    use ordo_host::versions::VersionSetting;
+    let (pool, c) = registry_db("ordo_vserve_at_capacity").await;
+    for t in ["spc_a", "spc_b", "spc_c"] {
+        tenant(&pool, t).await;
+    }
+    apply(&pool, V010).await;
+    apply(&pool, V020).await;
+    apply(&pool, V030).await;
+    let (d, _) = node(&pool, &c).await;
+    let stream = stream_of(&d, &pool, &c);
+    set_version_setting(&pool, VersionSetting::MaxLoaded, "2").await;
+    let v = Versions::on(&pool);
+    v.pin("spc_a", "0.1.0", "deployment-owner:ada", 50)
+        .await
+        .expect("pinned");
+    let read = stream.tail().await.expect("tail");
+    assert_eq!(read.loaded, vec!["0.1.0".to_string()], "{read:?}");
+
+    // The default, `evict-idle`: 0.1.0 makes room for 0.2.0.
+    v.pin("spc_b", "0.2.0", "deployment-owner:ada", 51)
+        .await
+        .expect("pinned");
+    let read = stream.tail().await.expect("tail");
+    assert_eq!(read.loaded, vec!["0.2.0".to_string()], "{read:?}");
+    assert_eq!(
+        read.pushed_out,
+        vec![("0.1.0".to_string(), "0.2.0".to_string())],
+        "{read:?}"
+    );
+    assert!(d.loaded("0.1.0").is_none());
+    assert_eq!(d.evicted(), vec!["0.1.0".to_string()]);
+    assert!(d.for_space("spc_b").is_ok(), "0.2.0 serves its tenant");
+    assert!(
+        ordo_host::pin_stream::log_lines(&read)
+            .iter()
+            .any(|l| l.contains("to make room for 0.2.0") && l.contains("versions.max_loaded")),
+        "{read:?}"
+    );
+    // Not loaded again by a read with no request behind it.
+    let read = stream.tail().await.expect("tail");
+    assert!(read.loaded.is_empty(), "{read:?}");
+
+    // `refuse`: a request wakes 0.1.0, and its load is refused rather
+    // than pushing 0.2.0 out.
+    set_version_setting(&pool, VersionSetting::AtCapacity, "refuse").await;
+    assert!(d.wake("0.1.0"));
+    let read = stream.tail().await.expect("tail");
+    assert!(
+        read.loaded.is_empty() && read.pushed_out.is_empty(),
+        "{read:?}"
+    );
+    let (version, why) = read.refused.first().expect("refused");
+    assert_eq!(version, "0.1.0");
+    assert!(
+        why.contains("versions.max_loaded")
+            && why.contains("versions.at_capacity")
+            && why.contains("ordo versions set at-capacity evict-idle"),
+        "{why}"
+    );
+    assert!(d.loaded("0.2.0").is_some(), "the loaded one stays");
+}
+
+/// **The residency settings refuse a bad value by name**, and the node
+/// takes a good one with the pins: `versions.memory_budget` bounds the
+/// per-space views a node keeps, and `versions.max_concurrent_loads`
+/// reaches the node's guards.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_residency_settings_refuse_a_bad_value_and_the_node_takes_a_good_one() {
+    use ordo_host::versions::VersionSetting;
+    let (pool, c) = registry_db("ordo_vserve_residency_settings").await;
+    apply(&pool, V010).await;
+    let (d, stream) = node(&pool, &c).await;
+    for (setting, bad, command) in [
+        (
+            VersionSetting::MaxLoaded,
+            "0",
+            "ordo versions set max-loaded",
+        ),
+        (
+            VersionSetting::MaxLoaded,
+            "lots",
+            "ordo versions set max-loaded",
+        ),
+        (
+            VersionSetting::MemoryBudget,
+            "1KB",
+            "ordo versions set memory-budget",
+        ),
+        (
+            VersionSetting::MaxConcurrentLoads,
+            "99",
+            "ordo versions set max-concurrent-loads",
+        ),
+        (
+            VersionSetting::AtCapacity,
+            "maybe",
+            "ordo versions set at-capacity",
+        ),
+        (
+            VersionSetting::WakeWait,
+            "1h",
+            "ordo versions set wake-wait",
+        ),
+    ] {
+        let e = Versions::on(&pool)
+            .set_setting(setting, Some(bad), "dev:ada", "t", 91)
+            .await
+            .expect_err("refused");
+        assert!(matches!(e, VersionRefusal::Guard { .. }), "{e:?}");
+        let text = e.to_string();
+        assert!(
+            text.contains(setting.name()) && text.contains(command),
+            "{text}"
+        );
+    }
+
+    // Six views on the active version, under the default budget: kept.
+    let live = d.current();
+    for n in 0..6 {
+        let _ = live.in_space(&format!("spc_{n}"), pool.clone());
+    }
+    stream.tail().await.expect("tail");
+    assert_eq!(live.view_count(), 6, "512MB keeps them");
+    // 1MB is 4 views of 256KB: the 2 least recently used go.
+    set_version_setting(&pool, VersionSetting::MemoryBudget, "1MB").await;
+    set_version_setting(&pool, VersionSetting::MaxConcurrentLoads, "3").await;
+    stream.tail().await.expect("tail");
+    assert_eq!(live.view_count(), 4, "versions.memory_budget 1MB keeps 4");
+    assert_eq!(d.guards().max_loads, 3);
+    assert_eq!(d.guards().memory_budget, 1024 * 1024);
+}
+
+/// `apply_op::run_program` with `rollout.strategy` set to `all` first. With
+/// it unset, a deployment that is not dev rolls an apply out a batch at a
+/// time (ruled 2026-11-25); these tests apply and expect every tenant on
+/// the new version at once.
+async fn run_all_at_once(
+    pool: &ordo_exec::Pool,
+    pools: &dyn ordo_exec::route::PoolResolver,
+    program: &ordo_host::schema_apply::Program,
+    notes: Vec<String>,
+    actor: &str,
+    op: &str,
+    activate: bool,
+) -> Result<ordo_host::apply_op::Report, ordo_host::apply_op::ApplyRefused> {
+    ordo_host::rollouts::Rollouts::on(pool)
+        .set_setting(
+            "rollout.strategy",
+            Some("all"),
+            "test",
+            "every tenant at once",
+            0,
+        )
+        .await
+        .expect("rollout.strategy all");
+    ordo_host::apply_op::run_program(pool, pools, program, notes, actor, op, activate).await
 }

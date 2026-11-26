@@ -593,7 +593,12 @@ for creates, and a backfill is all converges. See §9.
   `system:migration:*` with a typed reason naming the migration. This is a
   new refusal class beside the existing `unrevertable_image` /
   `unrevertable_sealed` / `unrevertable_tree` family in
-  `crates/ordo-exec/src/undo.rs:955`.
+  `crates/ordo-exec/src/undo.rs:955`. **Built 2026-11-24** (branch
+  `evo-versions-remove`): a group carrying the backfill record (trailer
+  `0x04`, actor `system:backfill`) is refused as `unrevertable_backfill`,
+  naming the step, the field and the mapping, on `--dry-run` too
+  (`undo::refuse_backfill`; test `backfill.rs`
+  `a_revert_of_a_backfill_group_is_refused_by_name`).
 - **A drop truncates the undo horizon, silently, today.** `undo.rs` already
   refuses `unrevertable_image` when a logged image names a field the schema
   no longer declares. So D1 makes every retained group touching that entity
@@ -872,6 +877,13 @@ Increment 3 grows the same table into the state machine of §7.1.
 
 > **Current behaviour that 27c replaces.** A tenant behind is held closed
 > (`SchemaBehind`, 15-second catch-up). See `plan-versions.md`.
+>
+> **Replaced for class A on 2026-11-23** (`plan-versions.md` §2.1,
+> increment 7). A tenant with a database of its own keeps its pin on the
+> version it serves until its database takes the new one and is gated.
+> Then its pin moves. A refused change leaves it serving, with the reason
+> on its move in `$moves` (`std.deployment.tenants`). What follows is how
+> the catch-up brings a database forward, which the move still uses.
 
 **What was seen.** The notes program lost its `gone` field. `serve.sh`
 applied the new version, the deployment's database moved, and the owner's
@@ -979,6 +991,12 @@ sentence in `crates/ordo-host/src/lib.rs`.
 
 ### Increment 3 — the barrier and the plaintext backfill
 
+> **Replaced (review 2026-11-23).** This increment is built as
+> `plan-versions.md` increments 10b, 11a and 11b, designed in
+> `plan-backfill-dual-writes.md`. There is no write barrier and no freeze.
+> The cursor, the chunked backfill, the verifier and the kill drill below
+> carry over. The freeze assertions do not.
+
 > **Changed 2026-10-01.** The write freeze below is replaced by dual writes:
 > during a step's soak the write path writes the new shape and the previous
 > one. The barrier and its drill change to match. Still open.
@@ -1028,6 +1046,23 @@ developer owns everything else.
 ---
 
 ## 9 · The open question this plan does not close
+
+> **Closed (review 2026-11-23).** The owner ruled this on 2026-09-08 and
+> confirmed it on 2026-09-20 (`corpus-rulings.md`, "The backfill audit
+> encoding" and "What a backfill's revert means").
+>
+> - Summarised batch groups are the default. The group carries what
+>   changed, the row count, the declared mapping and a content hash.
+> - Full per-row images are a per-backfill choice the app developer
+>   declares (`backfill.audit_images`).
+> - The entry says which kind it is, so a segment is never ambiguous.
+> - A revert undoes the diff by the declared inverse. It does not rebuild
+>   each row's old value from the chain.
+> - For a summarised backfill the old values are recovered from a backup,
+>   and the migration's report says so before it runs.
+>
+> The text below is kept as the record of the question. Where it is built:
+> `plan-backfill-dual-writes.md` §5.
 
 **[open] What does a transforming backfill write into the audit spine, and
 can the chain carry it?**

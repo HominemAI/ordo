@@ -30,13 +30,23 @@
 //!
 //! # The list
 //!
-//! [`Windows::list`] answers every time from 12 months back to 12 months
-//! ahead. A cron window is listed as each time the cron gives. A skipped
-//! time is kept and marked with the skip that covers it, so a console can
-//! show it struck through. A time is skipped when it starts inside a skip.
-//! The list holds at most [`MAX_OCCURRENCES`] times and says when it was
-//! cut; one cron window gives at most [`MAX_OCCURRENCES_PER_WINDOW`] in the
-//! 24 months, which [`Windows::set`] checks.
+//! [`Windows::list`] answers every time from `windows.list_months` (12)
+//! back to as many ahead. A cron window is listed as each time the cron
+//! gives. A skipped time is kept and marked with the skip that covers it,
+//! so a console can show it struck through. A time is skipped when it
+//! starts inside a skip. The list holds at most `windows.max_times`
+//! (100,000) times and says when it was cut; one cron window gives at most
+//! `windows.max_times_per_window` (20,000) in the list's span, which
+//! [`Windows::set`] checks.
+//!
+//! # The caps are settings
+//!
+//! Owner, 2026-11-25 (`versions-increment-3-three-defaults-for` ask 3):
+//! *"add the knob. Keep default as is. Not number should be hard coded"*.
+//! Each cap is a setting stored in `$version_settings` beside the version
+//! settings ([`WindowLimits`], [`SETTINGS`]), set with `ordo versions set
+//! windows.<name> <value> --reason "..."` or
+//! `std.deployment.setVersionSetting`. Each refusal a cap makes names it.
 //!
 //! # Tenants
 //!
@@ -51,21 +61,147 @@ use ordo_api::{ErrorCode, ExecError};
 use ordo_exec::{sql_lit, Pool, PoolError};
 use ordo_fault::FaultClass;
 
-/// The longest message a window may carry, in characters.
-pub const MAX_MESSAGE_CHARS: usize = 2_000;
-/// The longest reason a skip may carry, in characters.
-pub const MAX_REASON_CHARS: usize = 500;
-/// The longest window or skip id, in characters.
-pub const MAX_ID_CHARS: usize = 64;
-/// The most tenants one window may list.
-pub const MAX_TENANTS: usize = 1_000;
-/// How far back and ahead the list reaches, in months.
-pub const LIST_MONTHS: i64 = 12;
-/// The most times one cron window may give in the list's 24 months: about
-/// once an hour. A cron that gives more is refused when it is set.
-pub const MAX_OCCURRENCES_PER_WINDOW: usize = 20_000;
-/// The most times one list answers. Past it the list is cut and says so.
-pub const MAX_OCCURRENCES: usize = 100_000;
+/// `windows.max_message_chars`: the longest message a window may carry.
+pub const MESSAGE_CHARS_SETTING: &str = "windows.max_message_chars";
+/// `windows.max_reason_chars`: the longest reason a skip may carry.
+pub const REASON_CHARS_SETTING: &str = "windows.max_reason_chars";
+/// `windows.max_id_chars`: the longest window or skip id a person gives.
+pub const ID_CHARS_SETTING: &str = "windows.max_id_chars";
+/// `windows.max_tenants`: the most tenants one window may list.
+pub const TENANTS_SETTING: &str = "windows.max_tenants";
+/// `windows.list_months`: how far back and ahead the list reaches.
+pub const LIST_MONTHS_SETTING: &str = "windows.list_months";
+/// `windows.max_times_per_window`: the most times one cron window may give
+/// in the list's span. A cron that gives more is refused when it is set.
+pub const TIMES_PER_WINDOW_SETTING: &str = "windows.max_times_per_window";
+/// `windows.max_times`: the most times one list answers. Past it the list
+/// is cut and says so.
+pub const TIMES_SETTING: &str = "windows.max_times";
+
+/// Every window setting, with its default and the range a value may take.
+pub const SETTINGS: [(&str, i64, i64, i64); 7] = [
+    (MESSAGE_CHARS_SETTING, 2_000, 1, 100_000),
+    (REASON_CHARS_SETTING, 500, 1, 10_000),
+    (ID_CHARS_SETTING, 64, 8, 200),
+    (TENANTS_SETTING, 1_000, 1, 100_000),
+    (LIST_MONTHS_SETTING, 12, 1, 120),
+    (TIMES_PER_WINDOW_SETTING, 20_000, 1, 1_000_000),
+    (TIMES_SETTING, 100_000, 1, 10_000_000),
+];
+
+/// The longest id any window or skip has, whatever `windows.max_id_chars`
+/// says now: a delete or an unskip reads up to this, so an id set under a
+/// larger cap can still be removed.
+pub const ID_CHARS_CEILING: usize = 200;
+
+/// **The window caps in force** (owner, 2026-11-25: no number is hard
+/// coded). Read from `$version_settings` ([`Windows::limits`]); each unset
+/// one is its default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowLimits {
+    pub max_message_chars: usize,
+    pub max_reason_chars: usize,
+    pub max_id_chars: usize,
+    pub max_tenants: usize,
+    pub list_months: i64,
+    pub max_times_per_window: usize,
+    pub max_times: usize,
+}
+
+impl Default for WindowLimits {
+    fn default() -> WindowLimits {
+        let mut out = WindowLimits {
+            max_message_chars: 0,
+            max_reason_chars: 0,
+            max_id_chars: 0,
+            max_tenants: 0,
+            list_months: 0,
+            max_times_per_window: 0,
+            max_times: 0,
+        };
+        for (name, default, _, _) in SETTINGS {
+            out.put(name, default);
+        }
+        out
+    }
+}
+
+impl WindowLimits {
+    fn put(&mut self, name: &str, n: i64) {
+        let u = usize::try_from(n).unwrap_or(0);
+        match name {
+            MESSAGE_CHARS_SETTING => self.max_message_chars = u,
+            REASON_CHARS_SETTING => self.max_reason_chars = u,
+            ID_CHARS_SETTING => self.max_id_chars = u,
+            TENANTS_SETTING => self.max_tenants = u,
+            LIST_MONTHS_SETTING => self.list_months = n,
+            TIMES_PER_WINDOW_SETTING => self.max_times_per_window = u,
+            TIMES_SETTING => self.max_times = u,
+            _ => {}
+        }
+    }
+
+    /// As the settings op answers them.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "maxMessageChars": self.max_message_chars,
+            "maxReasonChars": self.max_reason_chars,
+            "maxIdChars": self.max_id_chars,
+            "maxTenants": self.max_tenants,
+            "listMonths": self.list_months,
+            "maxTimesPerWindow": self.max_times_per_window,
+            "maxTimes": self.max_times,
+        })
+    }
+
+    /// The JSON key of one setting.
+    pub fn json_key(name: &str) -> &'static str {
+        match name {
+            MESSAGE_CHARS_SETTING => "maxMessageChars",
+            REASON_CHARS_SETTING => "maxReasonChars",
+            ID_CHARS_SETTING => "maxIdChars",
+            TENANTS_SETTING => "maxTenants",
+            LIST_MONTHS_SETTING => "listMonths",
+            TIMES_PER_WINDOW_SETTING => "maxTimesPerWindow",
+            _ => "maxTimes",
+        }
+    }
+}
+
+/// The full name of a window setting from what a person typed:
+/// `windows.list_months`, `list_months` or `list-months`.
+pub fn setting_name(text: &str) -> Option<&'static str> {
+    let t = text.trim();
+    let t = t.strip_prefix("windows.").unwrap_or(t).replace('-', "_");
+    SETTINGS
+        .into_iter()
+        .map(|(n, ..)| n)
+        .find(|n| n.strip_prefix("windows.") == Some(t.as_str()))
+}
+
+/// Check a value for a window setting, and answer it as stored. `None`
+/// clears it, back to the default. A refusal names the setting, the range
+/// and the command.
+pub fn check_setting(name: &str, value: Option<&str>) -> Result<Option<String>, WindowRefusal> {
+    let Some((name, _, lo, hi)) = SETTINGS.into_iter().find(|(n, ..)| *n == name) else {
+        return Err(WindowRefusal::Input(format!(
+            "`{}` is not a window setting; there are {}",
+            name.chars().take(60).collect::<String>(),
+            SETTINGS.map(|(n, ..)| n).join(", ")
+        )));
+    };
+    let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    match v.parse::<i64>() {
+        Ok(n) if (lo..=hi).contains(&n) => Ok(Some(n.to_string())),
+        _ => Err(WindowRefusal::Input(format!(
+            "`{name}` is a whole number from {lo} to {hi}, not `{}`. Set it with `ordo \
+             versions set {name} <n> --reason \"...\"`, or `--clear` for its default",
+            v.chars().take(40).collect::<String>()
+        ))),
+    }
+}
 
 const DDL: &str = "\
 CREATE TABLE IF NOT EXISTS \"$windows\" ( \
@@ -131,6 +267,19 @@ impl Target {
         }
     }
 
+    /// At most `max` tenants listed (`windows.max_tenants`).
+    pub fn check_count(&self, max: usize) -> Result<(), WindowRefusal> {
+        let n = self.tenants().len();
+        if n > max {
+            return Err(WindowRefusal::Input(format!(
+                "a window lists at most {max} tenants (windows.max_tenants); this one lists \
+                 {n}. Use `except` with the tenants left out, or `all`, or raise it with \
+                 `ordo versions set windows.max_tenants <n>`"
+            )));
+        }
+        Ok(())
+    }
+
     /// Whether the window covers `space`.
     pub fn covers(&self, space: &str) -> bool {
         match self {
@@ -141,21 +290,15 @@ impl Target {
     }
 
     /// A target from its rule's name and the tenants listed. Checked:
-    /// `all` lists none, `only` and `except` at least 1 and at most
-    /// [`MAX_TENANTS`].
+    /// `all` lists none, `only` and `except` at least 1. The most it may
+    /// list, `windows.max_tenants`, is checked when it is set
+    /// ([`Target::check_count`]).
     pub fn parse(kind: &str, tenants: &[String]) -> Result<Target, WindowRefusal> {
         let set: BTreeSet<String> = tenants
             .iter()
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
             .collect();
-        if set.len() > MAX_TENANTS {
-            return Err(WindowRefusal::Input(format!(
-                "a window lists at most {MAX_TENANTS} tenants; this one lists {}. Use `except` \
-                 with the tenants left out, or `all`",
-                set.len()
-            )));
-        }
         match kind.trim() {
             "all" if set.is_empty() => Ok(Target::All),
             "all" => Err(WindowRefusal::Input(
@@ -233,7 +376,7 @@ pub struct Occurrence {
 /// What [`Windows::list`] answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listing {
-    /// The span listed: 12 months back to 12 months ahead.
+    /// The span listed: `windows.list_months` back to as many ahead.
     pub from: i64,
     pub to: i64,
     /// The tenant asked about, when one was.
@@ -244,7 +387,7 @@ pub struct Listing {
     pub skips: Vec<Skip>,
     /// Each time in the span, by start.
     pub occurrences: Vec<Occurrence>,
-    /// The list reached [`MAX_OCCURRENCES`] and stopped there.
+    /// The list reached `windows.max_times` and stopped there.
     pub truncated: bool,
 }
 
@@ -339,36 +482,41 @@ impl From<PoolError> for WindowRefusal {
 
 // ── the checks ─────────────────────────────────────────────────────────
 
-/// A message as stored: any text, at most [`MAX_MESSAGE_CHARS`] characters,
-/// not blank. Kept as written, never rendered.
-pub fn check_message(text: &str) -> Result<String, WindowRefusal> {
+/// A message as stored: any text, at most `max` characters
+/// (`windows.max_message_chars`), not blank. Kept as written, never
+/// rendered.
+pub fn check_message(text: &str, max: usize) -> Result<String, WindowRefusal> {
     let n = text.chars().count();
     if text.trim().is_empty() {
         return Err(WindowRefusal::Input(format!(
-            "a window carries a message of 1 to {MAX_MESSAGE_CHARS} characters; this one is \
-             empty (`--message \"...\"`)"
+            "a window carries a message of 1 to {max} characters; this one is empty \
+             (`--message \"...\"`)"
         )));
     }
-    if n > MAX_MESSAGE_CHARS {
+    if n > max {
         return Err(WindowRefusal::Input(format!(
-            "a message is at most {MAX_MESSAGE_CHARS} characters; this one is {n}"
+            "a message is at most {max} characters (windows.max_message_chars); this one is \
+             {n}. `ordo versions set windows.max_message_chars <n>` raises it"
         )));
     }
     Ok(text.to_string())
 }
 
-/// An id a person gave: 1 to [`MAX_ID_CHARS`] of `a-z`, `0-9`, `_`, `-`.
-pub fn check_id(text: &str) -> Result<String, WindowRefusal> {
+/// An id a person gave: 1 to `max` (`windows.max_id_chars`) of `a-z`,
+/// `0-9`, `_`, `-`.
+pub fn check_id(text: &str, max: usize) -> Result<String, WindowRefusal> {
     let id = text.trim();
     if id.is_empty()
-        || id.chars().count() > MAX_ID_CHARS
+        || id.chars().count() > max
         || !id
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
     {
         return Err(WindowRefusal::Input(format!(
-            "`{}` is not an id: 1 to {MAX_ID_CHARS} of a-z, 0-9, `_` and `-`",
-            id.chars().take(MAX_ID_CHARS).collect::<String>()
+            "`{}` is not an id: 1 to {max} (windows.max_id_chars) of a-z, 0-9, `_` and `-`",
+            id.chars()
+                .take(max.min(ID_CHARS_CEILING))
+                .collect::<String>()
         )));
     }
     Ok(id.to_string())
@@ -383,9 +531,9 @@ fn mint(prefix: &str) -> String {
 
 /// Check a schedule: an end after its start; a cron that parses and fires;
 /// a length that is positive and shorter than the cron's shortest gap, so
-/// two times never overlap; and no more than
-/// [`MAX_OCCURRENCES_PER_WINDOW`] times in the list's 24 months.
-pub fn check_schedule(s: &Schedule, now: i64) -> Result<(), WindowRefusal> {
+/// two times never overlap; and no more than `windows.max_times_per_window`
+/// times in the list's span.
+pub fn check_schedule(s: &Schedule, now: i64, limits: &WindowLimits) -> Result<(), WindowRefusal> {
     match s {
         Schedule::Range { start, end } => {
             if end <= start {
@@ -419,12 +567,16 @@ pub fn check_schedule(s: &Schedule, now: i64) -> Result<(), WindowRefusal> {
                     format_length(*length)
                 )));
             }
-            let (from, to) = span(now);
+            let (from, to) = span(now, limits.list_months);
             let n = c.count(from, to);
-            if n > MAX_OCCURRENCES_PER_WINDOW {
+            let max = limits.max_times_per_window;
+            if n > max {
                 return Err(WindowRefusal::Input(format!(
-                    "a cron window gives at most {MAX_OCCURRENCES_PER_WINDOW} times in the 24 \
-                     months the list covers, about once an hour; `{cron}` gives {n}"
+                    "a cron window gives at most {max} times (windows.max_times_per_window) in \
+                     the {} months the list covers (windows.list_months back and ahead); \
+                     `{cron}` gives {n}. `ordo versions set windows.max_times_per_window <n>` \
+                     raises it",
+                    limits.list_months * 2
                 )));
             }
             Ok(())
@@ -446,6 +598,61 @@ impl<'a> Windows<'a> {
         Windows { pool }
     }
 
+    /// **The window caps in force**, from `$version_settings`. A database
+    /// with no settings table yet, and each unset or unreadable value,
+    /// answers its default.
+    pub async fn limits(&self) -> Result<WindowLimits, WindowRefusal> {
+        let rows = match self
+            .pool
+            .rows(
+                "SELECT DISTINCT ON (\"setting\") \"setting\", \"value\" \
+                 FROM \"$version_settings\" WHERE \"setting\" LIKE 'windows.%' \
+                 ORDER BY \"setting\", \"seq\" DESC",
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(e) if e.is_missing_table() => return Ok(WindowLimits::default()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = WindowLimits::default();
+        for r in rows {
+            let (Some(Some(name)), Some(Some(value))) = (r.first().cloned(), r.get(1).cloned())
+            else {
+                continue;
+            };
+            if let Ok(Some(v)) = check_setting(&name, Some(&value)) {
+                if let Ok(n) = v.parse::<i64>() {
+                    out.put(&name, n);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// **Change one window cap**, or clear it with `None`, with who and
+    /// why. Checked first ([`check_setting`]); written beside the version
+    /// settings. `true` when it changed.
+    pub async fn set_setting(
+        &self,
+        setting: &str,
+        value: Option<&str>,
+        actor: &str,
+        reason: &str,
+        at: u64,
+    ) -> Result<(bool, WindowLimits), WindowRefusal> {
+        let reason = crate::versions::check_reason(reason)
+            .map_err(|e| WindowRefusal::Input(e.to_string()))?;
+        let Some(name) = setting_name(setting) else {
+            return Err(check_setting(setting, value).expect_err("not a window setting"));
+        };
+        let value = check_setting(name, value)?;
+        let changed =
+            crate::versions::record_named(self.pool, name, value.as_deref(), actor, &reason, at)
+                .await?;
+        Ok((changed, self.limits().await?))
+    }
+
     /// Create the three tables. Idempotent; retried once, because `IF NOT
     /// EXISTS` is not race-free between two callers.
     pub async fn ensure(&self) -> Result<(), WindowRefusal> {
@@ -464,12 +671,14 @@ impl<'a> Windows<'a> {
         actor: &str,
         now: i64,
     ) -> Result<Window, WindowRefusal> {
+        let limits = self.limits().await?;
         let id = match &spec.id {
-            Some(id) => check_id(id)?,
+            Some(id) => check_id(id, limits.max_id_chars)?,
             None => mint("win"),
         };
-        let message = check_message(&spec.message)?;
-        check_schedule(&spec.schedule, now)?;
+        let message = check_message(&spec.message, limits.max_message_chars)?;
+        spec.target.check_count(limits.max_tenants)?;
+        check_schedule(&spec.schedule, now, &limits)?;
         self.ensure().await?;
         self.refuse_unknown(&spec.target.tenants()).await?;
         let (kind, start, end, cron, length) = match &spec.schedule {
@@ -578,14 +787,17 @@ impl<'a> Windows<'a> {
         actor: &str,
         now: i64,
     ) -> Result<Skip, WindowRefusal> {
+        let limits = self.limits().await?;
         let id = match id {
-            Some(id) => check_id(id)?,
+            Some(id) => check_id(id, limits.max_id_chars)?,
             None => mint("skp"),
         };
         let reason = match reason.map(str::trim).filter(|r| !r.is_empty()) {
-            Some(r) if r.chars().count() > MAX_REASON_CHARS => {
+            Some(r) if r.chars().count() > limits.max_reason_chars => {
                 return Err(WindowRefusal::Input(format!(
-                    "a skip's reason is at most {MAX_REASON_CHARS} characters; this one is {}",
+                    "a skip's reason is at most {} characters (windows.max_reason_chars); this \
+                     one is {}. `ordo versions set windows.max_reason_chars <n>` raises it",
+                    limits.max_reason_chars,
                     r.chars().count()
                 )))
             }
@@ -662,7 +874,7 @@ impl<'a> Windows<'a> {
         Ok(self.read(Some(id)).await?.into_iter().next())
     }
 
-    /// **Every time from 12 months back to 12 months ahead**, for one
+    /// **Every time from `windows.list_months` back to as many ahead**, for one
     /// tenant (the windows that cover it) or for the whole deployment.
     /// See the module doc for what is listed and the caps.
     pub async fn list(&self, tenant: Option<&str>, now: i64) -> Result<Listing, WindowRefusal> {
@@ -670,7 +882,8 @@ impl<'a> Windows<'a> {
         if let Some(t) = tenant {
             self.refuse_unknown(&[t]).await?;
         }
-        let (from, to) = span(now);
+        let limits = self.limits().await?;
+        let (from, to) = span(now, limits.list_months);
         let windows: Vec<Window> = self
             .read(None)
             .await?
@@ -697,7 +910,7 @@ impl<'a> Windows<'a> {
                     // Times that started before the span and run into it
                     // are listed too.
                     Ok(c) => c
-                        .expand(from - length, to, MAX_OCCURRENCES_PER_WINDOW)
+                        .expand(from - length, to, limits.max_times_per_window)
                         .into_iter()
                         .map(|s| (s, s + length))
                         .collect(),
@@ -708,7 +921,7 @@ impl<'a> Windows<'a> {
             };
             let mine = by_window.get(w.id.as_str());
             for (start, end) in starts {
-                if occurrences.len() >= MAX_OCCURRENCES {
+                if occurrences.len() >= limits.max_times {
                     truncated = true;
                     break;
                 }
@@ -744,6 +957,13 @@ impl<'a> Windows<'a> {
         })
     }
 
+    /// Every window stored, oldest first. A deployment with none answers
+    /// empty. Read by a rollout to tell a tenant no window covers from one
+    /// outside its window (`crate::rollouts`).
+    pub async fn all(&self) -> Result<Vec<Window>, WindowRefusal> {
+        self.read(None).await
+    }
+
     /// **The windows in force at `now`**: each whose range, or one of
     /// whose cron times, holds `now`, and that no skip suppresses. Each with
     /// the time it is in force, `(start, end)`. Read by the moves off a
@@ -755,6 +975,7 @@ impl<'a> Windows<'a> {
             return Ok(vec![]);
         }
         let skips = self.skips().await?;
+        let cap = self.limits().await?.max_times_per_window;
         let mut out = Vec::new();
         for w in windows {
             let held = match &w.schedule {
@@ -763,7 +984,7 @@ impl<'a> Windows<'a> {
                 }
                 Schedule::Cron { cron, length } => match Cron::parse(cron) {
                     Ok(c) => c
-                        .expand(now - length + 1, now + 1, MAX_OCCURRENCES_PER_WINDOW)
+                        .expand(now - length + 1, now + 1, cap)
                         .into_iter()
                         .map(|s| (s, s + length))
                         .find(|(s, e)| *s <= now && now < *e),
@@ -782,8 +1003,8 @@ impl<'a> Windows<'a> {
     }
 
     /// For each of `spaces`, the start of the next unskipped time a window
-    /// covering it gives, after `now` and within the list's 12 months
-    /// ahead. A tenant no window covers is absent.
+    /// covering it gives, after `now` and within the list's
+    /// `windows.list_months` ahead. A tenant no window covers is absent.
     pub async fn next_for(
         &self,
         spaces: &[&str],
@@ -794,7 +1015,8 @@ impl<'a> Windows<'a> {
             return Ok(BTreeMap::new());
         }
         let skips = self.skips().await?;
-        let (_, to) = span(now);
+        let limits = self.limits().await?;
+        let (_, to) = span(now, limits.list_months);
         // Each window's first time after `now`, once.
         let firsts: Vec<(&Window, i64)> = windows
             .iter()
@@ -802,7 +1024,7 @@ impl<'a> Windows<'a> {
                 let starts: Vec<i64> = match &w.schedule {
                     Schedule::Range { start, .. } => vec![*start],
                     Schedule::Cron { cron, .. } => match Cron::parse(cron) {
-                        Ok(c) => c.expand(now + 1, to, MAX_OCCURRENCES_PER_WINDOW),
+                        Ok(c) => c.expand(now + 1, to, limits.max_times_per_window),
                         Err(_) => vec![],
                     },
                 };
@@ -1164,7 +1386,7 @@ impl Listing {
             "\nTIMES ({}{})\n",
             self.occurrences.len(),
             if self.truncated {
-                format!(", cut at {MAX_OCCURRENCES}")
+                format!(", cut at {} (windows.max_times)", self.occurrences.len())
             } else {
                 String::new()
             }
@@ -1196,10 +1418,11 @@ fn join_or_none(t: &BTreeSet<String>) -> String {
 
 // ── time ───────────────────────────────────────────────────────────────
 
-/// The list's span around `now`: the same moment 12 months back and 12
-/// months ahead, the day clamped to the month's last.
-pub fn span(now: i64) -> (i64, i64) {
-    (add_months(now, -LIST_MONTHS), add_months(now, LIST_MONTHS))
+/// The list's span around `now`: the same moment `months` back and
+/// `months` ahead (`windows.list_months`, default 12), the day clamped to
+/// the month's last.
+pub fn span(now: i64, months: i64) -> (i64, i64) {
+    (add_months(now, -months), add_months(now, months))
 }
 
 fn add_months(t: i64, months: i64) -> i64 {
@@ -1555,6 +1778,45 @@ fn field(f: &str, lo: u32, hi: u32, names: &[&str], base: u32) -> Result<u64, St
 mod tests {
     use super::*;
 
+    fn check_schedule_d(s: &Schedule, now: i64) -> Result<(), WindowRefusal> {
+        check_schedule(s, now, &WindowLimits::default())
+    }
+
+    fn check_message_d(text: &str) -> Result<String, WindowRefusal> {
+        check_message(text, WindowLimits::default().max_message_chars)
+    }
+
+    #[test]
+    fn the_window_caps_are_settings_with_their_old_defaults() {
+        let d = WindowLimits::default();
+        assert_eq!(
+            (
+                d.max_message_chars,
+                d.max_reason_chars,
+                d.max_id_chars,
+                d.max_tenants
+            ),
+            (2_000, 500, 64, 1_000)
+        );
+        assert_eq!(
+            (d.list_months, d.max_times_per_window, d.max_times),
+            (12, 20_000, 100_000)
+        );
+        assert_eq!(setting_name("list-months"), Some(LIST_MONTHS_SETTING));
+        assert_eq!(
+            check_setting(LIST_MONTHS_SETTING, Some("18")).unwrap(),
+            Some("18".into())
+        );
+        let e = check_setting(LIST_MONTHS_SETTING, Some("0"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("windows.list_months") && e.contains("ordo versions set"),
+            "{e}"
+        );
+        assert!(check_setting("windows.nope", Some("1")).is_err());
+    }
+
     #[test]
     fn utc_times_read_and_print_back() {
         let t = parse_utc("2026-11-04T02:00Z").unwrap();
@@ -1579,7 +1841,7 @@ mod tests {
     #[test]
     fn the_span_is_twelve_months_each_way() {
         let now = parse_utc("2028-02-29T12:00Z").unwrap();
-        let (from, to) = span(now);
+        let (from, to) = span(now, 12);
         assert_eq!(format_utc(from), "2027-02-28T12:00:00Z");
         assert_eq!(format_utc(to), "2029-02-28T12:00:00Z");
     }
@@ -1648,8 +1910,8 @@ mod tests {
             start: parse_utc(a).unwrap(),
             end: parse_utc(b).unwrap(),
         };
-        assert!(check_schedule(&range("2026-11-20T02:00Z", "2026-11-20T04:00Z"), now).is_ok());
-        let e = check_schedule(&range("2026-11-20T04:00Z", "2026-11-20T02:00Z"), now)
+        assert!(check_schedule_d(&range("2026-11-20T02:00Z", "2026-11-20T04:00Z"), now).is_ok());
+        let e = check_schedule_d(&range("2026-11-20T04:00Z", "2026-11-20T02:00Z"), now)
             .unwrap_err()
             .to_string();
         assert!(e.contains("ends after it starts"), "{e}");
@@ -1657,20 +1919,20 @@ mod tests {
             cron: c.into(),
             length: l,
         };
-        assert!(check_schedule(&cron("0 2 * * sun", 7200), now).is_ok());
-        let e = check_schedule(&cron("0 2 * * *", 86_400), now)
+        assert!(check_schedule_d(&cron("0 2 * * sun", 7200), now).is_ok());
+        let e = check_schedule_d(&cron("0 2 * * *", 86_400), now)
             .unwrap_err()
             .to_string();
         assert!(e.contains("shortest gap"), "{e}");
-        let e = check_schedule(&cron("0 2 * * *", 0), now)
+        let e = check_schedule_d(&cron("0 2 * * *", 0), now)
             .unwrap_err()
             .to_string();
         assert!(e.contains("more than 0"), "{e}");
-        let e = check_schedule(&cron("*/5 * * * *", 60), now)
+        let e = check_schedule_d(&cron("*/5 * * * *", 60), now)
             .unwrap_err()
             .to_string();
         assert!(e.contains("20000"), "{e}");
-        let e = check_schedule(&cron("0 0 31 apr *", 60), now)
+        let e = check_schedule_d(&cron("0 0 31 apr *", 60), now)
             .unwrap_err()
             .to_string();
         assert!(e.contains("no time"), "{e}");
@@ -1697,11 +1959,11 @@ mod tests {
     #[test]
     fn a_message_is_capped_and_kept_as_written() {
         assert_eq!(
-            check_message("**Upgrade**\nback at 4").unwrap(),
+            check_message_d("**Upgrade**\nback at 4").unwrap(),
             "**Upgrade**\nback at 4"
         );
-        let e = check_message(&"x".repeat(2_001)).unwrap_err().to_string();
+        let e = check_message_d(&"x".repeat(2_001)).unwrap_err().to_string();
         assert!(e.contains("at most 2000"), "{e}");
-        assert!(check_message("  ").is_err());
+        assert!(check_message_d("  ").is_err());
     }
 }

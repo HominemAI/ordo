@@ -401,3 +401,156 @@ async fn the_door_sets_and_lists_as_the_client_does() {
         assert_eq!(e.code, ordo_api::ErrorCode::NotFound, "{op}");
     }
 }
+
+/// **The window caps are settings** (owner, 2026-11-25:
+/// `versions-increment-3-three-defaults-for` ask 3, *"add the knob. Keep
+/// default as is."*). Each is stored beside the version settings with who
+/// and why, a bad value is refused naming the setting and the command,
+/// and each one set changes what the windows do: the list's reach, the
+/// times one list holds, the times one cron may give, the tenants one
+/// window lists, and the length of a message, a skip's reason and an id.
+///
+/// A regression looks like a cap set and ignored, or a cap read as a
+/// constant again.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_window_caps_are_settings_that_change_what_windows_do() {
+    use ordo_host::windows::{
+        ID_CHARS_SETTING, LIST_MONTHS_SETTING, MESSAGE_CHARS_SETTING, REASON_CHARS_SETTING,
+        TENANTS_SETTING, TIMES_PER_WINDOW_SETTING, TIMES_SETTING,
+    };
+    let pool = fresh("ordo_windows_caps").await;
+    tenant(&pool, "spc_a").await;
+    tenant(&pool, "spc_b").await;
+    let w = Windows::on(&pool);
+    let now = t(NOW);
+    let set = |name: &'static str, v: &'static str| {
+        let pool = pool.clone();
+        async move {
+            Windows::on(&pool)
+                .set_setting(name, Some(v), "dev:ada", "the test", 1)
+                .await
+                .expect("set")
+        }
+    };
+
+    // Refused by name, nothing stored.
+    for (name, bad) in [(LIST_MONTHS_SETTING, "0"), (TENANTS_SETTING, "lots")] {
+        let e = w
+            .set_setting(name, Some(bad), "dev:ada", "t", 1)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains(name) && e.contains("ordo versions set"), "{e}");
+    }
+    let e = w
+        .set_setting("windows.nope", Some("1"), "dev:ada", "t", 1)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("windows.list_months"), "{e}");
+    assert_eq!(
+        w.limits().await.expect("limits"),
+        ordo_host::windows::WindowLimits::default()
+    );
+
+    // A range 6 months ahead is listed under the default 12 months, and
+    // not under 3.
+    let later = Schedule::Range {
+        start: t("2027-05-04T02:00Z"),
+        end: t("2027-05-04T04:00Z"),
+    };
+    w.set(&spec("later", Target::All, later), "dev:ada", now)
+        .await
+        .expect("set");
+    assert_eq!(times(&w.list(None, now).await.unwrap(), "later").len(), 1);
+    let (changed, limits) = set(LIST_MONTHS_SETTING, "3").await;
+    assert!(changed && limits.list_months == 3);
+    let l = w.list(None, now).await.unwrap();
+    assert!(times(&l, "later").is_empty(), "past windows.list_months");
+    assert_eq!(l.to, t("2027-02-04T12:00Z"));
+
+    // A daily cron gives about 180 times in 3 months each way; capped at
+    // 50 per window it is refused when set, naming the setting.
+    let daily = Schedule::Cron {
+        cron: "0 2 * * *".into(),
+        length: 60,
+    };
+    w.set(&spec("daily", Target::All, daily.clone()), "dev:ada", now)
+        .await
+        .expect("set");
+    set(TIMES_PER_WINDOW_SETTING, "50").await;
+    let e = w
+        .set(&spec("daily2", Target::All, daily), "dev:ada", now)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("windows.max_times_per_window"), "{e}");
+
+    // The list holds at most `windows.max_times`, and says it was cut.
+    set(TIMES_SETTING, "10").await;
+    let l = w.list(None, now).await.unwrap();
+    assert_eq!(l.occurrences.len(), 10);
+    assert!(l.truncated);
+    assert!(l.render().contains("windows.max_times"), "{}", l.render());
+
+    // One tenant per window.
+    set(TENANTS_SETTING, "1").await;
+    let e = w
+        .set(
+            &spec(
+                "two",
+                Target::parse("only", &ids(&["spc_a", "spc_b"])).unwrap(),
+                Schedule::Range {
+                    start: t("2026-11-20T02:00Z"),
+                    end: t("2026-11-20T04:00Z"),
+                },
+            ),
+            "dev:ada",
+            now,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("windows.max_tenants"), "{e}");
+
+    // The text caps.
+    set(MESSAGE_CHARS_SETTING, "10").await;
+    let mut long = spec(
+        "short",
+        Target::All,
+        Schedule::Range {
+            start: t("2026-11-20T02:00Z"),
+            end: t("2026-11-20T04:00Z"),
+        },
+    );
+    long.message = "m".repeat(11);
+    let e = w.set(&long, "dev:ada", now).await.unwrap_err().to_string();
+    assert!(e.contains("windows.max_message_chars"), "{e}");
+    set(ID_CHARS_SETTING, "8").await;
+    long.message = "ok".into();
+    long.id = Some("a-long-window-id".into());
+    let e = w.set(&long, "dev:ada", now).await.unwrap_err().to_string();
+    assert!(e.contains("windows.max_id_chars"), "{e}");
+    set(REASON_CHARS_SETTING, "5").await;
+    let e = w
+        .skip(
+            "daily",
+            None,
+            t("2026-12-01T00:00Z"),
+            t("2026-12-02T00:00Z"),
+            Some("a long reason"),
+            "dev:ada",
+            now,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("windows.max_reason_chars"), "{e}");
+
+    // Cleared, the default holds again.
+    let (changed, limits) = w
+        .set_setting(LIST_MONTHS_SETTING, None, "dev:ada", "back", 2)
+        .await
+        .expect("cleared");
+    assert!(changed && limits.list_months == 12);
+}

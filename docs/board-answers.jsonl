@@ -1795,3 +1795,6 @@
 {"seq": 1797, "item": "federation-build-5-choices-from-steps", "ask": 13, "at": "2026-11-26", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1798, "item": "federation-build-5-choices-from-steps", "ask": 14, "at": "2026-11-26", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1799, "item": "federation-build-5-choices-from-steps", "ask": 15, "at": "2026-11-26", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1800, "item": "federation-build-5-choices-from-steps", "ask": 4, "at": "2026-11-26T21:30:23Z", "status": "open", "text": "I guess the thought here is that nothing will match, and something could be injected to take its place? Or maybe they made a mistake?\nIf so yes.", "source": "page", "read": true}
+{"seq": 1801, "item": "federation-build-5-choices-from-steps", "ask": 0, "at": "2026-11-26T21:30:30Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1802, "item": "federation-build-5-choices-from-steps", "ask": 4, "at": "2026-11-26", "status": "decided", "text": "I guess the thought here is that nothing will match, and something could be injected to take its place? Or maybe they made a mistake? If so yes. (A grant line with no effect in a version is a plan warning, not a refusal.)", "source": "record", "read": true}

@@ -544,6 +544,10 @@ async fn blob_gate(
 /// a tenant not ready, a store behind, a presence touch owed, or the
 /// door's one denial.
 fn access_refusal(state: &ApiState, token: &str, space: &str, op: &str) -> ApiError {
+    // Another deployment's call the holder refused by name (G3).
+    if let Some(why) = state.access.peer_refused(token, space, op) {
+        return ApiError::new(ErrorCode::AccessDenied, why).with_op(op);
+    }
     match state.access.not_ready(token, space) {
         Some(wait) => ApiError::tenant_not_ready(op, wait),
         None if state.access.behind(token, space) => ApiError::server_busy().with_op(op),
@@ -1682,32 +1686,40 @@ pub(crate) fn check_access(
         )),
         Some(token) => match state.access.check(token, space, &op.name) {
             AccessDecision::Allow { principal, agent } => Ok((principal, agent, space.to_string())),
-            AccessDecision::Deny => match state.access.not_ready(token, space) {
-                // The person's own tenant, still being set up: a retryable
-                // refusal rather than the uniform denial.
-                Some(wait) => Err(ApiError::tenant_not_ready(&op.name, wait)),
-                // The door's member list for this tenant is behind its
-                // database: a retryable 503, never a denial it cannot back.
-                None if state.access.behind(token, space) => {
-                    Err(ApiError::server_busy().with_op(&op.name))
-                }
-                None if state.access.presence_required(token, space, &op.name) => {
-                    Err(ApiError::presence_required(&op.name))
-                }
-                // A grant pinned under another program version that
-                // disagrees with the tenant's (`plan-versions.md` §1.7).
-                // A grant a move killed: dead as a revoked share is
-                // (`plan-versions.md` §2.5).
-                None => match state.access.grant_killed(token, space, &op.name) {
+            AccessDecision::Deny => {
+                match state.access.peer_refused(token, space, &op.name) {
+                    // Another deployment's call the holder refused by name: which
+                    // consumer, which op, the grant line to add (G3).
                     Some(why) => Err(ApiError::new(ErrorCode::AccessDenied, why).with_op(&op.name)),
-                    None => match state.access.versions_disagree(token, space, &op.name) {
-                        Some(why) => {
-                            Err(ApiError::new(ErrorCode::VersionsDisagree, why).with_op(&op.name))
+                    None => match state.access.not_ready(token, space) {
+                        // The person's own tenant, still being set up: a retryable
+                        // refusal rather than the uniform denial.
+                        Some(wait) => Err(ApiError::tenant_not_ready(&op.name, wait)),
+                        // The door's member list for this tenant is behind its
+                        // database: a retryable 503, never a denial it cannot back.
+                        None if state.access.behind(token, space) => {
+                            Err(ApiError::server_busy().with_op(&op.name))
                         }
-                        None => Err(denied_after_check(&op.name, Some(token))),
+                        None if state.access.presence_required(token, space, &op.name) => {
+                            Err(ApiError::presence_required(&op.name))
+                        }
+                        // A grant pinned under another program version that
+                        // disagrees with the tenant's (`plan-versions.md` §1.7).
+                        // A grant a move killed: dead as a revoked share is
+                        // (`plan-versions.md` §2.5).
+                        None => match state.access.grant_killed(token, space, &op.name) {
+                            Some(why) => {
+                                Err(ApiError::new(ErrorCode::AccessDenied, why).with_op(&op.name))
+                            }
+                            None => match state.access.versions_disagree(token, space, &op.name) {
+                                Some(why) => Err(ApiError::new(ErrorCode::VersionsDisagree, why)
+                                    .with_op(&op.name)),
+                                None => Err(denied_after_check(&op.name, Some(token))),
+                            },
+                        },
                     },
-                },
-            },
+                }
+            }
         },
     }
 }

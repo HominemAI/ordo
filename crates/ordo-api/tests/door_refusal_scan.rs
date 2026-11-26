@@ -44,6 +44,10 @@ const RECORDED_ELSEWHERE: &[(&str, &str)] = &[
     // `check` denied it, and `check` records that denial as
     // `GrantKilledByMove`.
     ("ordo-api/src/router.rs", "state.access.grant_killed("),
+    // Another deployment's call the holder refused by name (G3): asked only
+    // after `check` denied it, and `check` records that denial as
+    // `PeerTokenRefused`, `ConsumerNotGranted` or `PeerLoop`.
+    ("ordo-api/src/router.rs", "state.access.peer_refused("),
     // `GET /live` with a token nobody signed: `token_known` records it.
     ("ordo-api/src/router.rs", "state.access.token_known(token)"),
     // The platform surfaces' one answer: after `authorize_in`, which

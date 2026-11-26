@@ -2481,6 +2481,7 @@ pub struct SwappableAccess {
     console_home: std::sync::OnceLock<String>,
     /// The identity service's keys, given to every door installed.
     identity_keys: std::sync::OnceLock<Arc<crate::identity_keys::IdentityKeys>>,
+    peer: std::sync::OnceLock<Arc<crate::peer_door::PeerDoor>>,
     /// The last read of every tenant database, behind the lock that makes
     /// rebuilds one at a time. See [`crate::directory::Cache`].
     directory: tokio::sync::Mutex<crate::directory::Cache>,
@@ -2545,6 +2546,14 @@ impl SwappableAccess {
     }
 
     /// Give the door that is serving, and every door installed after it,
+    /// the door for other deployments (step G3). Once.
+    pub fn wire_peer(&self, peer: Arc<crate::peer_door::PeerDoor>) {
+        if self.peer.set(peer.clone()).is_ok() {
+            self.current().wire_peer(peer);
+        }
+    }
+
+    /// Give the door that is serving, and every door installed after it,
     /// the deployment's own space. Once.
     pub fn wire_console_home(&self, home: &str) {
         if self.console_home.set(home.to_string()).is_ok() {
@@ -2571,6 +2580,7 @@ impl SwappableAccess {
             second_step: std::sync::OnceLock::new(),
             console_home: std::sync::OnceLock::new(),
             identity_keys: std::sync::OnceLock::new(),
+            peer: std::sync::OnceLock::new(),
             recorder: door.stream.clone(),
             revocations: door.revocations.clone(),
             inner: RwLock::new(Arc::new(door)),
@@ -2704,6 +2714,9 @@ impl SwappableAccess {
         if let Some(keys) = self.identity_keys.get() {
             door.wire_identity_keys(keys.clone());
         }
+        if let Some(peer) = self.peer.get() {
+            door.wire_peer(peer.clone());
+        }
         if let Some(versions) = self.tenant_versions.get() {
             door.engine.set_tenant_versions(versions.clone());
         }
@@ -2774,6 +2787,10 @@ impl AccessChecker for SwappableAccess {
 
     fn grant_killed(&self, token: &str, space: &str, op: &str) -> Option<String> {
         self.current().grant_killed(token, space, op)
+    }
+
+    fn peer_refused(&self, token: &str, space: &str, op: &str) -> Option<String> {
+        self.current().peer_refused(token, space, op)
     }
 
     /// A tenant still being set up answers its own person `tenant_not_ready`
@@ -4846,6 +4863,20 @@ async fn assemble_program(
                 ),
             }
             keys.spawn_refresher();
+            // The door for other deployments (step G3): their tokens are
+            // signed with the same keys, and name a person this deployment
+            // knows through its connection to the service.
+            let peer = crate::peer_door::PeerDoor::new(
+                keys.clone(),
+                auth.as_ref().map(|(a, _)| a.clone()),
+                Some(pool.clone()),
+                Arc::new(|k: &str| std::env::var(k).ok()),
+                Arc::new(now_secs),
+            );
+            if let Err(why) = peer.settings() {
+                eprintln!("  {why}");
+            }
+            access.wire_peer(Arc::new(peer));
             access.wire_identity_keys(keys);
             if let Some(note) =
                 crate::provision::ignored_deployment_owners_note(&|k: &str| std::env::var(k).ok())

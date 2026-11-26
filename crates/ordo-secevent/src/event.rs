@@ -405,6 +405,16 @@ pub enum RecordedDecision {
     /// A grant a move with dual writes killed, called after the tenant was
     /// moved back (`plan-versions.md` §2.5): dead until consented again.
     GrantKilledByMove,
+    /// A token another deployment presented (`plan-federation-grants.md`
+    /// 5, step G3) did not verify, or named another issuer or audience, or
+    /// had expired. Unverified when its signature failed.
+    PeerTokenRefused,
+    /// A verified consumer reached for an op its grant does not open: an
+    /// unknown consumer, an op outside the grant, a call as itself under a
+    /// grant on behalf of a person only, or a person the holder refused.
+    ConsumerNotGranted,
+    /// A call whose chain already passed through this deployment.
+    PeerLoop,
 }
 
 impl RecordedDecision {
@@ -446,6 +456,9 @@ impl RecordedDecision {
             RecordedDecision::ConsoleKeyClosed => "ConsoleKeyClosed",
             RecordedDecision::VersionsDisagree => "VersionsDisagree",
             RecordedDecision::GrantKilledByMove => "GrantKilledByMove",
+            RecordedDecision::PeerTokenRefused => "PeerTokenRefused",
+            RecordedDecision::ConsumerNotGranted => "ConsumerNotGranted",
+            RecordedDecision::PeerLoop => "PeerLoop",
         }
     }
 
@@ -495,6 +508,10 @@ impl RecordedDecision {
             // Program versions at the door, clear of 55.
             RecordedDecision::VersionsDisagree => 60,
             RecordedDecision::GrantKilledByMove => 61,
+            // Federation through the door, clear of 61.
+            RecordedDecision::PeerTokenRefused => 70,
+            RecordedDecision::ConsumerNotGranted => 71,
+            RecordedDecision::PeerLoop => 72,
         }
     }
 
@@ -536,6 +553,9 @@ impl RecordedDecision {
             55 => RecordedDecision::ConsoleKeyClosed,
             60 => RecordedDecision::VersionsDisagree,
             61 => RecordedDecision::GrantKilledByMove,
+            70 => RecordedDecision::PeerTokenRefused,
+            71 => RecordedDecision::ConsumerNotGranted,
+            72 => RecordedDecision::PeerLoop,
             _ => return None,
         })
     }

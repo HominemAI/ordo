@@ -10,7 +10,8 @@
 //! | `urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693) | on behalf of a person: `sub` the person, `act.sub` the consumer, `typ` `ordo-peer+jwt` |
 //! | `client_credentials` | as itself: `sub` the consumer, `kind` `client`, `typ` `ordo-client+jwt` |
 //!
-//! Both carry `aud` `ordo-peer:<holder>`, `client_id` the consumer, `iss`
+//! Both carry `aud` `ordo-peer:<holder>`, `client_id` the consumer, `chain`
+//! (the consumer's `ordo_chain` with the consumer added last), `iss`
 //! the OIDC issuer, a fresh `jti`, and live
 //! `ORDO_IDENTITY_PEER_TOKEN_SECS`. A token on behalf of a person never
 //! outlives the person's own token it was exchanged for. The holder decides
@@ -53,8 +54,8 @@ use std::collections::HashMap;
 use ordo_exec::sql_lit;
 use ordo_identity::jose::{self, Alg, Jwk, Jwks};
 use ordo_identity::peer_token::{
-    self, ASSERTION_TYPE, KIND_CLIENT, KIND_PERSON, TOKEN_TYPE_ACCESS_TOKEN, TOKEN_TYPE_ID_TOKEN,
-    TYP_AS_ITSELF, TYP_ON_BEHALF,
+    self, ASSERTION_TYPE, CHAIN_PARAM, KIND_CLIENT, KIND_PERSON, TOKEN_TYPE_ACCESS_TOKEN,
+    TOKEN_TYPE_ID_TOKEN, TYP_AS_ITSELF, TYP_ON_BEHALF,
 };
 use ordo_identity::webauthn::{b64url_decode, b64url_encode};
 use serde_json::{json, Map, Value};
@@ -128,6 +129,7 @@ impl Service {
             )));
         }
         no_extras(f)?;
+        let chain = chain_of(f, client)?;
         let now = self.now();
         let holder = match self.holder(client, audience).await {
             Ok(h) => h,
@@ -168,6 +170,7 @@ impl Service {
             "iat": now,
             "exp": exp,
             "jti": mint_secret(),
+            "chain": chain,
         });
         let token = self.sign_typed(&claims, TYP_ON_BEHALF, now)?;
         self.record(
@@ -190,6 +193,7 @@ impl Service {
         let client = consumer.handle.as_str();
         let audience = need(f, "audience")?;
         no_extras(f)?;
+        let chain = chain_of(f, client)?;
         let holder = match self.holder(client, audience).await {
             Ok(h) => h,
             Err(e) => {
@@ -215,6 +219,7 @@ impl Service {
             "iat": now,
             "exp": exp,
             "jti": mint_secret(),
+            "chain": chain,
         });
         let token = self.sign_typed(&claims, TYP_AS_ITSELF, now)?;
         self.record(
@@ -426,6 +431,19 @@ fn no_extras(f: &HashMap<String, String>) -> Result<(), IdentityError> {
              `{TOKEN_TYPE_ACCESS_TOKEN}`"
         ))),
     }
+}
+
+/// The chain the token carries: the consumer's incoming chain
+/// ([`CHAIN_PARAM`], when it sends one) with the consumer added last. The
+/// holder refuses a call whose chain already names it (G3), so a loop of
+/// grants between deployments ends at the first deployment it returns to.
+fn chain_of(f: &HashMap<String, String>, client: &str) -> Result<Vec<String>, IdentityError> {
+    let mut chain = match get(f, CHAIN_PARAM) {
+        Some(text) => peer_token::parse_chain(text).map_err(IdentityError::BadRequest)?,
+        None => Vec::new(),
+    };
+    chain.push(client.to_string());
+    Ok(chain)
 }
 
 /// RFC 8693 2.2.1's answer.

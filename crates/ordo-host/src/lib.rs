@@ -108,6 +108,7 @@ pub mod orphan_ops;
 pub mod own_download;
 pub mod passkeys;
 pub mod pause;
+pub mod peer_door;
 pub mod people_ops;
 pub mod pgsync;
 pub mod pin_stream;
@@ -1831,9 +1832,24 @@ pub struct IdentityAccess {
     /// (`plan-versions.md` §3.4, owner ruling 2026-11-23, Q12). Unset, no
     /// person's deployment token reaches an app op anywhere.
     pub clones: std::sync::OnceLock<Arc<clones::CloneAccess>>,
+    /// The door for other Ordo deployments (`plan-federation-grants.md`,
+    /// step G3): what a token from the identity service for a consumer is
+    /// checked with. Unset, every such token gets the uniform denial.
+    pub peer: std::sync::OnceLock<Arc<peer_door::PeerDoor>>,
 }
 
 impl IdentityAccess {
+    /// Give the door its door for other deployments. Once.
+    pub fn wire_peer(&self, peer: Arc<peer_door::PeerDoor>) {
+        let _ = self.peer.set(peer);
+    }
+
+    /// The same, for a door being built.
+    pub fn with_peer(self, peer: Arc<peer_door::PeerDoor>) -> IdentityAccess {
+        self.wire_peer(peer);
+        self
+    }
+
     /// Tell the door which tenants are clones. Once.
     pub fn wire_clones(&self, access: Arc<clones::CloneAccess>) {
         let _ = self.clones.set(access);
@@ -1924,6 +1940,7 @@ impl IdentityAccess {
             console_home: std::sync::OnceLock::new(),
             clones: std::sync::OnceLock::new(),
             deployment: std::sync::OnceLock::new(),
+            peer: std::sync::OnceLock::new(),
         }
     }
 
@@ -2182,6 +2199,108 @@ impl IdentityAccess {
             Realm::Deny => refused(RecordedDecision::OutsideDeploymentRealm),
         }
     }
+
+    /// The door's decision on another deployment's call
+    /// (`plan-federation-grants.md` 5, step G3). The grant decides first
+    /// ([`peer_door::PeerDoor::decide`]); on behalf of a person, the access
+    /// engine then decides for that person as for a direct sign-in. Every
+    /// call is recorded with the person and the consumer.
+    fn check_peer(
+        &self,
+        token: &str,
+        space: &str,
+        op: &str,
+        at: u64,
+        stamp: &ordo_secevent::Stamp,
+    ) -> AccessDecision {
+        use ordo_secevent::{RecordedDecision, Relationship, Subject};
+
+        let cspace = ordo_commandlog::SpaceId(space.to_string());
+        let decision = match self.peer.get() {
+            Some(p) => p.decide(
+                token,
+                space,
+                op,
+                self.console_home.get().map(String::as_str),
+            ),
+            None => peer_door::PeerDecision::Unknown,
+        };
+        let deny = |subject: Subject, decision: RecordedDecision, who: &str| {
+            self.stream.deny(
+                Some(&cspace),
+                subject,
+                op,
+                decision,
+                stamp,
+                Relationship::None,
+            );
+            self.metrics.deny(space, who, "peer", op);
+            AccessDecision::Deny
+        };
+        let allowed = |subject: Subject| {
+            self.stream.observe(
+                ordo_secevent::Observation {
+                    space: Some(cspace.clone()),
+                    subject,
+                    op: op.to_string(),
+                    kind: ordo_secevent::EventKind::Authenticated,
+                    at: stamp.at,
+                    correlation: stamp.correlation.clone(),
+                },
+                Relationship::None,
+            );
+        };
+        match decision {
+            peer_door::PeerDecision::Unknown => deny(
+                Subject::Unverified,
+                RecordedDecision::PeerTokenRefused,
+                "unknown",
+            ),
+            peer_door::PeerDecision::Refused {
+                decision, subject, ..
+            } => deny(subject, decision, "peer"),
+            peer_door::PeerDecision::AsItself { consumer, subject } => {
+                allowed(subject);
+                AccessDecision::allow(format!("consumer:{consumer}"))
+            }
+            peer_door::PeerDecision::OnBehalf {
+                person,
+                consumer,
+                subject,
+            } => {
+                use ordo_identity::access::Decision;
+                let claims = ordo_identity::TokenClaims {
+                    principal: person.clone(),
+                    capability: None,
+                    client: None,
+                    user_presence_at: None,
+                    delegation: None,
+                    session: None,
+                };
+                let ispace = ordo_identity::principal::SpaceId(space.to_string());
+                match self
+                    .engine
+                    .check(&claims, &ispace, op, ordo_identity::Timestamp(at))
+                {
+                    Decision::Allow => {
+                        allowed(subject);
+                        let member = self
+                            .engine
+                            .member_id_of(&ispace, &person)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| person.0.clone());
+                        AccessDecision::Allow {
+                            principal: member,
+                            agent: Some(format!("consumer:{consumer}")),
+                        }
+                    }
+                    Decision::Deny { reason, .. } => {
+                        deny(subject, RecordedDecision::from(&reason), &person.0)
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -2207,6 +2326,15 @@ impl AccessChecker for IdentityAccess {
     async fn token_gate(&self, token: &str) -> ordo_api::TokenGate {
         use ordo_secevent::{RecordedDecision, Subject};
 
+        // Another deployment's token: verified, its chain checked and its
+        // person resolved once, here, where the door may wait
+        // (`peer_door`). `check` then decides each op in memory.
+        if ordo_identity::peer_token::is_peer_shape(token) {
+            return match self.peer.get() {
+                Some(p) => p.admit(token).await,
+                None => ordo_api::TokenGate::Pass,
+            };
+        }
         // A deployment token: fetch the identity service's keys once if it
         // names one the door does not hold, then let `check` decide. It
         // claims no delegation and no share.
@@ -2354,6 +2482,25 @@ impl AccessChecker for IdentityAccess {
             DoorRefusal::DownloadNotForCaller => RecordedDecision::DownloadNotForCaller,
         };
         let cspace = space.map(|s| ordo_commandlog::SpaceId(s.to_string()));
+        // Another deployment's token: its person and consumer when the gate
+        // saw it.
+        if let Some(t) = token.filter(|t| ordo_identity::peer_token::is_peer_shape(t)) {
+            let subject = self
+                .peer
+                .get()
+                .and_then(|p| p.subject_of_token(t))
+                .unwrap_or(Subject::Unverified);
+            self.stream.deny(
+                cspace.as_ref(),
+                subject,
+                op,
+                decision,
+                &stamp,
+                Relationship::None,
+            );
+            self.metrics.deny(space.unwrap_or(""), "peer", "peer", op);
+            return;
+        }
         // A deployment token's holder, named by its `sub` when it verifies.
         if let Some(t) = token.filter(|t| ordo_identity::deployment_token::is_deployment_shape(t)) {
             match self.deployment_claims(t, at) {
@@ -2554,6 +2701,23 @@ impl AccessChecker for IdentityAccess {
         ))
     }
 
+    /// Another deployment's call refused by name: the consumer, the op, and
+    /// the grant line or setting that would allow it (step G3).
+    fn peer_refused(&self, token: &str, space: &str, op: &str) -> Option<String> {
+        if !ordo_identity::peer_token::is_peer_shape(token) {
+            return None;
+        }
+        match self.peer.get()?.decide(
+            token,
+            space,
+            op,
+            self.console_home.get().map(String::as_str),
+        ) {
+            peer_door::PeerDecision::Refused { why, .. } => why,
+            _ => None,
+        }
+    }
+
     fn versions_disagree(&self, token: &str, space: &str, op: &str) -> Option<String> {
         use ordo_identity::access::{Decision, DenyReason};
         let now = ordo_identity::principal::Timestamp((self.now)());
@@ -2603,6 +2767,9 @@ impl AccessChecker for IdentityAccess {
         // the realm table decides it (`plan-identity-service.md` 4.3). It
         // never reaches the HMAC verifier, and an app token never reaches
         // this branch.
+        if ordo_identity::peer_token::is_peer_shape(token) {
+            return self.check_peer(token, space, op, at, &stamp);
+        }
         if ordo_identity::deployment_token::is_deployment_shape(token) {
             return self.check_deployment(token, space, op, at, &stamp);
         }

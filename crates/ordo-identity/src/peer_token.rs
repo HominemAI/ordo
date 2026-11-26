@@ -104,9 +104,305 @@ pub fn sign_jwt(header: &Value, claims: &Value, key: &SigningKey) -> String {
     format!("{input}.{}", b64url_encode(&sig.to_bytes()))
 }
 
+// ── the call chain (`plan-federation-grants.md` 2 rule 9, 7) ─────────────
+
+/// The claim that lists the deployments a call has passed through, the
+/// consumer that asked for the token last. The service writes it, so it is
+/// covered by the token's signature and cannot be stripped on the way.
+pub const CHAIN_CLAIM: &str = "chain";
+/// The token endpoint's form field a consumer sends its own incoming chain
+/// in: the handles, space-separated, oldest first. Absent for a call that
+/// starts at the consumer.
+pub const CHAIN_PARAM: &str = "ordo_chain";
+/// The longest chain a token may carry, the consumer included.
+pub const MAX_CHAIN: usize = 8;
+
+/// A deployment handle: lowercase letters, digits and dashes, at most 63.
+pub fn valid_handle(h: &str) -> bool {
+    !h.is_empty()
+        && h.len() <= 63
+        && h.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Read [`CHAIN_PARAM`]: handles separated by spaces or commas. `Err` says
+/// what is wrong with it.
+pub fn parse_chain(text: &str) -> Result<Vec<String>, String> {
+    let chain: Vec<String> = text
+        .split([' ', ','])
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    if let Some(bad) = chain.iter().find(|h| !valid_handle(h)) {
+        return Err(format!(
+            "`{CHAIN_PARAM}` holds `{bad}`, which is not a deployment handle"
+        ));
+    }
+    if chain.len() >= MAX_CHAIN {
+        return Err(format!(
+            "`{CHAIN_PARAM}` lists {} deployments; a call may pass through at most {MAX_CHAIN}",
+            chain.len()
+        ));
+    }
+    Ok(chain)
+}
+
+// ── verifying, at the holder (step G3) ───────────────────────────────────
+
+/// The header `typ` of a compact JWS, unverified. Used only to tell the
+/// token kinds apart before the right verifier runs.
+pub fn typ_of(token: &str) -> Option<String> {
+    let header = token.split('.').next()?;
+    let bytes = crate::webauthn::b64url_decode(header).ok()?;
+    match crate::jose::strict_json(&bytes).ok()? {
+        Value::Object(m) => m.get("typ").and_then(Value::as_str).map(str::to_string),
+        _ => None,
+    }
+}
+
+/// Is this a token one deployment presents at another's door: 3 segments,
+/// `typ` [`TYP_ON_BEHALF`] or [`TYP_AS_ITSELF`]? Decided before the
+/// deployment-token verifier, which would refuse it anyway on `aud`.
+pub fn is_peer_shape(token: &str) -> bool {
+    token.split('.').count() == 3
+        && matches!(
+            typ_of(token).as_deref(),
+            Some(TYP_ON_BEHALF | TYP_AS_ITSELF)
+        )
+}
+
+/// Whom a token speaks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerKind {
+    /// `sub` is a person; the consumer is `act.sub`.
+    OnBehalf,
+    /// `sub` is the consumer; no person.
+    AsItself,
+}
+
+/// A verified token's claims.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerClaims {
+    pub iss: String,
+    pub aud: String,
+    /// The person (on behalf) or the consumer (as itself), as the service
+    /// names them.
+    pub sub: String,
+    /// The calling deployment's handle.
+    pub consumer: String,
+    pub kind: PeerKind,
+    /// The deployments the call passed through, the consumer last. A token
+    /// from a service that wrote no chain reads as the consumer alone.
+    pub chain: Vec<String>,
+    pub iat: u64,
+    pub exp: u64,
+    pub jti: String,
+}
+
+/// What a holder expects of a token.
+pub struct Expect<'a> {
+    /// The issuer of the holder's connection to the identity service.
+    pub issuer: &'a str,
+    /// [`audience`] of the holder's handle.
+    pub audience: &'a str,
+    pub now: u64,
+    /// How far ahead `iat` may be.
+    pub leeway_secs: u64,
+}
+
+/// Why a token was refused. Every variant after `Unverifiable` is about a
+/// token whose signature verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerTokenError {
+    /// Signature, key, or shape.
+    Unverifiable(crate::jose::JoseError),
+    /// The claims do not fit the header's `typ`: a missing `act`, a `kind`
+    /// that disagrees, no `sub`.
+    Malformed(&'static str),
+    WrongIssuer(String),
+    WrongAudience(String),
+    Expired(u64),
+    NotYetValid,
+}
+
+/// Verify a peer token against the identity service's keys: signature and
+/// `kid`, `typ`, then `iss`, `aud`, `exp`, `iat`, and the claims each kind
+/// must carry.
+pub fn verify(
+    token: &str,
+    jwks: &crate::jose::Jwks,
+    expect: &Expect<'_>,
+) -> Result<PeerClaims, PeerTokenError> {
+    use crate::jose::{self, Alg, JoseError};
+    let kind = match typ_of(token).as_deref() {
+        Some(TYP_ON_BEHALF) => PeerKind::OnBehalf,
+        Some(TYP_AS_ITSELF) => PeerKind::AsItself,
+        _ => return Err(PeerTokenError::Unverifiable(JoseError("not-a-peer-token"))),
+    };
+    let verified =
+        jose::verify_with_jwks(token, jwks, &[Alg::EdDSA]).map_err(PeerTokenError::Unverifiable)?;
+    let c = verified.claims().map_err(PeerTokenError::Unverifiable)?;
+    let text = |k: &str| c.get(k).and_then(Value::as_str).map(str::to_string);
+    let num = |k: &str| c.get(k).and_then(Value::as_u64);
+    let sub = text("sub")
+        .filter(|s| !s.is_empty())
+        .ok_or(PeerTokenError::Malformed("no-sub"))?;
+    let client_id = text("client_id").ok_or(PeerTokenError::Malformed("no-client-id"))?;
+    let consumer = match kind {
+        PeerKind::OnBehalf => {
+            if text("kind").as_deref() != Some(KIND_PERSON) {
+                return Err(PeerTokenError::Malformed("kind"));
+            }
+            let act = c
+                .get("act")
+                .and_then(|a| a.get("sub"))
+                .and_then(Value::as_str)
+                .ok_or(PeerTokenError::Malformed("no-act"))?;
+            if act != client_id {
+                return Err(PeerTokenError::Malformed("act-not-client"));
+            }
+            act.to_string()
+        }
+        PeerKind::AsItself => {
+            if text("kind").as_deref() != Some(KIND_CLIENT) || c.contains_key("act") {
+                return Err(PeerTokenError::Malformed("kind"));
+            }
+            if sub != client_id {
+                return Err(PeerTokenError::Malformed("sub-not-client"));
+            }
+            client_id.clone()
+        }
+    };
+    let iss = text("iss").unwrap_or_default();
+    let aud = text("aud").unwrap_or_default();
+    let exp = num("exp").ok_or(PeerTokenError::Malformed("no-exp"))?;
+    let iat = num("iat").unwrap_or(0);
+    let chain = match c.get(CHAIN_CLAIM) {
+        None => vec![consumer.clone()],
+        Some(Value::Array(list)) => {
+            let chain: Option<Vec<String>> = list
+                .iter()
+                .map(|h| h.as_str().filter(|h| valid_handle(h)).map(str::to_string))
+                .collect();
+            match chain {
+                Some(c) if !c.is_empty() && c.len() <= MAX_CHAIN && c.last() == Some(&consumer) => {
+                    c
+                }
+                _ => return Err(PeerTokenError::Malformed("chain")),
+            }
+        }
+        Some(_) => return Err(PeerTokenError::Malformed("chain")),
+    };
+    let trim = |s: &str| s.trim_end_matches('/').to_string();
+    if trim(&iss) != trim(expect.issuer) {
+        return Err(PeerTokenError::WrongIssuer(iss));
+    }
+    if aud != expect.audience {
+        return Err(PeerTokenError::WrongAudience(aud));
+    }
+    if expect.now >= exp {
+        return Err(PeerTokenError::Expired(exp));
+    }
+    if iat > expect.now.saturating_add(expect.leeway_secs) {
+        return Err(PeerTokenError::NotYetValid);
+    }
+    Ok(PeerClaims {
+        iss,
+        aud,
+        sub,
+        consumer,
+        kind,
+        chain,
+        iat,
+        exp,
+        jti: text("jti").unwrap_or_default(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chain_is_handles_and_bounded() {
+        assert_eq!(parse_chain("a b,c").unwrap(), ["a", "b", "c"]);
+        assert!(parse_chain("").unwrap().is_empty());
+        assert!(parse_chain("Bad")
+            .unwrap_err()
+            .contains("not a deployment handle"));
+        let long = ["x"; MAX_CHAIN].join(" ");
+        assert!(parse_chain(&long).unwrap_err().contains("at most"));
+    }
+
+    #[test]
+    fn a_peer_token_verifies_and_each_kind_must_fit_its_typ() {
+        let key = SigningKey::from_bytes(&[3; 32]);
+        let kid = crate::deployment_token::key_id(&key.verifying_key());
+        let jwks = crate::jose::Jwks::parse(
+            json!({ "keys": [crate::deployment_token::public_jwk(&kid, &key.verifying_key())] })
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+        let expect = Expect {
+            issuer: "https://ids.example",
+            audience: "ordo-peer:notes",
+            now: 1_000,
+            leeway_secs: 30,
+        };
+        let sign = |typ: &str, claims: Value| {
+            sign_jwt(
+                &json!({ "alg": "EdDSA", "kid": kid, "typ": typ }),
+                &claims,
+                &key,
+            )
+        };
+        let person = json!({
+            "iss": "https://ids.example/", "sub": "p_ada", "aud": "ordo-peer:notes",
+            "act": { "sub": "viewer" }, "client_id": "viewer", "kind": "person",
+            "iat": 990, "exp": 1_200, "jti": "j", "chain": ["viewer"],
+        });
+        let t = sign(TYP_ON_BEHALF, person.clone());
+        assert!(is_peer_shape(&t));
+        let c = verify(&t, &jwks, &expect).unwrap();
+        assert_eq!(
+            (c.kind, c.consumer.as_str()),
+            (PeerKind::OnBehalf, "viewer")
+        );
+        assert_eq!(c.chain, ["viewer"]);
+
+        // The person's kind under the client's `typ` is refused.
+        let t = sign(TYP_AS_ITSELF, person.clone());
+        assert_eq!(
+            verify(&t, &jwks, &expect),
+            Err(PeerTokenError::Malformed("kind"))
+        );
+        // A chain that does not end with the consumer is refused.
+        let mut forged = person.clone();
+        forged["chain"] = json!(["viewer", "notes"]);
+        let t = sign(TYP_ON_BEHALF, forged);
+        assert_eq!(
+            verify(&t, &jwks, &expect),
+            Err(PeerTokenError::Malformed("chain"))
+        );
+        // Another audience, and expiry.
+        let mut other = person.clone();
+        other["aud"] = json!("ordo-peer:hal");
+        let t = sign(TYP_ON_BEHALF, other);
+        assert_eq!(
+            verify(&t, &jwks, &expect),
+            Err(PeerTokenError::WrongAudience("ordo-peer:hal".into()))
+        );
+        let late = Expect {
+            now: 1_200,
+            ..expect
+        };
+        let t = sign(TYP_ON_BEHALF, person);
+        assert_eq!(
+            verify(&t, &jwks, &late),
+            Err(PeerTokenError::Expired(1_200))
+        );
+    }
 
     #[test]
     fn a_consumer_key_is_fixed_by_the_master_key_and_the_handle() {

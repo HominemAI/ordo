@@ -2510,6 +2510,38 @@ peer notes {
   with a token for its own admin: `std.peer.registerKey($token)`. Until then
   the apply is refused naming that op.
 
+#### A peer's entities through its door [built in G5]
+
+With `ORDO_PEER_<NAME>_URL` set, an `external … from <name>.<table>` is read
+through that deployment's door, never its tables
+(`plan-federation-grants.md` §4). The file does not change; the setting
+decides. `ORDO_PEER_<NAME>_SCHEMA` is then not read.
+
+- Each read of the entity is one call to the holder's `std.<table>.list`.
+  Its conditions on the entity's own fields (`==`, `!=`, `<`, `<=`, `>`,
+  `>=`, `in`, `is null`, on text, ids, ints, bools, dates and datetimes),
+  its fields, and, for a read whose rows are the peer's, its sort and its
+  `take`, are sent whole. The holder runs them as its own SQL. Anything
+  else runs here over what the holder answered.
+- A native entity's ref to it (`note.title`, a guard that walks into it)
+  is one call with the refs of the rows read, never one call per row.
+- `field == $caller` on it is the holder's `$caller`: the holder decides it
+  for the person the call is made for. Under `or` or `not` it is refused
+  (`peer_refused`). With nobody signed in it matches nothing, and the holder
+  is not asked.
+- Each call is made for the person signed in here, under the holder's rules
+  for them, or as this deployment itself when nobody is. The holder's grant
+  must open `std.<table>.list` to this deployment; the apply checks it as if
+  a `peer` block listed it.
+- Nothing the holder answered outlives the read.
+- **Consistency.** There is no transaction across deployments. 2 reads of
+  the holder in one op are 2 calls, not one snapshot.
+- A holder that does not answer in `ORDO_PEER_TIMEOUT_SECS` (10 seconds)
+  refuses the op `peer_unavailable`. A read the holder refuses is
+  `peer_refused`, with its words. A read that would take more than
+  `ORDO_PEER_READ_MAX_ROWS` rows from the holder with nothing to bound them
+  there is `peer_refused`, naming the setting.
+
 ### `peer`: another Ordo deployment's tables [ruled 2026-11-17, built]
 
 Two Ordo deployments can share one database, each in its own schema

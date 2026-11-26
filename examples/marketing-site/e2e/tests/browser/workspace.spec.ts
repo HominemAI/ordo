@@ -298,7 +298,12 @@ test('staff publish products, plans and reviews through the editor and remove th
     await page.getByRole('button', { name: 'Save changes', exact: true }).click();
     // The editor closes after the write resolves; clicking Save alone does not await it.
     await expect(page.getByRole('button', { name: 'Save changes', exact: true })).toBeHidden();
-    await publicPage.reload();
+    const [fresh] = await Promise.all([
+      publicPage.waitForResponse(r => r.url().endsWith(`/op/${kind === 'Products' ? 'catalogue' : kind === 'Plans' ? 'pricing' : 'reviews'}`)),
+      publicPage.reload(),
+    ]);
+    expect(fresh.headers()['cache-control']).not.toContain('stale-while-revalidate');
+    expect(fresh.headers()['cdn-cache-control']).toContain('stale-while-revalidate');
     await expect(
       publicPage.getByText(kind === 'Reviews' ? `Updated recommendation ${name}` : `Updated launch ${name}`, {
         exact: true,

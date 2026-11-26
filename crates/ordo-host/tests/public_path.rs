@@ -440,9 +440,10 @@ async fn the_cdn_headers() {
 
     // headers_carry_the_settings
     let a = visit(&app, "/op/pricing").await;
+    assert_eq!(a.header("cache-control"), "public, max-age=0, s-maxage=60");
     assert_eq!(
-        a.header("cache-control"),
-        "public, max-age=0, s-maxage=60, stale-while-revalidate=300"
+        a.header("cdn-cache-control"),
+        "max-age=60, stale-while-revalidate=300"
     );
     assert_eq!(a.header("vary"), "Accept");
     let tags = a.header("cache-tag");

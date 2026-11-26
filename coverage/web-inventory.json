@@ -1,7 +1,7 @@
 {
   "version": 1,
   "status": "discovery-only",
-  "sourceDigest": "db94a7c5cc45fcbd666d6ede5777206b1d5404522b6163ca13e4e41dab1b864c",
+  "sourceDigest": "48bc46b521fa646dcf5da6188c4e9448b92211774fd48ce1d40772aa2fa8e009",
   "files": [
     {
       "file": "crates/ordo-api/src/attest.rs",
@@ -70,8 +70,8 @@
     },
     {
       "file": "crates/ordo-api/src/public.rs",
-      "sha256": "620e03ac452bb00e7270cf3fef59ca15c58ebc8eacd1b39803042bcbf16e96a3",
-      "lines": 941
+      "sha256": "1fc381a8ce9d5bc9cb22e9774832e45f04376183c6bd6814e82f337108b13dd4",
+      "lines": 948
     },
     {
       "file": "crates/ordo-api/src/refine.rs",
@@ -85,8 +85,8 @@
     },
     {
       "file": "crates/ordo-api/src/router.rs",
-      "sha256": "9d9292698fad3e213ee7fb3da8dfe0a7c62daa0e8b8b023cc041e654cbdad45c",
-      "lines": 3114
+      "sha256": "aa5ed7afcaf4806733aa45abbf939bd56027367075f3598542f1433b1eb29fb4",
+      "lines": 3122
     },
     {
       "file": "crates/ordo-api/src/spec.rs",

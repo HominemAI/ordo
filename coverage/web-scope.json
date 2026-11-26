@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "sourceDigest": "db94a7c5cc45fcbd666d6ede5777206b1d5404522b6163ca13e4e41dab1b864c",
+  "sourceDigest": "48bc46b521fa646dcf5da6188c4e9448b92211774fd48ce1d40772aa2fa8e009",
   "entries": [
     {
       "id": "crates/ordo-api/src/router.rs:153:route-candidate",

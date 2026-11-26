@@ -65,3 +65,37 @@ test('concurrent bearer renewal keeps one session and logout revokes every renew
     }
   }
 });
+
+test('renewal cookies are scoped, reject missing origin and revoke the family after replay grace', async ({ ownerPage, context, request }) => {
+  const door = stack().door;
+  const cookie = (await context.cookies(`${door}/auth/refresh`)).find(c => c.name === 'ordo_renew');
+  expect(cookie).toBeDefined();
+  expect(cookie).toMatchObject({ path: '/auth/refresh', httpOnly: true, sameSite: 'Strict' });
+  expect((await context.cookies(`${door}/op/campaignList`)).some(c => c.name === 'ordo_renew')).toBe(false);
+  expect(await ownerPage.evaluate(() => document.cookie.includes('ordo_renew'))).toBe(false);
+  const oldCookie = `${cookie!.name}=${cookie!.value}`;
+  for (const origin of [undefined, 'https://unlisted.example']) {
+    const headers: Record<string, string> = { Cookie: oldCookie };
+    if (origin) headers.Origin = origin;
+    const response = await request.post(`${door}/auth/refresh`, { headers });
+    expect(response.status()).toBe(403);
+    expect((await response.json()).error.code).toBe('remember_off');
+    expect(response.headers()['set-cookie']).toBeUndefined();
+  }
+  const renewed = await ownerPage.evaluate(async door => {
+    const response = await fetch(`${door}/auth/refresh`, { method: 'POST', credentials: 'include' });
+    return { status: response.status, body: await response.json() };
+  }, door);
+  expect(renewed.status).toBe(200);
+  expect((await context.cookies(`${door}/auth/refresh`)).find(c => c.name === 'ordo_renew')!.value).not.toBe(cookie!.value);
+  // Two tabs have 10 seconds of grace. Poll the old cookie until the real
+  // clock ends that grace; no SQL clock changes or fabricated server errors.
+  await expect.poll(async () => (await request.post(`${door}/auth/refresh`, {
+    headers: { Origin: stack().page, Cookie: oldCookie },
+  })).status(), { timeout: 20_000, intervals: [1000] }).toBe(401);
+  for (const host of [door, stack().doorB]) {
+    const headers = { Authorization: `Bearer ${renewed.body.token}`, 'X-Ordo-Space': 'system' };
+    await expect.poll(async () => (await request.get(`${host}/op/campaignList`, { headers })).status()).toBe(403);
+    await refused(await request.get(`${host}/op/campaignList`, { headers }), 403, 'access_denied');
+  }
+});

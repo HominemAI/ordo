@@ -7,7 +7,7 @@
  * and sideways scrolling at phone width.
  */
 
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, generateKeyPairSync, sign } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -298,6 +298,56 @@ test('the CLI is approved with a passkey, the code reaches the loopback port, an
     expect(redeemed.status).toBe(200);
     const body = (await redeemed.json()) as { session?: string; person?: string };
     expect(body.session).toBeTruthy();
+
+    // The browser-approved code is single-use, including with the right verifier.
+    const reused = await fetch(`${stack().origin}/cli/redeem`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code, verifier }),
+    });
+    expect(reused.status).toBe(401);
+
+    // Exercise the machine HTTP protocol with an actual Ed25519 client key.
+    const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+    const publicBytes = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64url');
+    const humanHeaders = { 'content-type': 'application/json', Authorization: `Bearer ${body.session}` };
+    const made = await fetch(`${stack().origin}/machine-keys`, {
+      method: 'POST', headers: humanHeaders,
+      body: JSON.stringify({ name: 'Release journey machine', publicKey: publicBytes, grants: ['deployment'], mints: [] }),
+    });
+    expect(made.status).toBe(200);
+    const machine = await made.json() as { id: string };
+    const begin = async () => {
+      const r = await fetch(`${stack().origin}/machine/begin`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key: machine.id }),
+      });
+      expect(r.status).toBe(200);
+      return (await r.json() as { challenge: string }).challenge;
+    };
+    const complete = (challenge: string, signature: string) => fetch(`${stack().origin}/machine/complete`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key: machine.id, challenge, signature }),
+    });
+    const machineChallenge = await begin();
+    const signature = sign(null, Buffer.from(machineChallenge, 'base64url'), privateKey).toString('base64url');
+    const bad = await complete(machineChallenge, Buffer.alloc(64).toString('base64url'));
+    expect(bad.status).toBe(401);
+    expect((await bad.json() as { error: string }).error).toBe('machine_refused');
+    const authenticated = await complete(machineChallenge, signature);
+    expect(authenticated.status).toBe(200);
+    const machineSession = (await authenticated.json() as { token: string }).token;
+    const replay = await complete(machineChallenge, signature);
+    expect(replay.status).toBe(401);
+    expect((await replay.json() as { error: string }).error).toBe('machine_refused');
+    // A machine cannot mint another key without an explicit minting grant.
+    const elevated = await fetch(`${stack().origin}/machine-keys`, {
+      method: 'POST', headers: { ...humanHeaders, Authorization: `Bearer ${machineSession}` },
+      body: JSON.stringify({ name: 'Unapproved child', publicKey: publicBytes, grants: ['deployment'] }),
+    });
+    expect(elevated.status).toBe(403);
+    const ended = await fetch(`${stack().origin}/machine-keys/${encodeURIComponent(machine.id)}/end`, { method: 'POST', headers: humanHeaders, body: '{}' });
+    expect(ended.status).toBe(200);
+    const after = await begin();
+    const revoked = await complete(after, sign(null, Buffer.from(after, 'base64url'), privateKey).toString('base64url'));
+    expect(revoked.status).toBe(401);
+    expect((await revoked.json() as { error: string }).error).toBe('machine_refused');
 
     await page.goto('/cli?port=80&state=x&code_challenge=nope');
     await expect(page.getByRole('heading', { name: 'This request is not complete' })).toBeVisible();

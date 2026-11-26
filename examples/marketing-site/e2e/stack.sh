@@ -29,6 +29,8 @@ db="marketing_e2e_$$_$RANDOM"
 source "$repo/examples/e2e-common/stack-lib.sh"
 start_pg
 export ORDO_SPACE=system
+export ORDO_EXIT_BUNDLE_DIR="$state/exports" ORDO_IMPORT_BUNDLE_DIR="$state/imports"
+mkdir -p "$ORDO_EXIT_BUNDLE_DIR" "$ORDO_IMPORT_BUNDLE_DIR"
 export ORDO_BLOB_STORE="fs:$state/blobs" ORDO_DEV_UNSAFE_BLOB_STORE=1
 export ORDO_KEY_PROVIDER=local ORDO_MASTER_KEY=marketing-e2e-master ORDO_DEV_UNSAFE_TEST_KEYS=1
 export ORDO_TOKEN_KEY=1111111111111111111111111111111111111111111111111111111111111111

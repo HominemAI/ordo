@@ -11,7 +11,7 @@ test('an owner creates a tenant, pauses it, preserves data and resumes both repl
   const headers = { Origin: stack().page, Authorization: `Bearer ${saved.token}`, 'X-Ordo-Space': 'system' };
   const principal = readFileSync(`${state}/browser-owner-principal`, 'utf8').trim();
   const created = (await rows(await request.post(`${stack().door}/op/std.space.create`, {
-    headers, data: { name: `Lifecycle ${randomUUID()}`, owner: principal },
+    headers: { ...headers, 'Idempotency-Key': randomUUID() }, data: { name: `Lifecycle ${randomUUID()}`, owner: principal },
   })))[0];
   const tenant = created.space;
   expect(typeof tenant).toBe('string');
@@ -25,6 +25,20 @@ test('an owner creates a tenant, pauses it, preserves data and resumes both repl
   })))[0].created;
   const read = (door: string) => request.get(`${door}/op/oneCampaign`, { headers: scoped, params: { id: campaign } });
   try {
+    await test.step('tenant session policy changes are read back and malformed changes preserve it', async () => {
+      const result = await rows(await request.post(`${doors[0]}/op/std.space.setSessionPolicy`, {
+        headers: scoped, data: { tokenSecs: '120' },
+      }));
+      expect(result[0]).toMatchObject({ tokenSecs: 120 });
+      await refused(await request.post(`${doors[0]}/op/std.space.setSessionPolicy`, {
+        headers: scoped, data: { tokenSecs: 'not-a-duration' },
+      }), 400, 'tenant_refused');
+      for (const door of doors) {
+        const current = await rows(await request.get(`${door}/op/std.space.sessionPolicy`, { headers: scoped }));
+        expect(current[0]).toMatchObject({ tokenSecs: 120 });
+      }
+      await rows(await request.post(`${doors[0]}/op/std.space.setSessionPolicy`, { headers: scoped, data: { tokenSecs: 'default' } }));
+    });
     await test.step('active tenants cannot be reaped', async () => {
       await refused(await request.post(`${doors[0]}/op/std.space.reap`, { headers, data: { tenant } }), 400, 'tenant_refused');
       expect((await rows(await read(doors[0])))[0]).toMatchObject({ title });
@@ -90,5 +104,31 @@ test('secret replacement increments its version and never reveals the value', as
   await refused(await request.post(`${stack().door}/op/std.deployment.removeSecret`, { headers, data: { name } }), 404, 'not_found');
   for (const door of [stack().door, stack().doorB]) {
     expect((await rows(await request.get(`${door}/op/std.deployment.secrets`, { headers }))).some(row => row.name === name)).toBe(false);
+  }
+});
+
+test('operational reads disclose data to the owner and refuse anonymous callers', async ({ ownerPage, request }) => {
+  const saved = await ownerPage.evaluate(() => JSON.parse(sessionStorage.getItem('lumen.studio')!));
+  const headers = { Origin: stack().page, Authorization: `Bearer ${saved.token}`, 'X-Ordo-Space': 'system' };
+  const now = Math.floor(Date.now() / 1000);
+  for (const door of [stack().door, stack().doorB]) {
+    for (const path of ['/health/live', '/health/ready']) {
+      const response = await request.get(`${door}${path}`);
+      expect(response.status()).toBe(200);
+    }
+    for (const path of ['/health/deep', '/metrics', '/security/alerts',
+      `/usage?space=system&from=${now - 3600}&to=${now + 1}`,
+      '/security/events?space=system&from=0&limit=1']) {
+      const response = await request.get(`${door}${path}`, { headers });
+      expect(response.status(), `${path}: ${await response.text()}`).toBe(200);
+      await refused(await request.get(`${door}${path}`), 403, 'access_denied');
+    }
+    for (const op of ['std.deployment.observedCost', 'std.deployment.quotas', 'std.deployment.securityEvents']) {
+      const response = await request.get(`${door}/op/${op}`, { headers });
+      expect(Array.isArray(await rows(response))).toBe(true);
+      await refused(await request.get(`${door}/op/${op}`), 403, 'access_denied');
+    }
+    await refused(await request.get(`${door}/usage`, { headers }), 400, 'invalid_param');
+    await refused(await request.get(`${door}/security/events`, { headers, params: { space: 'system', limit: '-1' } }), 400, 'invalid_param');
   }
 });

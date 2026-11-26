@@ -108,6 +108,10 @@ test('staff triage an enquiry, see the report change and delete personal data', 
 
 test('a campaign keeps its JSON tags, files and reminder, then deletes owned children', async ({ request }) => {
   const headers = await owner(request);
+  const tenants = await rows(await request.get(`${stack().door}/op/std.person.tenants`, { headers }));
+  const tenant = tenants.find(row => row.space !== 'system' && row.role === 'owner' && row.status === 'active');
+  expect(tenant, 'sign-up provisions an automation workspace').toBeDefined();
+  headers['X-Ordo-Space'] = tenant!.space;
   const tag = unique();
   const payload = {
     title: unique(),

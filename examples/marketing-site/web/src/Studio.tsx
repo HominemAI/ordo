@@ -5,7 +5,7 @@ import { downloadFile, saveBlob, uploadFile } from '@hominemai/ordo-sdk/core/fil
 import type { Params, Row } from '@hominemai/ordo-sdk/core/client.js';
 import { DOOR } from './config.js';
 import { Session, sessionStore } from './session.js';
-import { commit, message, studioClient } from './studio-client.js';
+import { commit, message, studioClient, workspaces, portability, type WorkspaceChoice } from './studio-client.js';
 
 const columnLabel = (name: string) =>
   ({
@@ -17,7 +17,8 @@ const columnLabel = (name: string) =>
     size: 'Bytes',
   })[name as 'displayName'] ?? name.charAt(0).toUpperCase() + name.slice(1);
 const text = (value: unknown) => (value == null ? '' : String(value));
-const options = () => ({ key: 'lumen.studio', baseUrl: DOOR, space: 'system', store: sessionStore() });
+const selectedSpace = () => new URLSearchParams(location.search).get('space') || 'system';
+const options = () => ({ key: 'lumen.studio', baseUrl: DOOR, space: selectedSpace(), store: sessionStore() });
 type Context = { client: DescriptorClient; session: Session };
 type Field = {
   name: string;
@@ -103,8 +104,8 @@ export function Studio() {
     try {
       const endpoint = { baseUrl: DOOR };
       const result = register
-        ? await registerPasskey(endpoint, { display, space: 'system', ...(invitation ? { invitation } : {}) })
-        : await signInWithPasskey(endpoint, { space: 'system', ...(invitation ? { invitation } : {}) });
+        ? await registerPasskey(endpoint, { display, space: selectedSpace(), ...(invitation ? { invitation } : {}) })
+        : await signInWithPasskey(endpoint, { space: selectedSpace(), ...(invitation ? { invitation } : {}) });
       setSession(Session.from(options(), result));
     } catch (e) {
       setError(message(e));
@@ -203,11 +204,32 @@ function Workspace(ctx: Context) {
   const [tab, setTab] = useState('Inbox');
   const [error, setError] = useState('');
   const [exporting, setExporting] = useState(false);
+  const [choices, setChoices] = useState<WorkspaceChoice[]>([]);
+  useEffect(() => {
+    let active = true;
+    workspaces(ctx.session).then(value => { if (active) setChoices(value); }, e => { if (active) setError(message(e)); });
+    return () => { active = false; };
+  }, [ctx.session]);
   return (
     <>
+      <form className="toolbar" aria-label="Choose workspace" onSubmit={e => {
+        e.preventDefault();
+        const space = String(new FormData(e.currentTarget).get('space'));
+        location.assign(`/studio?space=${encodeURIComponent(space)}`);
+      }}>
+        <label htmlFor="workspace-space">Workspace</label>
+        <select id="workspace-space" name="space" defaultValue={ctx.session.space}>
+          <option value={ctx.session.space}>{ctx.session.space === 'system' ? 'Public site' : ctx.session.space}</option>
+          {choices.filter(c => c.space !== ctx.session.space && c.status === 'active').map(c => (
+            <option key={c.space} value={c.space}>{c.name || c.space}</option>
+          ))}
+        </select>
+        <button type="submit">Open workspace</button>
+      </form>
+      {ctx.session.space === 'system' && <p>Scheduled reminders run in tenant workspaces. Choose your workspace for automation.</p>}
       <nav aria-label="Workspace">
         <div className="toolbar">
-          {['Inbox', 'Products', 'Plans', 'Reviews', 'Campaigns', 'Team'].map((name) => (
+          {['Inbox', 'Products', 'Plans', 'Reviews', 'Campaigns', 'Team', 'Data'].map((name) => (
             <button key={name} aria-current={tab === name ? 'page' : undefined} onClick={() => setTab(name)}>
               {name}
             </button>
@@ -234,6 +256,7 @@ function Workspace(ctx: Context) {
       </nav>
       {error && <p role="alert">{error}</p>}
       {tab === 'Inbox' && <Inbox {...ctx} />}
+      {tab === 'Data' && <DataTools session={ctx.session} />}
       {tab === 'Products' && (
         <Records
           {...ctx}
@@ -1020,4 +1043,39 @@ function Team(ctx: Context) {
       />
     </section>
   );
+}
+
+function DataTools({ session }: { session: Session }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [done, setDone] = useState('');
+  async function run(action: 'export' | 'import', params: Params) {
+    setBusy(true); setError(''); setDone('');
+    try {
+      const result = await portability(session, action, params);
+      setDone(action === 'export'
+        ? 'Export prepared. Your deployment operator can transfer the bundle to its destination.'
+        : `Import complete. ${text(result[0]?.['rows'])} rows processed. Open a workspace list to review the data.`);
+    } catch (e) { setError(message(e)); }
+    finally { setBusy(false); }
+  }
+  return <section className="card">
+    <h2>Workspace data</h2>
+    <p>Export this workspace with its members and data, or import a bundle your deployment operator has staged for this workspace.</p>
+    <button disabled={busy} onClick={() => void run('export', { ciphertext: false })}>Prepare workspace export</button>
+    <form className="form" aria-label="Import workspace bundle" onSubmit={e => {
+      e.preventDefault();
+      const data = new FormData(e.currentTarget);
+      void run('import', { bundle: String(data.get('bundle')), name: String(data.get('name')) });
+    }}>
+      <label htmlFor="import-bundle">Staged bundle name (required)</label>
+      <input id="import-bundle" name="bundle" required maxLength={128} autoComplete="off" spellCheck={false} />
+      <label htmlFor="import-name">Import name (required)</label>
+      <input id="import-name" name="name" required maxLength={64} autoComplete="off" spellCheck={false} aria-describedby="import-retry" />
+      <p id="import-retry">Keep this name when retrying an interrupted import. A new name starts a separate import.</p>
+      <button disabled={busy} type="submit">Import staged bundle</button>
+    </form>
+    {error && <p role="alert">{error}</p>}
+    {done && <p role="status">{done}</p>}
+  </section>;
 }

@@ -1,7 +1,9 @@
 import { createServer } from 'node:http';
+import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { expect } from '@playwright/test';
 import { test } from '../owner-session.js';
-import { stack, rows, refused } from '../support.js';
+import { stack, state, rows, refused } from '../support.js';
 
 // The second origin is an actual HTTP page, not a mocked Ordo response.
 test('the browser permits an allowed origin and blocks private calls from an unlisted origin', async ({ ownerPage, context }) => {
@@ -97,5 +99,55 @@ test('renewal cookies are scoped, reject missing origin and revoke the family af
     const headers = { Authorization: `Bearer ${renewed.body.token}`, 'X-Ordo-Space': 'system' };
     await expect.poll(async () => (await request.get(`${host}/op/campaignList`, { headers })).status()).toBe(403);
     await refused(await request.get(`${host}/op/campaignList`, { headers }), 403, 'access_denied');
+  }
+});
+
+
+test('tenant origin changes grant and remove actual browser access on both replicas', async ({ ownerPage, context, request }) => {
+  const saved = await ownerPage.evaluate(() => JSON.parse(sessionStorage.getItem('lumen.studio')!));
+  const admin = { Origin: stack().page, Authorization: `Bearer ${saved.token}`, 'X-Ordo-Space': 'system' };
+  const principal = readFileSync(`${state}/browser-owner-principal`, 'utf8').trim();
+  const tenant = (await rows(await request.post(`${stack().door}/op/std.space.create`, {
+    headers: { ...admin, 'Idempotency-Key': randomUUID() }, data: { name: `Embedded ${randomUUID()}`, owner: principal },
+  })))[0].space as string;
+  const scoped = { ...admin, 'X-Ordo-Space': tenant };
+  const server = createServer((_req, res) => { res.setHeader('Content-Type', 'text/html'); res.end('<!doctype html><title>Tenant embed</title>'); });
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('No embed page port');
+  const origin = `http://127.0.0.1:${address.port}`;
+  const page = await context.newPage();
+  const read = (door: string, space = tenant) => page.evaluate(async ({ door, space, token }) => {
+    try {
+      const response = await fetch(`${door}/op/campaignList`, {
+        headers: { Authorization: `Bearer ${token}`, 'X-Ordo-Space': space }, credentials: 'omit',
+      });
+      return response.status;
+    } catch (error) {
+      if (error instanceof TypeError) return 'cors-blocked';
+      throw error;
+    }
+  }, { door, space, token: saved.token });
+  try {
+    await page.goto(origin);
+    for (const door of [stack().door, stack().doorB]) expect(await read(door)).toBe('cors-blocked');
+    await rows(await request.post(`${stack().door}/op/std.space.setOrigins`, { headers: scoped, data: { origins: origin } }));
+    for (const door of [stack().door, stack().doorB]) {
+      await expect.poll(() => read(door), { timeout: 20_000 }).toBe(200);
+      expect(await read(door, 'system')).toBe('cors-blocked');
+    }
+    await refused(await request.post(`${stack().door}/op/std.space.setOrigins`, {
+      headers: scoped, data: { origins: '*' },
+    }), 400, 'tenant_refused');
+    expect(await read(stack().door)).toBe(200);
+    await rows(await request.post(`${stack().doorB}/op/std.space.setOrigins`, { headers: scoped, data: { origins: '' } }));
+    for (const door of [stack().door, stack().doorB]) {
+      await expect.poll(() => read(door), { timeout: 20_000 }).toBe('cors-blocked');
+      await rows(await request.get(`${door}/op/campaignList`, { headers: scoped }));
+    }
+  } finally {
+    await page.close();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    await rows(await request.delete(`${stack().door}/op/std.space.delete`, { headers: scoped, params: { confirm: tenant } }));
   }
 });

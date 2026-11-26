@@ -264,7 +264,11 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: lcov-notes
-          path: coverage-out/lcov-notes.info
+          path: |
+            coverage-out/lcov-notes.info
+            coverage-out/llvm-notes.json
+            coverage-out/provenance-notes.json
+            coverage-out/toolchain-notes.txt
           if-no-files-found: error
       # The release-to-release case: the stack runs the previous Ordo
       # release (built from its tag, no secret, no registry), then swaps this

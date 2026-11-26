@@ -24,6 +24,21 @@ case "${1:-}" in
     done < "$state/host-pids"
     mkdir -p coverage-out
     cargo llvm-cov report --lcov --output-path "coverage-out/lcov-$suite.info"
+    # Preserve LLVM's full result, including regions and any branch data the
+    # pinned toolchain emits. No branch percentage is inferred from line hits.
+    cargo llvm-cov report --json --output-path "coverage-out/llvm-$suite.json"
+    rustc -vV > "coverage-out/toolchain-$suite.txt"
+    node --input-type=module - "$suite" <<'JS'
+import { writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+const suite = process.argv[2];
+writeFileSync(`coverage-out/provenance-${suite}.json`, JSON.stringify({
+  version: 1, suite, phase: 'mixed-setup-and-application',
+  sourceRevision: execFileSync('git', ['rev-parse', 'HEAD'], {encoding: 'utf8'}).trim(),
+  run: process.env.GITHUB_RUN_ID ?? null, attempt: process.env.GITHUB_RUN_ATTEMPT ?? null,
+  branchInstrumentation: 'not-enabled', releaseAcceptance: 'see-journey-results',
+}, null, 2) + '\n');
+JS
     ;;
   *) echo 'Usage: e2e-coverage.sh env | report SUITE' >&2; exit 1 ;;
 esac

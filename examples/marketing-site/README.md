@@ -209,3 +209,31 @@ Run `.github/workflows/examples-e2e.yml` with `coverage=true` to collect Rust
 lines executed by this application. The result is measured coverage, not a
 promise that a larger feature list reaches 100%. Compare reports built from
 the same Rust revision before attributing a percentage change to these flows.
+
+### Lifecycle and real-console journeys
+
+The Workspace selector opens an active tenant's studio. Scheduled reminders
+run in tenant workspaces; the deployment's `system` space is excluded from the
+routine scheduler. Data can prepare an export or import a bundle that an
+operator has staged under the tenant's import directory. This is not a browser
+bundle upload or download transport.
+
+The suite starts a real console on port 5392 and a real supervisor on 5394.
+The supervisor owns a third real host on 5393. The console links to host A;
+its Runtime page restarts only the third host. The journey checks persisted
+campaign data after that restart. Local console setup, deployment step-up and
+recovery use actual WebAuthn ceremonies and recovery codes.
+
+CI builds `ordo-console` and `ordo-supervisor` alongside the host and CLI, and
+installs `clients/ordo-console-web` before running the suite. Ports can be
+changed with `E2E_REAL_CONSOLE_PORT`, `E2E_RUNTIME_PORT` and
+`E2E_SUPERVISOR_PORT`. The console has its own disposable database.
+
+Additional journeys cover tenant pause/resume/deletion, live origin changes,
+secret replacement, operational reads, cookie replay, portability and 257-row
+browser results. See `coverage/web-outcomes.md` for validation status. New tests
+are not marked passing merely because they compile.
+
+Team also offers a confirmed workspace leave. The program permits members to
+leave; the platform still refuses the last owner. A leaving member loses
+access while their colleagues keep the shared records.

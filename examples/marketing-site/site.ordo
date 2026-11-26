@@ -14,6 +14,9 @@
 
 domain marketing @ 0.3.0
 
+# Colleagues can leave; the platform still protects the last owner.
+release member open
+
 entity products {
   slug:        text unique public
   name:        text public

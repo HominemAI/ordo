@@ -210,13 +210,19 @@ jobs:
           PUBLIC_ONLY: ${{ inputs.public_only }}
         run: |
           bash scripts/e2e-coverage.sh report marketing-site
-          if [ "$PUBLIC_ONLY" = true ]; then mv coverage-out/lcov-marketing-site.info coverage-out/lcov-marketing-public.info; fi
+          if [ "$PUBLIC_ONLY" = true ]; then
+            for file in coverage-out/*marketing-site.*; do mv "$file" "${file/marketing-site/marketing-public}"; done
+          fi
       - name: Upload example coverage
         if: ${{ always() && inputs.coverage }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: lcov-marketing-${{ inputs.public_only && 'public' || 'site' }}
-          path: coverage-out/lcov-marketing-${{ inputs.public_only && 'public' || 'site' }}.info
+          path: |
+            coverage-out/lcov-marketing-${{ inputs.public_only && 'public' || 'site' }}.info
+            coverage-out/llvm-marketing-${{ inputs.public_only && 'public' || 'site' }}.json
+            coverage-out/provenance-marketing-${{ inputs.public_only && 'public' || 'site' }}.json
+            coverage-out/toolchain-marketing-${{ inputs.public_only && 'public' || 'site' }}.txt
           if-no-files-found: error
 
       - name: Upload journey outcomes, traces and stack logs
@@ -393,7 +399,11 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: lcov-teamspace
-          path: coverage-out/lcov-teamspace.info
+          path: |
+            coverage-out/lcov-teamspace.info
+            coverage-out/llvm-teamspace.json
+            coverage-out/provenance-teamspace.json
+            coverage-out/toolchain-teamspace.txt
           if-no-files-found: error
 
       - name: Upload the traces and stack logs

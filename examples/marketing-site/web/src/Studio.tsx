@@ -943,11 +943,13 @@ function Team(ctx: Context) {
   const [error, setError] = useState('');
   const [ticket, setTicket] = useState('');
   const [busy, setBusy] = useState(false);
+  const [leaving, setLeaving] = useState(false);
   async function act(name: string, params: Params) {
     setBusy(true);
     setError('');
     try {
       const r = await commit(ctx.client, ctx.session, name, params);
+      if (name === 'std.space.leave') { location.assign('/studio'); return; }
       if (name === 'std.space.invite') setTicket(text(r.rows[0]?.['ticket']));
       people.refetch();
       invitations.refetch();
@@ -962,6 +964,15 @@ function Team(ctx: Context) {
       <h2>Team access</h2>
       <p>Owners manage roles and invitations. Sensitive changes may ask for a fresh passkey touch.</p>
       {error && <p role="alert">{error}</p>}
+      {ctx.session.space !== 'system' && (
+        <section aria-label="Leave workspace">
+          {!leaving ? <button type="button" onClick={() => setLeaving(true)}>Leave workspace</button> : <>
+            <p>Leave this workspace? Your access ends. Shared records remain for your colleagues.</p>
+            <button type="button" disabled={busy} onClick={() => void act('std.space.leave', {})}>Confirm leave</button>
+            <button type="button" disabled={busy} onClick={() => setLeaving(false)}>Stay in workspace</button>
+          </>}
+        </section>
+      )}
       <QueryStatus {...people} />
       <Table
         title="Studio members"

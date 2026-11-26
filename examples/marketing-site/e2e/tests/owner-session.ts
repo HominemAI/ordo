@@ -13,7 +13,7 @@ export const test = base.extend<{ ownerPage: Page }>({
     }
   },
 });
-export async function signIn(page: Page) {
+export async function signIn(page: Page, options: { state?: string; url?: string } = {}) {
   const cdp = await page.context().newCDPSession(page);
   await cdp.send('WebAuthn.enable');
   const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', {
@@ -26,11 +26,11 @@ export async function signIn(page: Page) {
       automaticPresenceSimulation: true,
     },
   });
-  for (const credential of JSON.parse(readFileSync(`${state}/browser-owner-credentials.json`, 'utf8'))) {
+  for (const credential of JSON.parse(readFileSync(`${options.state ?? state}/browser-owner-credentials.json`, 'utf8'))) {
     await cdp.send('WebAuthn.addCredential', { authenticatorId, credential });
   }
   devices.set(page, { cdp, authenticatorId });
-  await page.goto('/studio');
+  await page.goto(`${options.url ?? ''}/studio`);
   await page.getByRole('button', { name: 'Sign in with a passkey' }).click();
   await expect(page.getByRole('heading', { name: 'Enquiry inbox' })).toBeVisible();
 }

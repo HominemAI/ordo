@@ -53,6 +53,25 @@ unset ORDO_CONSOLE_SUPERVISOR_SOCKET ORDO_IDENTITY_URL
 export ORDO_HOST_ADDR="127.0.0.1:${E2E_RUNTIME_PORT:-5393}" ORDO_REPLICA_ID=marketing-console
 export ORDO_SUPERVISOR_HOST_BIN="${ORDO_HOST_BIN:-$repo/target/debug/ordo-host}"
 export ORDO_SUPERVISOR_CONSOLE_BIN="$console_bin"
+# The supervisor intentionally clears unregistered environment variables.
+# Coverage-only launchers restore the LLVM destination and record every real
+# child PID, including restarts. They exec the production binary unchanged.
+if [ -n "${LLVM_PROFILE_FILE:-}" ]; then
+  python3 - "$state" "$ORDO_SUPERVISOR_HOST_BIN" "$ORDO_SUPERVISOR_CONSOLE_BIN" "$LLVM_PROFILE_FILE" <<'PYWRAP'
+import os, shlex, sys
+state, host, console, profile = sys.argv[1:]
+for kind, binary in [('host', host), ('console', console)]:
+    path = os.path.join(state, f'profile-{kind}')
+    with open(path, 'w') as out:
+        out.write('#!/bin/sh\n')
+        out.write(f'export LLVM_PROFILE_FILE={shlex.quote(profile)}\n')
+        out.write(f'printf "%s\\n" "$$" >> {shlex.quote(os.path.join(state, "host-pids"))}\n')
+        out.write(f'exec {shlex.quote(binary)} "$@"\n')
+    os.chmod(path, 0o700)
+PYWRAP
+  export ORDO_SUPERVISOR_HOST_BIN="$state/profile-host"
+  export ORDO_SUPERVISOR_CONSOLE_BIN="$state/profile-console"
+fi
 export ORDO_SUPERVISOR_STATE_DIR="$state/supervisor" ORDO_SUPERVISOR_RUN_DIR="$state/run"
 export ORDO_SUPERVISOR_LISTEN="127.0.0.1:${E2E_SUPERVISOR_PORT:-5394}"
 export ORDO_SUPERVISOR_GRACE_SECS=10 ORDO_SUPERVISOR_READY_SECS=120

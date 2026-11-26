@@ -47,6 +47,27 @@ test('an owner creates a tenant, pauses it, preserves data and resumes both repl
       await refused(await request.post(`${doors[0]}/op/std.space.leave`, { headers: scoped, data: {} }), 400, 'tenant_refused');
       expect((await rows(await read(doors[0])))[0]).toMatchObject({ title });
     });
+    await test.step('a colleague leaves while the owner and acknowledged data remain', async () => {
+      const joined = await request.post(`${doors[0]}/auth/complete`, {
+        headers: { Origin: stack().page }, data: { method: 'guest', kind: 'new', display: `Leaving ${randomUUID()}` },
+      });
+      expect(joined.status()).toBe(200);
+      const token = (await joined.json()).token as string;
+      const colleague = Buffer.from(token.split('.')[0], 'base64url').toString().split('|')[1];
+      const member = (await rows(await request.post(`${doors[0]}/op/std.space.admit`, {
+        headers: scoped, data: { principal: colleague, role: 'viewer' },
+      })))[0].member;
+      const colleagueHeaders = { ...scoped, Authorization: `Bearer ${token}` };
+      const me = (door: string) => request.get(`${door}/op/me`, { headers: colleagueHeaders });
+      for (const door of doors) await expect.poll(async () => (await me(door)).status()).toBe(200);
+      const left = await rows(await request.post(`${doors[0]}/op/std.space.leave`, { headers: colleagueHeaders, data: {} }));
+      expect(left[0]).toMatchObject({ member, status: 'left' });
+      for (const door of doors) {
+        await expect.poll(async () => (await me(door)).status()).toBe(403);
+        await refused(await me(door), 403, 'access_denied');
+        expect((await rows(await read(door)))[0]).toMatchObject({ title });
+      }
+    });
     await rows(await request.post(`${doors[0]}/op/std.deployment.pauseTenant`, { headers, data: { tenant, note: 'billing' } }));
     for (const door of doors) {
       await expect.poll(async () => (await read(door)).status()).toBe(423);

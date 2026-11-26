@@ -22,6 +22,7 @@ export async function studioClient(session: Session): Promise<DescriptorClient> 
       'std.space.setRole',
       'std.space.suspend',
       'std.space.reinstate',
+      'std.space.leave',
     ),
   });
 }

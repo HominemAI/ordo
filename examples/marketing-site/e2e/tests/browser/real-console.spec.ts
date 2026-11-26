@@ -36,6 +36,7 @@ test('the real console sets up, links, rotates its key and manages a disposable 
     await page.getByRole('button', { name: 'Continue with a passkey' }).click();
     await expect(page.getByRole('heading', { name: 'You are the console owner' })).toBeVisible();
     await expect(page.getByRole('list', { name: 'Recovery codes' }).getByRole('listitem')).toHaveCount(10);
+    const recoveryCodes = await page.getByRole('list', { name: 'Recovery codes' }).getByRole('listitem').allInnerTexts();
     await page.getByLabel('I saved these codes').check();
     await page.getByRole('button', { name: 'Continue', exact: true }).click();
     await open('Connection');
@@ -99,6 +100,36 @@ test('the real console sets up, links, rotates its key and manages a disposable 
       await page.getByRole('button', { name: 'Link with your passkey' }).click();
       await expect(page.getByRole('status')).toContainText('Linked.');
     });
+    // Lose the console credential, recover through the actual page, and prove
+    // the old recovery set cannot open another session.
+    await page.getByRole('button', { name: 'Sign out', exact: true }).click();
+    const all = (await cdp.send('WebAuthn.getCredentials', { authenticatorId })).credentials;
+    for (const credential of all.filter(c => !deploymentIds.has(c.credentialId))) {
+      await cdp.send('WebAuthn.removeCredential', { authenticatorId, credentialId: credential.credentialId });
+    }
+    await page.getByRole('button', { name: /Use a recovery code/ }).click();
+    await page.getByLabel('Recovery code').fill(recoveryCodes[0]!);
+    await page.getByRole('button', { name: 'Use this code' }).click();
+    await expect(page.getByRole('heading', { name: 'Add a new passkey' })).toBeVisible();
+    await page.reload();
+    await expect(page.getByRole('heading', { name: 'Add a new passkey' })).toBeVisible();
+    await page.getByRole('button', { name: 'Add a passkey' }).click();
+    await expect(page.getByRole('heading', { name: 'Your new passkey is ready' })).toBeVisible();
+    const fresh = await page.getByRole('list', { name: 'Recovery codes' }).getByRole('listitem').allInnerTexts();
+    expect(fresh).toHaveLength(10);
+    expect(fresh.filter(code => recoveryCodes.includes(code))).toEqual([]);
+    await page.getByLabel('I saved these codes').check();
+    await page.getByRole('button', { name: 'Continue', exact: true }).click();
+    await page.getByRole('button', { name: 'Sign out', exact: true }).click();
+    await page.getByRole('button', { name: /Use a recovery code/ }).click();
+    for (const code of [recoveryCodes[0]!, recoveryCodes[1]!]) {
+      await page.getByLabel('Recovery code').fill(code);
+      await page.getByRole('button', { name: 'Use this code' }).click();
+      await expect(page.getByRole('alert')).toContainText('That code did not work');
+    }
+    await page.getByRole('button', { name: 'Back to sign in' }).click();
+    await page.getByRole('button', { name: 'Sign in with a passkey' }).click();
+    await expect(page.getByRole('button', { name: 'Sign out', exact: true })).toBeVisible();
   } finally {
     const all = (await cdp.send('WebAuthn.getCredentials', { authenticatorId })).credentials;
     writeFileSync(`${state}/browser-owner-credentials.json`, JSON.stringify(all.filter(c => deploymentIds.has(c.credentialId))), { mode: 0o600 });

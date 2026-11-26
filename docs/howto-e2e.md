@@ -528,3 +528,22 @@ restart. The browser tests use real passkey sign-in, live enquiries, campaign
 assets and reminders, editorial approval, and invitations. Test credentials
 are kept only under the ignored stack directory. The bootstrap origin is
 separate so Playwright cannot mistake early startup for a ready test stack.
+
+### Marketing lifecycle profile
+
+The marketing suite also runs the real console against its real host, with a
+real supervisor owning a third host. Build `ordo-host`, `ordo-cli`,
+`ordo-console` and `ordo-supervisor`, and run `npm ci` in
+`clients/ordo-console-web` before starting this profile. This is distinct from
+the console suite's stand-in door fixtures described above.
+
+The default ports are 5392 (console), 5393 (supervised host) and 5394
+(supervisor health). `console-stack.sh` reads the private host configuration
+written by `stack.sh`; neither configuration file is an uploaded artifact.
+Only the supervised fixture host is restarted by the Runtime journey.
+Coverage launchers exec the real child binaries and retain their process IDs
+across restarts so missing LLVM profiles fail reporting.
+
+The coverage artifacts now include raw LLVM JSON, toolchain details and source
+provenance. They remain setup-inclusive. See `coverage/web-outcomes.md` for the
+implemented journeys, executed evidence and outstanding outcomes.

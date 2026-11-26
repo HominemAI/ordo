@@ -5,9 +5,10 @@ import { mkdtemp, readFile, writeFile, rm, cp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test as base, expect, type APIRequestContext, type APIResponse, type TestInfo } from '@playwright/test';
-import { owner, rows, stack } from '../support.js';
+import { owner, rows, stack, state } from '../support.js';
 import { tableReads } from '../reads.js';
 import { withDeployment } from '../deployment.js';
+import { signIn } from '../owner-session.js';
 const exec = promisify(execFile);
 type Plans = { headers: Record<string, string>; add: () => Promise<{ name: string; id: string }> };
 const test = base.extend<{ plans: Plans }>({
@@ -116,11 +117,21 @@ test('a comment-only apply drops every cached answer as the plan requires', asyn
   await checkApply(request, testInfo, `${await readFile(stack().program, 'utf8')}\n# Cache deploy ${randomUUID()}\n`);
 });
 
-test('a new version drops every cached answer on both nodes', async ({ request }, testInfo) => {
+test('a new version drops every cached answer on both nodes', async ({ request, page }, testInfo) => {
   test.setTimeout(420_000);
   const source = await readFile(stack().program, 'utf8');
   expect(source).toContain('domain marketing @ 0.3.0');
-  await withDeployment(request, testInfo, s => checkApply(request, testInfo, source.replace('domain marketing @ 0.3.0', 'domain marketing @ 0.3.1'), s));
+  await withDeployment(request, testInfo, async s => {
+    // The default rolling strategy returns before activation. This journey
+    // deliberately selects the supported all-at-once policy before applying.
+    await signIn(page, { state: `${state}-deploy`, url: s.page });
+    const saved = await page.evaluate(() => JSON.parse(sessionStorage.getItem('lumen.studio')!));
+    await rows(await request.post(`${s.door}/op/std.deployment.setVersionSetting`, {
+      headers: { Origin: s.page, Authorization: `Bearer ${saved.token}`, 'X-Ordo-Space': 'system' },
+      data: { setting: 'rollout.strategy', value: 'all', reason: 'Validate cache invalidation on an acknowledged full deployment' },
+    }));
+    await checkApply(request, testInfo, source.replace('domain marketing @ 0.3.0', 'domain marketing @ 0.3.1'), s);
+  });
 });
 
 test('two members never share one cached answer', async ({ request }) => {

@@ -308,7 +308,13 @@ test('the CLI is approved with a passkey, the code reaches the loopback port, an
     // Exercise the machine HTTP protocol with an actual Ed25519 client key.
     const { publicKey, privateKey } = generateKeyPairSync('ed25519');
     const publicBytes = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64url');
-    const humanHeaders = { 'content-type': 'application/json', Authorization: `Bearer ${body.session}` };
+    const exchange = await fetch(`${stack().origin}/token`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session: body.session, aud: 'ordo-deployment:main' }),
+    });
+    expect(exchange.status).toBe(200);
+    const humanToken = (await exchange.json() as { token: string }).token;
+    const humanHeaders = { 'content-type': 'application/json', Authorization: `Bearer ${humanToken}` };
     const made = await fetch(`${stack().origin}/machine-keys`, {
       method: 'POST', headers: humanHeaders,
       body: JSON.stringify({ name: 'Release journey machine', publicKey: publicBytes, grants: ['deployment'], mints: [] }),
@@ -342,6 +348,7 @@ test('the CLI is approved with a passkey, the code reaches the loopback port, an
       body: JSON.stringify({ name: 'Unapproved child', publicKey: publicBytes, grants: ['deployment'] }),
     });
     expect(elevated.status).toBe(403);
+    expect((await elevated.json() as { error: string }).error).toBe('mint_refused');
     const ended = await fetch(`${stack().origin}/machine-keys/${encodeURIComponent(machine.id)}/end`, { method: 'POST', headers: humanHeaders, body: '{}' });
     expect(ended.status).toBe(200);
     const after = await begin();

@@ -1297,6 +1297,9 @@ struct Gate {
     /// The principal presenting the token when it acts for `principal`
     /// under a delegation ([`AccessDecision::Allow`]). Never a guard input.
     agent: Option<String>,
+    /// Another deployment's call: the deployments it passed through, the
+    /// caller last ([`AccessChecker::peer_chain`]). Empty otherwise.
+    chain: Vec<String>,
     params: Map<String, Value>,
     refine_raw: Option<Value>,
     page_raw: Option<Value>,
@@ -1341,6 +1344,17 @@ impl Gate {
                 .0
                 .insert(AGENT_PARAM.into(), serde_json::Value::String(agent.clone()));
         }
+        if !self.chain.is_empty() {
+            bound.0.insert(
+                CHAIN_PARAM.into(),
+                serde_json::Value::Array(
+                    self.chain
+                        .iter()
+                        .map(|d| serde_json::Value::String(d.clone()))
+                        .collect(),
+                ),
+            );
+        }
     }
 
     /// Whose replay cache and page cursors this call uses: the principal,
@@ -1370,6 +1384,13 @@ fn delegated_key(principal: &str, agent: &str) -> String {
 /// executor, beside `$caller` (the delegator). Read only where a command
 /// group's actor is built; no guard or op body can name it.
 pub const AGENT_PARAM: &str = "$agent";
+
+/// The reserved key under which another deployment's call hands the
+/// executor its chain: the deployments the call passed through, oldest
+/// first, the caller last (step G5b). Every peer call the op makes passes
+/// it on, so a cycle of deployments is refused by name at once. Read only
+/// by the client to other deployments; no guard or op body can name it.
+pub const CHAIN_PARAM: &str = "$chain";
 
 /// Method enforcement → envelope split → space bind → access check.
 ///
@@ -1423,6 +1444,9 @@ fn gate(
         _ => bind_space(op, headers, envelope.space_raw)?,
     };
     let (principal, agent, checked_space) = check_access(state, op, &space, headers)?;
+    let chain = bearer(headers)
+        .map(|t| state.access.peer_chain(t))
+        .unwrap_or_default();
     // 17n M2: the quota gate, **after** access and never before — a quota
     // refusal handed to a caller with no membership in the space would
     // disclose that the space exists and is busy, which is exactly what
@@ -1441,6 +1465,7 @@ fn gate(
         checked_space,
         principal,
         agent,
+        chain,
         params: envelope.params,
         refine_raw: envelope.refine_raw,
         page_raw: envelope.page_raw,

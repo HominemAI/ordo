@@ -21,6 +21,12 @@
 //! `peer_unavailable`; a refusal, or a setting to fix, is `peer_refused`,
 //! with the holder's own words.
 //!
+//! Every call passes on the chain of the call being served (step G5b):
+//! the service writes it into the token with this deployment last, and a
+//! holder already on it refuses the call by name at once. Without it 2
+//! deployments whose guards read each other would call each other until
+//! `ORDO_PEER_TIMEOUT_SECS`.
+//!
 //! Tokens are held for no longer than one fetch: nothing here outlives the
 //! call.
 
@@ -131,6 +137,7 @@ impl PeerFetch for DoorReads {
         &self,
         pool: &Pool,
         caller: Option<&str>,
+        chain: &[String],
         f: &Fetch,
     ) -> Result<Vec<Map<String, Value>>, PeerReadFail> {
         let subject = match caller {
@@ -144,7 +151,7 @@ impl PeerFetch for DoorReads {
         let holder = self.client.holder(&f.peer).map_err(fail)?;
         let token = self
             .client
-            .token(&holder.handle, acting, &[])
+            .token(&holder.handle, acting, chain)
             .await
             .map_err(fail)?;
         let op = format!("std.{}.list", f.entity);

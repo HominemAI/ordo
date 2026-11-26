@@ -41,6 +41,7 @@ use ordo_commandlog::{
 };
 use ordo_plan::plan;
 use ordo_schema::{Entity, FieldTy};
+use ordo_sema::ir::{BCond, BExpr, From as QFrom, Query};
 use ordo_sema::{
     bind_as, create_write_query, fold_neg_lit, guard_filter_query, CreateGate, CreateVal,
 };
@@ -113,6 +114,16 @@ pub trait WriteDb {
     /// A connection that cannot tell answers `false`.
     fn refused_by_constraint(&self) -> bool {
         false
+    }
+
+    /// Serve the rows of each peer `q` reads through the peer's door
+    /// (`ordo_exec::peer_reads`, steps G5 and G5b), before it is planned:
+    /// a guard that reads one is decided on the holder's answer. Errors are
+    /// `class: message` (`peer_refused`, `peer_unavailable`). A connection
+    /// with no client to other deployments serves none, and the default
+    /// leaves `q` as it is.
+    fn serve_peers(&self, _q: &mut Query, _space: &ordo_plan::Space) -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -215,6 +226,10 @@ impl WriteDb for SpaceAudit<'_> {
 
     fn refused_by_constraint(&self) -> bool {
         self.inner.refused_by_constraint()
+    }
+
+    fn serve_peers(&self, q: &mut Query, space: &ordo_plan::Space) -> Result<(), String> {
+        self.inner.serve_peers(q, space)
     }
 }
 
@@ -2216,7 +2231,8 @@ impl Fixture {
                     .map_err(|er| format!("bind: {er}"))?
                 {
                     CreateGate::Exempt => {}
-                    CreateGate::Check(q) => {
+                    CreateGate::Check(mut q) => {
+                        db.serve_peers(&mut q, &self.plan_space())?;
                         let sql = plan(&q, &self.plan_space())
                             .map_err(|er| format!("plan: {er}"))?
                             .sql;
@@ -2887,7 +2903,7 @@ impl Fixture {
             steps: Vec::new(),
             span,
         };
-        let q = bind_as(
+        let mut q = bind_as(
             &self.schema,
             &self.registry,
             &pl,
@@ -2896,6 +2912,7 @@ impl Fixture {
             ordo_sema::Clock::CORPUS,
         )
         .map_err(|er| format!("bind: {er}"))?;
+        db.serve_peers(&mut q, &self.plan_space())?;
         let sel_sql = plan(&q, &self.plan_space())
             .map_err(|er| format!("plan: {er}"))?
             .sql;
@@ -2908,7 +2925,8 @@ impl Fixture {
                 .map_err(|er| format!("bind: {er}"))?
             {
                 None => selected.clone(),
-                Some(wq) => {
+                Some(mut wq) => {
+                    db.serve_peers(&mut wq, &self.plan_space())?;
                     let wsql = plan(&wq, &self.plan_space())
                         .map_err(|er| format!("plan: {er}"))?
                         .sql;
@@ -3959,9 +3977,20 @@ impl Fixture {
         {
             return Ok(ordo_plan::external_key_of(id, &r).is_some());
         }
-        let sql = match guard_filter_query(&self.schema, entity, write_verb, Some(caller))
+        let guard = guard_filter_query(&self.schema, entity, write_verb, Some(caller))
             .map_err(|er| format!("bind: {er}"))?
-        {
+            .map(|mut q| -> Result<Query, String> {
+                // A guard that reads a peer through its door asks the
+                // holder about this one row's refs only, so the row is
+                // pinned before the holder is asked (step G5b).
+                if reads_a_door_peer(&q) {
+                    pin_row(&mut q, id);
+                    db.serve_peers(&mut q, &self.plan_space())?;
+                }
+                Ok(q)
+            })
+            .transpose()?;
+        let sql = match guard {
             Some(q) => format!(
                 "SELECT 1 FROM ({}) v WHERE v.{} = {}",
                 plan(&q, &self.plan_space())
@@ -5435,6 +5464,39 @@ fn stmt_entity(stmt: &WriteStmt) -> Option<&str> {
     match stmt {
         WriteStmt::Set { entity, .. } | WriteStmt::Del { entity, .. } => Some(&entity.name),
     }
+}
+
+/// Does the program `q` was bound against read a peer through its door
+/// (step G5)? Only then is a guard pinned to one row before the holder is
+/// asked: every other plan stays as it was.
+fn reads_a_door_peer(q: &Query) -> bool {
+    q.externals
+        .as_ref()
+        .is_some_and(|m| m.values().any(|r| r.door.is_some()))
+}
+
+/// Pin a one-entity guard query to the row `id`, so the refs a probe finds
+/// are that row's alone.
+fn pin_row(q: &mut Query, id: &str) {
+    let QFrom::Table { alias, .. } = &q.from else {
+        return;
+    };
+    let span = Span::new(0, 0, 1, 1);
+    q.filters.push(BCond::Cmp {
+        op: ordo_syntax::CmpOp::Eq,
+        lhs: BExpr::Col {
+            alias: alias.clone(),
+            column: "id".into(),
+            ty: ScalarTy::Id,
+        },
+        rhs: BExpr::Lit {
+            value: Expr::StrLit {
+                value: id.to_string(),
+                span,
+            },
+            ty: ScalarTy::Id,
+        },
+    });
 }
 
 #[cfg(test)]

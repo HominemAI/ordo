@@ -1246,8 +1246,8 @@ impl Deployment {
     }
 
     /// The client serving peer reads through their doors, when set.
-    pub fn peer_reads(&self) -> Option<&dyn ordo_exec::peer_reads::PeerFetch> {
-        self.peer_reads.get().map(|f| &**f)
+    pub fn peer_reads(&self) -> Option<&Arc<dyn ordo_exec::peer_reads::PeerFetch>> {
+        self.peer_reads.get()
     }
 
     /// Boot on a gated version.

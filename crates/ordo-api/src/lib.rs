@@ -64,7 +64,7 @@ pub use refine::{RefineCond, RefineLimits, RefineOp, Refinement};
 pub use registry::{MapRegistry, RegistryHandle};
 pub use router::{
     function_routes, method_for, router, router_with_blobs, well_formed_space, ApiState,
-    AGENT_PARAM, FN_BODY_LIMIT, OP_BODY_LIMIT,
+    AGENT_PARAM, CHAIN_PARAM, FN_BODY_LIMIT, OP_BODY_LIMIT,
 };
 pub use spec::{
     AccessChecker, AccessDecision, BoundParams, Bounds, CallerKind, CostClass, DoorRefusal,

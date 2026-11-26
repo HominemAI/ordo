@@ -1043,6 +1043,16 @@ pub trait AccessChecker: Send + Sync {
         None
     }
 
+    /// Asked only after [`Self::check`] allowed the call: the deployments
+    /// another deployment's call has passed through, oldest first, the
+    /// caller last (the `chain` claim of a token the identity service
+    /// signed, step G3). Every peer call the op makes passes it on, so a
+    /// chain that comes back is refused by name at once (step G5b). Empty
+    /// for any other caller, which is the default.
+    fn peer_chain(&self, _token: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Asked only after [`Self::check`] allowed `principal` to call `op`:
     /// does the app developer require a verified email address for this
     /// op, and does this person lack one? The answer is the refusal's

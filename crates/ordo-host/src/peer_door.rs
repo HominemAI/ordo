@@ -588,6 +588,17 @@ impl PeerDoor {
         }
     }
 
+    /// The chain of a token the gate admitted: the deployments the call
+    /// passed through, oldest first, the consumer last. Every peer call the
+    /// op makes passes it on (step G5b), so a cycle comes back here, or to
+    /// any deployment on it, and is refused as a loop at once.
+    pub fn chain_of(&self, token: &str) -> Vec<String> {
+        match self.remembered(token, (self.now)()) {
+            Some(Admission::Caller { claims, .. }) => claims.chain,
+            _ => Vec::new(),
+        }
+    }
+
     /// The record's subject for a peer token, when the gate saw it.
     pub fn subject_of_token(&self, token: &str) -> Option<Subject> {
         match self.remembered(token, (self.now)())? {
